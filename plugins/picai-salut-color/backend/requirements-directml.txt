@@ -1,0 +1,3 @@
+--extra-index-url https://pypi.org/simple
+torch-directml
+-r requirements.txt

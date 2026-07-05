@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "id": "picai-nafnet-restore",
+  "name": "NAFNet Restore",
+  "version": "0.1.0",
+  "publisher": "local",
+  "homepage": "https://github.com/megvii-research/NAFNet",
+  "license": "MIT",
+  "platforms": ["windows-x64", "all"],
+  "compatibility": {
+    "minPicAiPicVersion": "0.2.4",
+    "pluginApi": "^1.0.0"
+  },
+  "permissions": {
+    "readSelectedFiles": true,
+    "writeOutputDir": true,
+    "writeSourceFiles": false,
+    "network": {
+      "runtime": false,
+      "setupDownloads": true,
+      "uploadSelectedFiles": false,
+      "uploadOutputs": false,
+      "allowedDomains": ["pypi.org", "files.pythonhosted.org", "download.pytorch.org", "repo.radeon.com"]
+    },
+    "launchChildProcesses": true
+  },
+  "runtimes": ["python", "local-http", "torch"],
+  "runtime": {
+    "kind": "python-pytorch",
+    "cudaApiCompatible": true,
+    "notes": "NAFNet uses PyTorch CUDA device APIs. ROCm PyTorch exposes AMD GPUs through torch.cuda, so ROCm may appear as cuda internally."
+  },
+  "hardware": {
+    "cpu": true,
+    "cuda": true,
+    "rocm": true,
+    "directml": false,
+    "minVramMb": 4096,
+    "recommendedVramMb": 8192
+  },
+  "entry": {
+    "kind": "local-http",
+    "baseUrl": "http://127.0.0.1:8012",
+    "defaultPort": 8012,
+    "startCommand": "start.bat",
+    "stopCommand": "stop.bat",
+    "health": {
+      "method": "GET",
+      "path": "/health",
+      "readyField": "ready"
+    },
+    "status": {
+      "method": "GET",
+      "path": "/status"
+    }
+  },
+  "install": {
+    "kind": "script",
+    "command": "install.bat",
+    "estimatedDiskMb": 12000,
+    "requiresAdmin": false
+  },
+  "installProfiles": [
+    {
+      "id": "windows-amd-rocm",
+      "backend": "rocm",
+      "label": "AMD ROCm",
+      "supportLevel": "derived",
+      "derivedFrom": "cuda-api",
+      "envDir": ".venv-rocm",
+      "requirements": "backend/requirements-rocm.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-rocm72-torch291",
+        "label": "Shared ROCm runtime",
+        "requirements": "backend/requirements-rocm.txt",
+        "notes": "Creates or reuses the shared ROCm PyTorch runtime. Local development may override Python and source paths through .local.env."
+      },
+      "runtimeBindings": [
+        {
+          "scope": "shared",
+          "kind": "python",
+          "id": "python312-rocm72-torch291",
+          "label": "Shared ROCm runtime",
+          "requirements": "backend/requirements-rocm.txt",
+          "notes": "Shared runtime used by packaged installs that need Python 3.12, ROCm 7.2, and torch 2.9.1."
+        }
+      ],
+      "notes": "ROCm PyTorch is CUDA API compatible for this plugin layer; smoke test is required before use."
+    },
+    {
+      "id": "windows-nvidia-cuda",
+      "backend": "cuda",
+      "label": "NVIDIA CUDA",
+      "supportLevel": "official",
+      "envDir": ".venv-cuda",
+      "requirements": "backend/requirements-cuda.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-cuda121-torch231",
+        "label": "Shared CUDA runtime",
+        "requirements": "backend/requirements-cuda.txt"
+      }
+    },
+    {
+      "id": "windows-cpu",
+      "backend": "cpu",
+      "label": "CPU",
+      "supportLevel": "fallback",
+      "envDir": ".venv-cpu",
+      "requirements": "backend/requirements-cpu.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-cpu-torch231",
+        "label": "Shared CPU runtime",
+        "requirements": "backend/requirements-cpu.txt"
+      }
+    }
+  ],
+  "smokeTest": {
+    "command": "python backend/smoke_test.py",
+    "capability": "denoise",
+    "timeoutMs": 120000
+  },
+  "models": [
+    {
+      "id": "nafnet-sidd",
+      "name": "NAFNet SIDD",
+      "required": false,
+      "path": "models/nafnet/experiments/pretrained_models/NAFNet-SIDD-width64.pth",
+      "purpose": "optional high-quality denoise when method=nafnet"
+    },
+    {
+      "id": "nafnet-gopro",
+      "name": "NAFNet GoPro",
+      "required": true,
+      "path": "models/nafnet/experiments/pretrained_models/NAFNet-GoPro-width64.pth",
+      "purpose": "deblur"
+    },
+    {
+      "id": "nafnet-reds",
+      "name": "NAFNet REDS",
+      "required": false,
+      "path": "models/nafnet/experiments/pretrained_models/NAFNet-REDS-width64.pth",
+      "purpose": "optional NAFNet JPEG artifact removal; OpenCV fallback is available"
+    }
+  ],
+  "contributes": {
+    "menus": [
+      {
+        "id": "picai-nafnet-restore.image.denoise",
+        "label": "Fast Denoise",
+        "capability": "denoise",
+        "contexts": ["image.selection.single"],
+        "placements": ["image.contextMenu", "image.toolbar"],
+        "icon": "adjustments",
+        "order": 120
+      },
+      {
+        "id": "picai-nafnet-restore.image.deblur",
+        "label": "NAFNet Deblur",
+        "capability": "deblur",
+        "contexts": ["image.selection.single"],
+        "placements": ["image.contextMenu", "image.toolbar"],
+        "icon": "adjustments",
+        "order": 121
+      },
+      {
+        "id": "picai-nafnet-restore.image.jpeg",
+        "label": "NAFNet JPEG Repair",
+        "capability": "jpeg-artifact-removal",
+        "contexts": ["image.selection.single"],
+        "placements": ["image.contextMenu", "image.toolbar"],
+        "icon": "adjustments",
+        "order": 122
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "denoise",
+      "kind": "image.restore.denoise",
+      "name": "Fast Denoise",
+      "version": "1.0",
+      "inputs": [
+        { "id": "source", "kind": "image", "required": true }
+      ],
+      "outputs": [
+        { "id": "result", "kind": "image", "required": true }
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "method": { "type": "string", "enum": ["auto", "nafnet", "opencv"], "default": "auto" },
+          "device": { "type": "string", "enum": ["auto", "cpu", "cuda", "rocm"], "default": "auto" },
+          "strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.55 },
+          "detail": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.65 },
+          "sharpen": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.15 },
+          "outputFormat": { "type": "string", "enum": ["png", "jpg"], "default": "png" }
+        }
+      },
+      "invoke": {
+        "method": "POST",
+        "path": "/invoke/denoise",
+        "contentType": "application/json"
+      }
+    },
+    {
+      "id": "deblur",
+      "kind": "image.restore.deblur",
+      "name": "Deblur",
+      "version": "1.0",
+      "inputs": [
+        { "id": "source", "kind": "image", "required": true }
+      ],
+      "outputs": [
+        { "id": "result", "kind": "image", "required": true }
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "method": { "type": "string", "enum": ["auto", "nafnet"], "default": "auto" },
+          "device": { "type": "string", "enum": ["auto", "cpu", "cuda", "rocm"], "default": "auto" },
+          "outputFormat": { "type": "string", "enum": ["png", "jpg"], "default": "png" }
+        }
+      },
+      "invoke": {
+        "method": "POST",
+        "path": "/invoke/deblur",
+        "contentType": "application/json"
+      }
+    },
+    {
+      "id": "jpeg-artifact-removal",
+      "kind": "image.restore.jpeg",
+      "name": "JPEG artifact removal",
+      "version": "1.0",
+      "inputs": [
+        { "id": "source", "kind": "image", "required": true }
+      ],
+      "outputs": [
+        { "id": "result", "kind": "image", "required": true }
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "method": { "type": "string", "enum": ["auto", "nafnet", "opencv"], "default": "auto" },
+          "device": { "type": "string", "enum": ["auto", "cpu", "cuda", "rocm"], "default": "auto" },
+          "strength": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.45 },
+          "detail": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.6 },
+          "outputFormat": { "type": "string", "enum": ["png", "jpg"], "default": "png" }
+        }
+      },
+      "invoke": {
+        "method": "POST",
+        "path": "/invoke/jpeg-artifact-removal",
+        "contentType": "application/json"
+      }
+    }
+  ]
+}
+

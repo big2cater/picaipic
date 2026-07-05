@@ -1,0 +1,8351 @@
+use crate::t_config;
+use crate::t_sandbox;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::TcpListener;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::AsyncBufReadExt;
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+use zip::ZipArchive;
+
+const MANIFEST_FILE_NAME: &str = "picaipic.plugin.json";
+const PLUGIN_REGISTRY_FILE_NAME: &str = "plugin-registry.json";
+const PLUGIN_API_MAJOR: i64 = 1;
+const PLUGIN_STARTUP_TIMEOUT_MS: u64 = 12_000;
+const PLUGIN_INVOKE_TIMEOUT_MS: u64 = 120_000;
+const PLUGIN_DIAGNOSTICS_TIMEOUT_MS: u64 = 4_000;
+const PLUGIN_SMOKE_TEST_TIMEOUT_MS: u64 = 120_000;
+const PLUGIN_TASK_POLL_INTERVAL_MS: u64 = 1_000;
+const PLUGIN_TASK_POLL_TIMEOUT_MS: u64 = 120_000;
+const PLUGIN_TASK_CANCEL_TIMEOUT_MS: u64 = 3_000;
+const PLUGIN_PROCESS_KILL_TIMEOUT_MS: u64 = 3_000;
+const PYTHON_RUNTIME_PROBE_TIMEOUT_MS: u64 = 15_000;
+const PLUGIN_LOG_TAIL_BYTES: u64 = 64 * 1024;
+const PYTHON_RUNTIME_DISCOVERY_LIMIT: usize = 80;
+const EXTERNAL_RUNTIME_PROBE_TTL_SECS: i64 = 24 * 60 * 60;
+const SHARED_RUNTIME_PROBE_TTL_SECS: i64 = 24 * 60 * 60;
+const PLUGIN_RUNTIME_PROBE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const PLUGIN_TASK_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+const PLUGIN_TASK_SUCCESS_TTL_SECS: u64 = 24 * 60 * 60;
+const PLUGIN_TASK_TMP_TTL_SECS: u64 = 15 * 60;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+enum SetupCommandOutcome {
+    Completed,
+    Cancelled,
+}
+
+#[derive(Default)]
+pub struct AiPluginRuntimeState {
+    processes: Mutex<HashMap<String, RunningPlugin>>,
+}
+
+struct RunningPlugin {
+    child: Child,
+    port: u16,
+    base_url: String,
+    start_signature: Option<String>,
+    auth_token: String,
+    /// Sandbox handle whose Drop revokes the deny-ACEs applied before spawn.
+    /// `None` on non-Windows or when the sandbox is disabled. The field is
+    /// never read — its sole purpose is to tie ACL revocation to the
+    /// RunningPlugin's lifetime via Drop.
+    #[allow(dead_code)]
+    sandbox: Option<t_sandbox::SandboxHandle>,
+}
+
+impl AiPluginRuntimeState {
+    pub fn new() -> Self {
+        Self {
+            processes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn stop_all(&self) {
+        let mut plugin_ids: HashSet<String> = {
+            let processes = self.processes.lock().await;
+            processes.keys().cloned().collect()
+        };
+
+        if let Ok(manifest_paths) = discover_manifest_paths() {
+            for manifest_path in manifest_paths {
+                if let Ok(manifest) = read_manifest(&manifest_path) {
+                    if !manifest.id.trim().is_empty() {
+                        plugin_ids.insert(manifest.id);
+                    }
+                }
+            }
+        }
+
+        for plugin_id in plugin_ids {
+            let _ = stop_ai_plugin_runtime(plugin_id, self).await;
+        }
+    }
+}
+
+/// Tracks setup job cancellation requests so a running setup command can be
+/// killed cooperatively.
+#[derive(Default)]
+pub struct SetupCancellationState {
+    cancellations: Mutex<HashMap<String, bool>>,
+}
+
+impl SetupCancellationState {
+    pub fn new() -> Self {
+        Self {
+            cancellations: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn request_cancel(&self, job_id: &str) {
+        self.cancellations
+            .lock()
+            .await
+            .insert(job_id.to_string(), true);
+    }
+
+    pub async fn is_cancelled(&self, job_id: &str) -> bool {
+        self.cancellations
+            .lock()
+            .await
+            .get(job_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub async fn clear(&self, job_id: &str) {
+        self.cancellations.lock().await.remove(job_id);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginRegistry {
+    #[serde(default)]
+    pub registered_paths: Vec<String>,
+    #[serde(default)]
+    pub permission_grants: HashMap<String, AiPluginPermissionGrant>,
+    #[serde(default)]
+    pub profile_states: HashMap<String, AiPluginProfileState>,
+    #[serde(default)]
+    pub setup_jobs: HashMap<String, AiPluginSetupJob>,
+    #[serde(default)]
+    pub runtime_probe_states: HashMap<String, AiPluginRuntimeProbeState>,
+    #[serde(default)]
+    pub task_states: HashMap<String, AiPluginTaskState>,
+    #[serde(default)]
+    pub trusted_publishers: HashMap<String, AiPluginTrustedPublisher>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginProfileState {
+    pub plugin_id: String,
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    pub status: String,
+    pub verified: bool,
+    pub updated_at: String,
+    #[serde(default)]
+    pub setup_attempted: bool,
+    #[serde(default)]
+    pub setup_job_id: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginSetupJob {
+    pub id: String,
+    pub plugin_id: String,
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub progress: u8,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub log: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginRuntimeProbeState {
+    pub plugin_id: String,
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    pub status: String,
+    pub available: bool,
+    pub probed_at: String,
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default)]
+    pub stale_reason: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+    #[serde(default)]
+    pub fingerprint: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginTaskState {
+    pub plugin_id: String,
+    pub capability_id: String,
+    pub task_id: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub task_dir: String,
+    pub output_dir: String,
+    #[serde(default)]
+    pub result_policy: Option<String>,
+    #[serde(default)]
+    pub adopted: bool,
+    #[serde(default)]
+    pub outputs: Vec<Value>,
+    #[serde(default)]
+    pub progress: Option<u8>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_domain: Option<String>,
+    #[serde(default)]
+    pub error_details: Option<Value>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub request_snapshot: Option<AiPluginInvokeRequestSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPermissionGrant {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub runtime_network: bool,
+    #[serde(default)]
+    pub setup_downloads: bool,
+    #[serde(default)]
+    pub upload_selected_files: bool,
+    #[serde(default)]
+    pub upload_outputs: bool,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginSetupPreview {
+    pub plugin_id: String,
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    pub command: String,
+    pub command_path: String,
+    pub working_dir: String,
+    pub env_dir: Option<String>,
+    pub env_path: Option<String>,
+    pub requirements: Option<String>,
+    pub requirements_path: Option<String>,
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+    pub environment: HashMap<String, String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginManifest {
+    #[serde(default)]
+    pub schema_version: i64,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub runtimes: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<PluginRuntime>,
+    #[serde(default)]
+    pub compatibility: Option<PluginCompatibility>,
+    #[serde(default)]
+    pub entry: Option<PluginEntry>,
+    #[serde(default)]
+    pub install: Option<PluginInstall>,
+    #[serde(default)]
+    pub install_profiles: Vec<PluginInstallProfile>,
+    #[serde(default)]
+    pub smoke_test: Option<PluginSmokeTest>,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    pub contributes: Option<PluginContributes>,
+    #[serde(default)]
+    pub permissions: Option<Value>,
+    #[serde(default)]
+    pub hardware: Option<Value>,
+    #[serde(default)]
+    pub models: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginNetworkPermissionsSummary {
+    #[serde(default)]
+    pub runtime: bool,
+    #[serde(default)]
+    pub setup_downloads: bool,
+    #[serde(default)]
+    pub upload_selected_files: bool,
+    #[serde(default)]
+    pub upload_outputs: bool,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPermissionsSummary {
+    #[serde(default)]
+    pub read_selected_files: bool,
+    #[serde(default)]
+    pub write_output_dir: bool,
+    #[serde(default)]
+    pub write_source_files: bool,
+    #[serde(default)]
+    pub launch_child_processes: bool,
+    pub network: AiPluginNetworkPermissionsSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCompatibility {
+    #[serde(default)]
+    pub min_pic_ai_pic_version: Option<String>,
+    #[serde(default)]
+    pub max_pic_ai_pic_version: Option<String>,
+    #[serde(default)]
+    pub plugin_api: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEntry {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub start_command: Option<String>,
+    #[serde(default)]
+    pub stop_command: Option<String>,
+    #[serde(default)]
+    pub default_port: Option<u16>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub health: Option<PluginHttpEndpoint>,
+    #[serde(default)]
+    pub status: Option<PluginHttpEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstall {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub estimated_disk_mb: Option<u64>,
+    #[serde(default)]
+    pub requires_admin: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntime {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub cuda_api_compatible: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeBinding {
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub requirements: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub support_level: Option<String>,
+    #[serde(default)]
+    pub derived_from: Option<String>,
+    #[serde(default)]
+    pub env_dir: Option<String>,
+    #[serde(default)]
+    pub requirements: Option<String>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+    #[serde(default)]
+    pub runtime_bindings: Vec<PluginRuntimeBinding>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSmokeTest {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHttpEndpoint {
+    #[serde(default = "default_get_method")]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub ready_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapability {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub inputs: Vec<Value>,
+    #[serde(default)]
+    pub outputs: Vec<Value>,
+    #[serde(default)]
+    pub invoke: Option<Value>,
+    #[serde(default)]
+    pub parameters: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributes {
+    #[serde(default)]
+    pub menus: Vec<PluginMenuContribution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMenuContribution {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub capability: String,
+    #[serde(default)]
+    pub contexts: Vec<String>,
+    #[serde(default)]
+    pub placements: Vec<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginValidationReport {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub publisher: Option<String>,
+    pub path: String,
+    pub manifest_path: String,
+    pub platform_supported: bool,
+    pub validation: PluginValidationReport,
+    pub permissions: AiPluginPermissionsSummary,
+    pub permission_grant: Option<AiPluginPermissionGrant>,
+    pub runtimes: Vec<String>,
+    pub runtime: Option<PluginRuntimeSummary>,
+    pub entry: Option<PluginEntrySummary>,
+    pub install: Option<PluginInstallSummary>,
+    pub storage: AiPluginStorageSummary,
+    pub install_profiles: Vec<PluginInstallProfileSummary>,
+    pub smoke_test: Option<PluginSmokeTestSummary>,
+    pub capabilities: Vec<PluginCapabilitySummary>,
+    pub contributes: PluginContributesSummary,
+    pub task_states: Vec<AiPluginTaskState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginStorageSummary {
+    pub store_dir: String,
+    pub code_dir: String,
+    pub data_dir: String,
+    pub model_dir: String,
+    pub model_dirs: Vec<String>,
+    pub log_dir: String,
+    pub config_path: String,
+    pub runtime_dir: String,
+    pub runtime_dirs: Vec<String>,
+    pub cache_dir: String,
+    pub output_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginStoreInfo {
+    pub path: String,
+    pub configured_path: Option<String>,
+    pub default_path: String,
+    pub env_override: Option<String>,
+    pub using_custom: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeSummary {
+    pub kind: String,
+    pub cuda_api_compatible: bool,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEntrySummary {
+    pub kind: String,
+    pub base_url: Option<String>,
+    pub start_command: Option<String>,
+    pub status_path: Option<String>,
+    pub health_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallSummary {
+    pub kind: String,
+    pub command: Option<String>,
+    pub estimated_disk_mb: Option<u64>,
+    pub requires_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallProfileSummary {
+    pub id: String,
+    pub backend: String,
+    pub label: Option<String>,
+    pub support_level: String,
+    pub derived_from: Option<String>,
+    pub env_dir: Option<String>,
+    pub requirements: Option<String>,
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+    pub runtime_bindings: Vec<PluginRuntimeBinding>,
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub resolved_runtime_dir: Option<String>,
+    pub state: Option<AiPluginProfileState>,
+    pub setup_job: Option<AiPluginSetupJob>,
+    pub runtime_probe_state: Option<AiPluginRuntimeProbeState>,
+    #[serde(default)]
+    pub runtime_probe_states: Vec<AiPluginRuntimeProbeState>,
+    #[serde(default)]
+    pub runtime_conflicts: Vec<RuntimeConflict>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSmokeTestSummary {
+    pub command: Option<String>,
+    pub capability: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilitySummary {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub inputs: Vec<Value>,
+    pub outputs: Vec<Value>,
+    pub parameters: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginContributesSummary {
+    pub menus: Vec<PluginMenuContributionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMenuContributionSummary {
+    pub id: String,
+    pub label: String,
+    pub capability: String,
+    pub contexts: Vec<String>,
+    pub placements: Vec<String>,
+    pub icon: Option<String>,
+    pub order: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginManifestValidationResult {
+    pub manifest_path: String,
+    pub manifest: Option<AiPluginManifest>,
+    pub validation: PluginValidationReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPackageManifest {
+    #[serde(default)]
+    pub schema_version: i64,
+    #[serde(default)]
+    pub package_kind: String,
+    #[serde(default)]
+    pub plugin_id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub files: Vec<AiPluginPackageFile>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<AiPluginPackageSignature>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPackageSignature {
+    #[serde(default)]
+    pub algorithm: String,
+    #[serde(default)]
+    pub public_key: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginTrustedPublisher {
+    pub publisher: String,
+    pub public_key: String,
+    pub trusted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPackageFile {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPackageInstallResult {
+    pub plugin_id: String,
+    pub version: String,
+    pub installed_path: String,
+    pub registered_paths: Vec<String>,
+    pub package_warnings: Vec<String>,
+    pub validation: PluginValidationReport,
+    pub storage: AiPluginStorageSummary,
+    pub model_files: Vec<AiPluginModelFileSummary>,
+    #[serde(default)]
+    pub signature_verified: bool,
+    #[serde(default)]
+    pub publisher: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginModelFileSummary {
+    pub id: String,
+    pub name: String,
+    pub required: bool,
+    pub path: String,
+    pub exists: bool,
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginUninstallResult {
+    pub plugin_id: String,
+    pub removed_path: String,
+    pub registered_paths: Vec<String>,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub removed_extra_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginStatus {
+    pub plugin_id: String,
+    pub reachable: bool,
+    pub managed: bool,
+    pub url: Option<String>,
+    pub status: Option<Value>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_domain: Option<String>,
+    #[serde(default)]
+    pub error_details: Option<Value>,
+    #[serde(default)]
+    pub log_tail: Option<AiPluginLogFile>,
+    #[serde(default)]
+    pub advice: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginDiagnostics {
+    pub plugin_id: String,
+    pub reachable: bool,
+    pub url: Option<String>,
+    pub diagnostics: Option<Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginSmokeTestRequest {
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    #[serde(default)]
+    pub runtime_binding_id: Option<String>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginProfileSetupRequest {
+    pub profile_id: String,
+    pub backend: String,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub runtime_binding_id: Option<String>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+    #[serde(default)]
+    pub allow_command_execution: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginStartRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub runtime_binding_id: Option<String>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginSmokeTestResult {
+    pub plugin_id: String,
+    pub profile_id: String,
+    pub backend: String,
+    pub capability: String,
+    pub reachable: bool,
+    pub url: Option<String>,
+    pub passed: bool,
+    pub duration_ms: Option<u64>,
+    pub result: Option<Value>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub startup_status: Option<AiPluginStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginLogFile {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginLogs {
+    pub plugin_id: String,
+    pub files: Vec<AiPluginLogFile>,
+    pub error: Option<String>,
+}
+
+fn ai_plugin_status(
+    plugin_id: String,
+    reachable: bool,
+    managed: bool,
+    url: Option<String>,
+    status: Option<Value>,
+    error: Option<String>,
+) -> AiPluginStatus {
+    AiPluginStatus {
+        plugin_id,
+        reachable,
+        managed,
+        url,
+        status,
+        error,
+        error_code: None,
+        error_domain: None,
+        error_details: None,
+        log_tail: None,
+        advice: Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginHostEnvironment {
+    pub os: String,
+    pub arch: String,
+    pub platform: String,
+    pub gpus: Vec<AiPluginHostGpu>,
+    pub candidate_backends: Vec<String>,
+    pub python_runtimes: Vec<AiPluginPythonRuntime>,
+    pub probe_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginHostGpu {
+    pub name: String,
+    pub vendor: String,
+    pub backend_candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPythonRuntime {
+    pub id: String,
+    pub label: String,
+    pub scope: String,
+    pub python: String,
+    pub root: Option<String>,
+    pub source: String,
+    pub version: Option<String>,
+    pub available: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPythonRuntimeProbeRequest {
+    pub python: String,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub plugin_id: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub runtime_binding: Option<PluginRuntimeBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPythonRuntimeProbeResult {
+    pub python: String,
+    pub backend: Option<String>,
+    pub available: bool,
+    pub duration_ms: u128,
+    pub result: Option<Value>,
+    pub error: Option<String>,
+    pub state: Option<AiPluginRuntimeProbeState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginInvokeRequest {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub inputs: Value,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<Value>,
+    #[serde(default)]
+    pub result_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginInvokeRequestSnapshot {
+    pub inputs: Value,
+    pub parameters: Value,
+    pub runtime: Option<Value>,
+    pub result_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginInvokeResponse {
+    pub plugin_id: String,
+    pub capability_id: String,
+    pub task_id: String,
+    pub url: String,
+    pub result: Value,
+    pub task_state: Option<AiPluginTaskState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginTaskAdoptRequest {
+    pub task_id: String,
+    #[serde(default)]
+    pub delete_task_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginTaskStatusResponse {
+    pub plugin_id: String,
+    pub task_id: String,
+    pub state: AiPluginTaskState,
+    #[serde(default)]
+    pub plugin_status: Option<Value>,
+    #[serde(default)]
+    pub plugin_status_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginPermissionGrantRequest {
+    #[serde(default)]
+    pub runtime_network: bool,
+    #[serde(default)]
+    pub setup_downloads: bool,
+    #[serde(default)]
+    pub upload_selected_files: bool,
+    #[serde(default)]
+    pub upload_outputs: bool,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+fn default_get_method() -> String {
+    "GET".to_string()
+}
+
+fn registry_path() -> Result<PathBuf, String> {
+    let app_dir = t_config::get_app_data_dir()?;
+    fs::create_dir_all(&app_dir)
+        .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    Ok(app_dir.join(PLUGIN_REGISTRY_FILE_NAME))
+}
+
+fn plugin_home_dir() -> Result<PathBuf, String> {
+    let dir = plugin_store_dir()?.join("plugins");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create plugins directory: {}", e))?;
+    Ok(dir)
+}
+
+fn default_plugin_store_dir() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    let base_dir = std::env::current_dir()
+        .map_err(|e| format!("Failed to resolve current directory: {}", e))?;
+
+    #[cfg(not(debug_assertions))]
+    let base_dir = std::env::current_exe()
+        .map_err(|e| format!("Failed to resolve executable path: {}", e))?
+        .parent()
+        .map(PathBuf::from)
+        .ok_or_else(|| "Executable path has no parent directory".to_string())?;
+
+    Ok(base_dir.join("picaipic-local"))
+}
+
+fn resolve_plugin_store_dir() -> Result<PathBuf, String> {
+    if let Some(configured) = std::env::var_os("PICAIPIC_PLUGIN_STORE_DIR") {
+        return Ok(PathBuf::from(configured));
+    }
+
+    if let Some(configured) = t_config::get_plugin_store_dir_config()? {
+        let trimmed = configured.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    default_plugin_store_dir()
+}
+
+fn ensure_plugin_store_dir(dir: PathBuf) -> Result<PathBuf, String> {
+    fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "Failed to create plugin store directory '{}': {}. Move PicAiPic to a writable directory or set PICAIPIC_PLUGIN_STORE_DIR.",
+            dir.display(),
+            e
+        )
+    })?;
+    Ok(dir)
+}
+
+fn plugin_store_dir() -> Result<PathBuf, String> {
+    ensure_plugin_store_dir(resolve_plugin_store_dir()?)
+}
+
+fn plugin_store_info() -> Result<AiPluginStoreInfo, String> {
+    let default_dir = default_plugin_store_dir()?;
+    let configured_path = t_config::get_plugin_store_dir_config()?.and_then(|path| {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let env_override = std::env::var_os("PICAIPIC_PLUGIN_STORE_DIR")
+        .map(PathBuf::from)
+        .map(|path| normalize_path(&path));
+    let effective_dir = ensure_plugin_store_dir(resolve_plugin_store_dir()?)?;
+    let effective = normalize_path(&effective_dir);
+    let default_path = normalize_path(&default_dir);
+    let using_custom = env_override.is_some()
+        || configured_path
+            .as_ref()
+            .map(|path| normalize_path(Path::new(path)) != default_path)
+            .unwrap_or(false);
+
+    Ok(AiPluginStoreInfo {
+        path: effective,
+        configured_path,
+        default_path,
+        env_override,
+        using_custom,
+    })
+}
+
+#[tauri::command]
+pub fn get_ai_plugin_store_info() -> Result<AiPluginStoreInfo, String> {
+    plugin_store_info()
+}
+
+#[tauri::command]
+pub fn set_ai_plugin_store_dir(path: &str) -> Result<AiPluginStoreInfo, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Plugin store directory cannot be empty.".to_string());
+    }
+    let dir = ensure_plugin_store_dir(PathBuf::from(trimmed))?;
+    t_config::set_plugin_store_dir_config(Some(normalize_path(&dir)))?;
+    plugin_store_info()
+}
+
+#[tauri::command]
+pub fn reset_ai_plugin_store_dir() -> Result<AiPluginStoreInfo, String> {
+    t_config::set_plugin_store_dir_config(None)?;
+    plugin_store_info()
+}
+
+fn is_path_inside(path: &Path, root: &Path) -> bool {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    path.starts_with(root)
+}
+
+/// Quietly remove a directory if it exists. Does NOT create it (unlike the
+/// `plugin_data_dir` / `plugin_runtime_root` helpers which call
+/// `create_dir_all`). Returns the stringified path if the directory existed
+/// and was removed, or `None` otherwise. The `root` guard must be the plugin
+/// store root so we never delete outside it.
+fn remove_existing_dir(path: &Path, root: &Path) -> Option<String> {
+    if !path.exists() || !path.is_dir() {
+        return None;
+    }
+    if !is_path_inside(path, root) {
+        return None;
+    }
+    let display = path.to_string_lossy().to_string();
+    match fs::remove_dir_all(path) {
+        Ok(()) => Some(display),
+        Err(_) => None,
+    }
+}
+
+fn program_data_plugin_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("PROGRAMDATA").map(|p| PathBuf::from(p).join("PicAiPic").join("plugins"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+fn load_registry() -> Result<AiPluginRegistry, String> {
+    let path = registry_path()?;
+    if !path.exists() {
+        return Ok(AiPluginRegistry::default());
+    }
+
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read plugin registry: {}", e))?;
+    serde_json::from_str::<AiPluginRegistry>(content.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("Failed to parse plugin registry: {}", e))
+}
+
+fn save_registry(registry: &AiPluginRegistry) -> Result<(), String> {
+    let path = registry_path()?;
+    let content = serde_json::to_string_pretty(registry)
+        .map_err(|e| format!("Failed to serialize plugin registry: {}", e))?;
+    fs::write(path, content).map_err(|e| format!("Failed to write plugin registry: {}", e))
+}
+
+fn profile_state_key(plugin_id: &str, profile_id: &str) -> String {
+    format!("{}:{}", plugin_id, profile_id)
+}
+
+fn permission_grant_key(plugin_id: &str) -> String {
+    plugin_id.to_string()
+}
+
+fn plugin_task_state_key(plugin_id: &str, task_id: &str) -> String {
+    format!("{}:{}", plugin_id, task_id)
+}
+
+fn runtime_probe_key(
+    plugin_id: &str,
+    profile_id: &str,
+    backend: &str,
+    runtime_binding: Option<&PluginRuntimeBinding>,
+) -> String {
+    let runtime = runtime_binding
+        .and_then(|binding| binding.python.as_deref().or(binding.id.as_deref()))
+        .unwrap_or("runtime");
+    format!("{}:{}:{}:{}", plugin_id, profile_id, backend, runtime)
+}
+
+fn save_profile_state(state: AiPluginProfileState) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    registry.profile_states.insert(
+        profile_state_key(&state.plugin_id, &state.profile_id),
+        state,
+    );
+    save_registry(&registry)
+}
+
+fn save_runtime_probe_state(state: AiPluginRuntimeProbeState) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    registry.runtime_probe_states.insert(
+        runtime_probe_key(
+            &state.plugin_id,
+            &state.profile_id,
+            &state.backend,
+            state.runtime_binding.as_ref(),
+        ),
+        state,
+    );
+    save_registry(&registry)
+}
+
+fn clear_profile_runtime_probe_states(
+    plugin_id: &str,
+    profile_id: &str,
+    backend: &str,
+) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    let prefix = format!("{}:{}:{}:", plugin_id, profile_id, backend);
+    registry
+        .runtime_probe_states
+        .retain(|key, _state| !key.starts_with(&prefix));
+    save_registry(&registry)
+}
+
+fn save_setup_job(job: AiPluginSetupJob) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    registry.setup_jobs.insert(job.id.clone(), job);
+    save_registry(&registry)
+}
+
+fn save_task_state(state: AiPluginTaskState) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    registry.task_states.insert(
+        plugin_task_state_key(&state.plugin_id, &state.task_id),
+        state,
+    );
+    save_registry(&registry)
+}
+
+fn parse_bool_field(object: &serde_json::Map<String, Value>, key: &str) -> bool {
+    object.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn parse_string_array_field(object: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_plugin_permissions(permissions: Option<&Value>) -> AiPluginPermissionsSummary {
+    let Some(Value::Object(root)) = permissions else {
+        return AiPluginPermissionsSummary::default();
+    };
+
+    let mut summary = AiPluginPermissionsSummary {
+        read_selected_files: parse_bool_field(root, "readSelectedFiles"),
+        write_output_dir: parse_bool_field(root, "writeOutputDir"),
+        write_source_files: parse_bool_field(root, "writeSourceFiles"),
+        launch_child_processes: parse_bool_field(root, "launchChildProcesses"),
+        ..AiPluginPermissionsSummary::default()
+    };
+
+    match root.get("network") {
+        Some(Value::Bool(enabled)) => {
+            summary.network.runtime = *enabled;
+        }
+        Some(Value::Object(network)) => {
+            summary.network.runtime = parse_bool_field(network, "runtime");
+            summary.network.setup_downloads = parse_bool_field(network, "setupDownloads");
+            summary.network.upload_selected_files =
+                parse_bool_field(network, "uploadSelectedFiles");
+            summary.network.upload_outputs = parse_bool_field(network, "uploadOutputs");
+            summary.network.allowed_domains = parse_string_array_field(network, "allowedDomains");
+        }
+        _ => {}
+    }
+
+    summary
+}
+
+fn append_setup_log(plugin_id: &str, job: &AiPluginSetupJob) -> Result<PathBuf, String> {
+    let logs_dir = plugin_logs_dir(plugin_id)?;
+    fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create plugin logs directory: {}", e))?;
+    let path = logs_dir.join(format!("setup-{}.log", job.id));
+    let content = job.log.join("\n");
+    fs::write(&path, format!("{}\n", content))
+        .map_err(|e| format!("Failed to write setup log '{}': {}", path.display(), e))?;
+    Ok(path)
+}
+
+fn file_hash(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn file_mtime_ms(metadata: &fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+}
+
+fn runtime_binding_signature(runtime_binding: Option<&PluginRuntimeBinding>) -> Option<String> {
+    let binding = runtime_binding?;
+    let value = serde_json::to_vec(binding).ok()?;
+    Some(blake3::hash(&value).to_hex().to_string())
+}
+
+/// A single parsed line from a Python requirements file: a package name plus an
+/// optional PEP 440 version specifier such as `==1.26.4` or `>=2`.
+#[derive(Debug, Clone)]
+struct RequirementSpec {
+    package: String,
+    spec: String,
+}
+
+/// A detected mismatch between a requirements-declared version spec and the
+/// version actually installed in the probed runtime.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConflict {
+    pub package: String,
+    pub declared_spec: String,
+    pub installed_version: String,
+    pub available: bool,
+    pub kind: String,
+    pub message: String,
+}
+
+/// Map import names used by the probe script to canonical pip package names
+/// declared in requirements files, and vice versa. The probe reports
+/// `opencv-python` (it imports `cv2`), so the only frequent mismatch is
+/// callers passing `cv2`. We normalize everything to the pip name.
+fn normalize_package_name(name: &str) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "cv2" => "opencv-python".to_string(),
+        "pil" | "pillow" => "pillow".to_string(),
+        "skimage" => "scikit-image".to_string(),
+        "yaml" => "pyyaml".to_string(),
+        "torch_directml" => "torch-directml".to_string(),
+        _ => lower,
+    }
+}
+
+/// Parse a Python requirements file into a list of package + specifier pairs.
+/// Lines that are blank, comments (`#`), option flags (`-r`, `--index-url`,
+/// `--extra-index-url`, `-e`, `--editable`, etc.), or bare URLs are skipped.
+/// Lines like `numpy==1.26.4` become `RequirementSpec { package: "numpy",
+/// spec: "==1.26.4" }`. A bare version with no operator is treated as `==`.
+fn parse_requirements_file(content: &str) -> Vec<RequirementSpec> {
+    let mut specs = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Skip pip option lines and URL-only lines (e.g. ROCm direct wheels).
+        if line.starts_with('-')
+            || line.starts_with("--")
+            || line.starts_with("https://")
+            || line.starts_with("http://")
+            || line.starts_with("git+")
+            || line.starts_with("file:")
+        {
+            continue;
+        }
+        // Strip environment markers and extras like `pkg[extra]==1.0 ; python_version<"3"`.
+        let line = line.split_whitespace().next().unwrap_or(line);
+        let line = line.split(';').next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Split package name from version specifier at the first operator char.
+        let split_at =
+            line.find(|c: char| c == '=' || c == '<' || c == '>' || c == '~' || c == '!');
+        let (package, spec) = match split_at {
+            Some(pos) => (
+                line[..pos].trim().to_string(),
+                line[pos..].trim().to_string(),
+            ),
+            None => (line.to_string(), String::new()),
+        };
+        // Strip extras like `opencv-python[headless]` -> `opencv-python`.
+        let package = package.split('[').next().unwrap_or(&package).to_string();
+        if package.is_empty() {
+            continue;
+        }
+        specs.push(RequirementSpec {
+            package: normalize_package_name(&package),
+            spec,
+        });
+    }
+    specs
+}
+
+/// Parse a version string like `2.9.1+rocm7.2.1` into a vector of numeric
+/// components `[2, 9, 1]`. Local version segments after `+` are stripped.
+/// Non-numeric components are parsed as 0 so that `1.0rc1` does not crash.
+fn parse_version(v: &str) -> Vec<u64> {
+    let v = v.split('+').next().unwrap_or(v).trim();
+    let v = v.split('-').next().unwrap_or(v); // drop post/pre release dashes
+    v.split('.')
+        .map(|part| {
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse::<u64>().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Compare two version vectors lexicographically, padding the shorter one
+/// with zeros so `[2,9]` vs `[2,9,0]` compare equal.
+fn compare_versions(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        match av.cmp(&bv) {
+            std::cmp::Ordering::Equal => continue,
+            order => return order,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Check whether an installed version string satisfies a PEP 440 specifier.
+/// Supports `==`, `!=`, `>=`, `<=`, `>`, `<`, `~=` and bare versions (treated
+/// as `==`). Compound specs like `>=1.0,<2.0` are split on commas and all
+/// must hold. An empty spec means "any version is fine".
+fn spec_satisfied(spec: &str, installed: &str) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return true;
+    }
+    let installed_vec = parse_version(installed);
+    for clause in spec.split(',') {
+        let clause = clause.trim();
+        if clause.is_empty() {
+            continue;
+        }
+        let (op, version_str) = if let Some(rest) = clause.strip_prefix("==") {
+            ("==", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix("!=") {
+            ("!=", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix(">=") {
+            (">=", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix("<=") {
+            ("<=", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix("~=") {
+            ("~=", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix('>') {
+            (">", rest.trim())
+        } else if let Some(rest) = clause.strip_prefix('<') {
+            ("<", rest.trim())
+        } else {
+            // Bare version with no operator -> exact match.
+            ("==", clause)
+        };
+        let clause_vec = parse_version(version_str);
+        let cmp = compare_versions(&installed_vec, &clause_vec);
+        let satisfied = match op {
+            "==" => cmp == std::cmp::Ordering::Equal,
+            "!=" => cmp != std::cmp::Ordering::Equal,
+            ">=" => cmp != std::cmp::Ordering::Less,
+            "<=" => cmp != std::cmp::Ordering::Greater,
+            ">" => cmp == std::cmp::Ordering::Greater,
+            "<" => cmp == std::cmp::Ordering::Less,
+            "~=" => {
+                // Compatible release: ~=X.Y means >=X.Y,<X+1; ~=X.Y.Z means
+                // >=X.Y.Z,<X.Y+1. Requires at least two components.
+                if clause_vec.len() < 2 {
+                    cmp != std::cmp::Ordering::Less
+                } else {
+                    let mut upper = clause_vec.clone();
+                    // Zero out the last component then increment the
+                    // second-to-last.
+                    let bump_idx = upper.len() - 2;
+                    upper[bump_idx] += 1;
+                    for i in (bump_idx + 1)..upper.len() {
+                        upper[i] = 0;
+                    }
+                    cmp != std::cmp::Ordering::Less
+                        && compare_versions(&installed_vec, &upper) == std::cmp::Ordering::Less
+                }
+            }
+            _ => true,
+        };
+        if !satisfied {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compare a plugin's declared requirements against the versions reported by a
+/// probe result. `probe_result` is the JSON object emitted by
+/// `python_runtime_probe_script` (field `packages` maps pip name -> {available,
+/// version}). Returns a list of conflicts; `version_mismatch` and `missing`
+/// kinds are blocking, `unprobed` is informational.
+fn detect_runtime_conflicts(
+    requirements_path: &Path,
+    probe_result: &Value,
+) -> Vec<RuntimeConflict> {
+    let Ok(content) = fs::read_to_string(requirements_path) else {
+        return Vec::new();
+    };
+    let specs = parse_requirements_file(&content);
+    let packages = probe_result.get("packages").and_then(|p| p.as_object());
+    let mut conflicts = Vec::new();
+    for spec in specs {
+        let canonical = normalize_package_name(&spec.package);
+        let Some(packages) = packages else {
+            conflicts.push(RuntimeConflict {
+                package: canonical.clone(),
+                declared_spec: spec.spec.clone(),
+                installed_version: String::new(),
+                available: false,
+                kind: "unprobed".to_string(),
+                message: format!(
+                    "{} declared {} but probe did not report package versions",
+                    canonical, spec.spec
+                ),
+            });
+            continue;
+        };
+        let Some(info) = packages.get(&canonical) else {
+            // Package declared in requirements but not probed at all (e.g.
+            // NAFNet's timm/skimage). Informational, not blocking.
+            conflicts.push(RuntimeConflict {
+                package: canonical.clone(),
+                declared_spec: spec.spec.clone(),
+                installed_version: String::new(),
+                available: false,
+                kind: "unprobed".to_string(),
+                message: format!(
+                    "{} declared {} but probe did not inspect this package",
+                    canonical, spec.spec
+                ),
+            });
+            continue;
+        };
+        let available = info
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let installed_version = info
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !available {
+            conflicts.push(RuntimeConflict {
+                package: canonical.clone(),
+                declared_spec: spec.spec.clone(),
+                installed_version: String::new(),
+                available: false,
+                kind: "missing".to_string(),
+                message: format!(
+                    "{} declared {} but is not installed in the probed runtime",
+                    canonical, spec.spec
+                ),
+            });
+            continue;
+        }
+        if !spec_satisfied(&spec.spec, &installed_version) {
+            conflicts.push(RuntimeConflict {
+                package: canonical.clone(),
+                declared_spec: spec.spec.clone(),
+                installed_version: installed_version.clone(),
+                available: true,
+                kind: "version_mismatch".to_string(),
+                message: format!(
+                    "{} declared {} but installed {}",
+                    canonical, spec.spec, installed_version
+                ),
+            });
+        }
+    }
+    conflicts
+}
+
+fn runtime_root_from_python(python: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        python
+            .parent()
+            .and_then(|scripts| scripts.parent())
+            .map(PathBuf::from)
+    } else {
+        python
+            .parent()
+            .and_then(|bin| bin.parent())
+            .map(PathBuf::from)
+    }
+}
+
+fn runtime_probe_fingerprint(
+    plugin_root: &Path,
+    profile: &PluginInstallProfile,
+    runtime_binding: Option<&PluginRuntimeBinding>,
+) -> Value {
+    let python = runtime_binding
+        .and_then(|binding| binding.python.as_deref())
+        .filter(|value| !value.trim().is_empty());
+    let python_path = python.map(PathBuf::from);
+    let python_metadata = python_path
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok());
+    let runtime_root = runtime_binding
+        .and_then(|binding| binding.root.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| python_path.as_deref().and_then(runtime_root_from_python));
+    let pyvenv_cfg = runtime_root.as_ref().map(|root| root.join("pyvenv.cfg"));
+    let requirements =
+        profile_requirements(profile).map(|requirements| plugin_root.join(requirements));
+
+    serde_json::json!({
+        "pythonPath": python_path.as_ref().map(|path| normalize_path(path)),
+        "pythonExists": python_path.as_ref().map(|path| path.is_file()).unwrap_or(false),
+        "pythonExeSize": python_metadata.as_ref().map(|metadata| metadata.len()),
+        "pythonExeMtimeMs": python_metadata.as_ref().and_then(file_mtime_ms),
+        "runtimeRoot": runtime_root.as_ref().map(|path| normalize_path(path)),
+        "pyvenvCfgHash": pyvenv_cfg.as_ref().and_then(|path| file_hash(path)),
+        "requirementsPath": requirements.as_ref().map(|path| normalize_path(path)),
+        "requirementsHash": requirements.as_ref().and_then(|path| file_hash(path)),
+        "runtimeBindingHash": runtime_binding_signature(runtime_binding),
+    })
+}
+
+fn runtime_probe_ttl_secs(runtime_binding: Option<&PluginRuntimeBinding>) -> i64 {
+    match runtime_binding.map(|binding| binding.scope.as_str()) {
+        Some("plugin") => PLUGIN_RUNTIME_PROBE_TTL_SECS,
+        Some("shared") => SHARED_RUNTIME_PROBE_TTL_SECS,
+        _ => EXTERNAL_RUNTIME_PROBE_TTL_SECS,
+    }
+}
+
+fn mark_runtime_probe_staleness(
+    mut state: AiPluginRuntimeProbeState,
+    current_fingerprint: Value,
+) -> AiPluginRuntimeProbeState {
+    let mut stale_reason = None;
+    if current_fingerprint
+        .get("pythonExists")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        stale_reason = Some("python_missing".to_string());
+    } else if state.fingerprint.as_ref() != Some(&current_fingerprint) {
+        stale_reason = Some("fingerprint_changed".to_string());
+    } else if let Ok(probed_at) = chrono::DateTime::parse_from_rfc3339(&state.probed_at) {
+        let ttl = runtime_probe_ttl_secs(state.runtime_binding.as_ref());
+        if Utc::now()
+            .signed_duration_since(probed_at.with_timezone(&Utc))
+            .num_seconds()
+            > ttl
+        {
+            stale_reason = Some("ttl_expired".to_string());
+        }
+    } else {
+        stale_reason = Some("invalid_probed_at".to_string());
+    }
+
+    if let Some(reason) = stale_reason {
+        state.stale = true;
+        state.stale_reason = Some(reason);
+        if state.status == "passed" {
+            state.status = "stale".to_string();
+        }
+    } else {
+        state.stale = false;
+        state.stale_reason = None;
+    }
+    state
+}
+
+fn parse_json_object_from_process_stdout(stdout: &str) -> Result<Value, String> {
+    match serde_json::from_str::<Value>(stdout) {
+        Ok(value) => Ok(value),
+        Err(first_error) => {
+            for (index, _) in stdout.match_indices('{') {
+                let candidate = stdout[index..].trim();
+                if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+                    return Ok(value);
+                }
+            }
+
+            let preview: String = stdout.chars().take(500).collect();
+            Err(format!("{}; stdout started with: {}", first_error, preview))
+        }
+    }
+}
+
+fn parse_optional_json_object_from_process_stdout(stdout: &str) -> Option<Value> {
+    if stdout.trim().is_empty() {
+        None
+    } else {
+        parse_json_object_from_process_stdout(stdout).ok()
+    }
+}
+
+fn maybe_persist_runtime_probe_state(
+    request: &AiPluginPythonRuntimeProbeRequest,
+    available: bool,
+    duration_ms: u64,
+    result: Option<Value>,
+    error: Option<String>,
+) -> Result<Option<AiPluginRuntimeProbeState>, String> {
+    let Some(plugin_id) = request
+        .plugin_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(profile_id) = request
+        .profile_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let (manifest_path, manifest) = find_plugin_manifest(plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let profile = find_manifest_profile(&manifest, plugin_id, profile_id)?;
+    let runtime_binding = request
+        .runtime_binding
+        .clone()
+        .or_else(|| selected_runtime_binding(profile, None, None).ok().flatten());
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let capability = request
+        .capability
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_smoke_capability(&manifest));
+    let backend = request
+        .backend
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| profile.backend.clone());
+    let state = AiPluginRuntimeProbeState {
+        plugin_id: plugin_id.to_string(),
+        profile_id: profile_id.to_string(),
+        backend,
+        capability,
+        status: if available { "passed" } else { "failed" }.to_string(),
+        available,
+        probed_at: Utc::now().to_rfc3339(),
+        stale: false,
+        stale_reason: None,
+        duration_ms: Some(duration_ms),
+        error,
+        result,
+        runtime_binding: runtime_binding.clone(),
+        fingerprint: Some(runtime_probe_fingerprint(
+            root,
+            &effective_profile,
+            runtime_binding.as_ref(),
+        )),
+    };
+    save_runtime_probe_state(state.clone())?;
+    Ok(Some(state))
+}
+
+fn safe_profile_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.trim().is_empty()
+        && path.is_relative()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+}
+
+fn prepare_profile_local_artifacts(
+    root: &Path,
+    profile: &PluginInstallProfile,
+    job: &mut AiPluginSetupJob,
+) -> Result<(), String> {
+    if let Some(env_dir) = profile
+        .env_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if !safe_profile_relative_path(env_dir) {
+            return Err(format!(
+                "Install profile '{}' has unsafe envDir '{}'",
+                profile.id, env_dir
+            ));
+        }
+        let env_path =
+            profile_runtime_dir(&job.plugin_id, profile)?.unwrap_or_else(|| root.join(env_dir));
+        job.log.push(format!(
+            "Profile environment directory declared: {}",
+            env_path.display()
+        ));
+    } else {
+        job.log
+            .push("No envDir declared for this profile.".to_string());
+    }
+
+    if let Some(requirements) = profile_requirements(profile) {
+        if !safe_profile_relative_path(requirements) {
+            return Err(format!(
+                "Install profile '{}' has unsafe requirements path '{}'",
+                profile.id, requirements
+            ));
+        }
+        let requirements_path = root.join(requirements);
+        if requirements_path.is_file() {
+            job.log.push(format!(
+                "Requirements file is present: {}",
+                requirements_path.display()
+            ));
+        } else {
+            job.log.push(format!(
+                "Requirements file is not present yet: {}",
+                requirements_path.display()
+            ));
+        }
+    }
+
+    let setup_log_path = plugin_logs_dir(&job.plugin_id)?.join(format!("setup-{}.log", job.id));
+    job.log
+        .push(format!("Wrote setup log: {}", setup_log_path.display()));
+    append_setup_log(&job.plugin_id, job)?;
+    Ok(())
+}
+
+fn find_manifest_profile<'a>(
+    manifest: &'a AiPluginManifest,
+    plugin_id: &str,
+    profile_id: &str,
+) -> Result<&'a PluginInstallProfile, String> {
+    manifest
+        .install_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| {
+            format!(
+                "Install profile '{}' was not found in plugin '{}'",
+                profile_id, plugin_id
+            )
+        })
+}
+
+fn setup_capability(
+    manifest: &AiPluginManifest,
+    requested: Option<String>,
+) -> Result<String, String> {
+    let capability = requested
+        .filter(|capability| !capability.trim().is_empty())
+        .unwrap_or_else(|| default_smoke_capability(manifest));
+    if !capability.is_empty() {
+        find_plugin_capability(manifest, &capability)?;
+    }
+    Ok(capability)
+}
+
+fn new_setup_job(
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+    backend: &str,
+    capability: &str,
+    root: &Path,
+    message: &str,
+) -> AiPluginSetupJob {
+    let now = Utc::now().to_rfc3339();
+    AiPluginSetupJob {
+        id: Uuid::new_v4().to_string(),
+        plugin_id: plugin_id.to_string(),
+        profile_id: profile.id.clone(),
+        backend: backend.to_string(),
+        capability: capability.to_string(),
+        status: "running".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        progress: 10,
+        message: Some(message.to_string()),
+        error: None,
+        log: vec![
+            "Created setup job record.".to_string(),
+            format!("Plugin root: {}", root.display()),
+            format!("Profile: {}", profile.id),
+            format!("Backend: {}", backend),
+        ],
+    }
+}
+
+fn build_setup_environment(
+    root: &Path,
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+    backend: &str,
+    capability: &str,
+) -> Result<HashMap<String, String>, String> {
+    let mut environment = HashMap::new();
+    let data_dir = plugin_data_dir(plugin_id)?;
+    let cache_dir = plugin_cache_dir(plugin_id)?;
+    let logs_dir = plugin_logs_dir(plugin_id)?;
+    let model_dir = plugin_model_dir(plugin_id)?;
+    let config_path = plugin_config_path(plugin_id)?;
+    let runtime_root = profile_runtime_root(plugin_id, profile)?;
+
+    environment.insert("PICAIPIC_PLUGIN_ID".to_string(), plugin_id.to_string());
+    environment.insert("PICAIPIC_PLUGIN_PROFILE_ID".to_string(), profile.id.clone());
+    environment.insert("PICAIPIC_PLUGIN_BACKEND".to_string(), backend.to_string());
+    environment.insert(
+        "PICAIPIC_PLUGIN_CAPABILITY".to_string(),
+        capability.to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_ROOT".to_string(),
+        root.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_DATA_DIR".to_string(),
+        data_dir.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_CACHE_DIR".to_string(),
+        cache_dir.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_LOG_DIR".to_string(),
+        logs_dir.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_MODEL_DIR".to_string(),
+        model_dir.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_CONFIG_PATH".to_string(),
+        config_path.display().to_string(),
+    );
+    environment.insert(
+        "PICAIPIC_PLUGIN_RUNTIME_DIR".to_string(),
+        runtime_root.display().to_string(),
+    );
+    if let Some(binding) = profile.runtime_binding.as_ref() {
+        if !binding.scope.trim().is_empty() {
+            environment.insert(
+                "PICAIPIC_PLUGIN_RUNTIME_SCOPE".to_string(),
+                binding.scope.clone(),
+            );
+        }
+        if let Some(kind) = binding
+            .kind
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            environment.insert("PICAIPIC_PLUGIN_RUNTIME_KIND".to_string(), kind.to_string());
+        }
+        if let Some(id) = binding
+            .id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            environment.insert("PICAIPIC_PLUGIN_RUNTIME_ID".to_string(), id.to_string());
+        }
+        if let Some(python) = binding
+            .python
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            environment.insert("PICAIPIC_PLUGIN_PYTHON".to_string(), python.to_string());
+        }
+        if let Some(root_path) = binding
+            .root
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            environment.insert(
+                "PICAIPIC_PLUGIN_RUNTIME_ROOT".to_string(),
+                root_path.to_string(),
+            );
+        }
+    }
+    if let Some(env_dir) = profile
+        .env_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if !safe_profile_relative_path(env_dir) {
+            return Err(format!(
+                "Install profile '{}' has unsafe envDir '{}'",
+                profile.id, env_dir
+            ));
+        }
+        if let Some(runtime_dir) = profile_runtime_dir(plugin_id, profile)? {
+            let runtime_dir = runtime_dir.display().to_string();
+            environment.insert("PICAIPIC_PLUGIN_ENV_DIR".to_string(), runtime_dir.clone());
+            environment.insert("PICAIPIC_PLUGIN_ENV_PATH".to_string(), runtime_dir);
+        }
+    }
+    if let Some(requirements) = profile_requirements(profile) {
+        environment.insert(
+            "PICAIPIC_PLUGIN_REQUIREMENTS".to_string(),
+            requirements.to_string(),
+        );
+        environment.insert(
+            "PICAIPIC_PLUGIN_REQUIREMENTS_PATH".to_string(),
+            root.join(requirements).display().to_string(),
+        );
+    }
+    Ok(environment)
+}
+
+fn profile_requirements(profile: &PluginInstallProfile) -> Option<&str> {
+    profile
+        .runtime_binding
+        .as_ref()
+        .and_then(|binding| binding.requirements.as_deref())
+        .or(profile.requirements.as_deref())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn profile_state_priority(state: &AiPluginProfileState) -> i32 {
+    if state.verified || state.status.eq_ignore_ascii_case("verified") {
+        return 3;
+    }
+    if state.status.eq_ignore_ascii_case("needsVerify") {
+        return 2;
+    }
+    if state.status.eq_ignore_ascii_case("installing") {
+        return 1;
+    }
+    0
+}
+
+fn preferred_profile_state_for_plugin(
+    registry: &AiPluginRegistry,
+    plugin_id: &str,
+) -> Option<AiPluginProfileState> {
+    registry
+        .profile_states
+        .values()
+        .filter(|state| state.plugin_id == plugin_id)
+        .cloned()
+        .max_by(|a, b| {
+            profile_state_priority(a)
+                .cmp(&profile_state_priority(b))
+                .then_with(|| a.updated_at.cmp(&b.updated_at))
+        })
+}
+
+fn selected_runtime_binding(
+    profile: &PluginInstallProfile,
+    runtime_binding_id: Option<&str>,
+    runtime_binding: Option<PluginRuntimeBinding>,
+) -> Result<Option<PluginRuntimeBinding>, String> {
+    if let Some(binding) = runtime_binding {
+        if let Some(id) = runtime_binding_id.filter(|value| !value.trim().is_empty()) {
+            if binding.id.as_deref() != Some(id) {
+                return Err(format!(
+                    "Runtime binding override id does not match requested runtime binding '{}'",
+                    id
+                ));
+            }
+        }
+        return Ok(Some(binding));
+    }
+
+    let bindings = profile_runtime_bindings(profile);
+    if bindings.is_empty() {
+        if let Some(id) = runtime_binding_id.filter(|value| !value.trim().is_empty()) {
+            return Err(format!(
+                "Install profile '{}' does not declare runtime binding '{}'",
+                profile.id, id
+            ));
+        }
+        return Ok(None);
+    }
+
+    if let Some(id) = runtime_binding_id.filter(|value| !value.trim().is_empty()) {
+        return bindings
+            .into_iter()
+            .find(|binding| binding.id.as_deref() == Some(id))
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "Runtime binding '{}' was not found in install profile '{}'",
+                    id, profile.id
+                )
+            });
+    }
+
+    Ok(bindings.into_iter().next())
+}
+
+fn profile_runtime_bindings(profile: &PluginInstallProfile) -> Vec<PluginRuntimeBinding> {
+    let mut bindings = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(binding) = profile.runtime_binding.clone() {
+        let key = binding
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", binding.scope, bindings.len()));
+        seen.insert(key);
+        bindings.push(binding);
+    }
+    for binding in &profile.runtime_bindings {
+        let key = binding
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", binding.scope, bindings.len()));
+        if seen.insert(key) {
+            bindings.push(binding.clone());
+        }
+    }
+    bindings
+}
+
+fn profile_with_runtime_binding(
+    profile: &PluginInstallProfile,
+    runtime_binding: Option<PluginRuntimeBinding>,
+) -> PluginInstallProfile {
+    let mut effective = profile.clone();
+    effective.runtime_binding = runtime_binding;
+    effective
+}
+
+fn start_profile_signature(
+    start_profile: Option<&(PluginInstallProfile, String, String)>,
+) -> Option<String> {
+    start_profile.map(|(profile, backend, capability)| {
+        let binding_signature = runtime_binding_signature(profile.runtime_binding.as_ref())
+            .unwrap_or_else(|| "runtime".to_string());
+        format!(
+            "{}:{}:{}:{}",
+            profile.id, backend, capability, binding_signature
+        )
+    })
+}
+
+fn resolve_start_profile(
+    manifest: &AiPluginManifest,
+    plugin_id: &str,
+    request: Option<&AiPluginStartRequest>,
+) -> Result<Option<(PluginInstallProfile, String, String)>, String> {
+    if let Some(request) = request {
+        if let Some(profile_id) = request
+            .profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let profile = find_manifest_profile(manifest, plugin_id, profile_id)?;
+            let runtime_binding = selected_runtime_binding(
+                profile,
+                request.runtime_binding_id.as_deref(),
+                request.runtime_binding.clone(),
+            )?;
+            let effective_profile = profile_with_runtime_binding(profile, runtime_binding);
+            let backend = request
+                .backend
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(effective_profile.backend.as_str())
+                .to_string();
+            let capability = setup_capability(manifest, request.capability.clone())?;
+            return Ok(Some((effective_profile, backend, capability)));
+        }
+    }
+
+    let registry = load_registry()?;
+    let Some(saved_state) = preferred_profile_state_for_plugin(&registry, plugin_id) else {
+        return Ok(None);
+    };
+    let profile = find_manifest_profile(manifest, plugin_id, &saved_state.profile_id)?;
+    let runtime_binding = selected_runtime_binding(
+        profile,
+        saved_state
+            .runtime_binding
+            .as_ref()
+            .and_then(|binding| binding.id.as_deref()),
+        saved_state.runtime_binding.clone(),
+    )?;
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding);
+    let backend = if saved_state.backend.trim().is_empty() {
+        effective_profile.backend.clone()
+    } else {
+        saved_state.backend.clone()
+    };
+    let capability = if saved_state.capability.trim().is_empty() {
+        default_smoke_capability(manifest)
+    } else {
+        saved_state.capability.clone()
+    };
+    Ok(Some((effective_profile, backend, capability)))
+}
+
+fn build_setup_preview(
+    plugin_id: &str,
+    root: &Path,
+    command: &str,
+    profile: &PluginInstallProfile,
+    backend: &str,
+    capability: &str,
+    runtime_binding: Option<PluginRuntimeBinding>,
+) -> AiPluginSetupPreview {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    if !is_safe_relative_command(command) {
+        errors.push("setup command must be a safe relative path".to_string());
+    }
+    let command_path = root.join(command);
+    if !command_path.exists() {
+        errors.push(format!("setup command '{}' does not exist", command));
+    }
+
+    let (env_dir, env_path) = if let Some(env_dir) = profile
+        .env_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if !safe_profile_relative_path(env_dir) {
+            errors.push(format!(
+                "Install profile '{}' has unsafe envDir '{}'",
+                profile.id, env_dir
+            ));
+        }
+        let env_path = match profile_runtime_dir(plugin_id, profile) {
+            Ok(Some(path)) => path,
+            Ok(None) => root.join(env_dir),
+            Err(error) => {
+                errors.push(error);
+                root.join(env_dir)
+            }
+        };
+        if env_path.exists() && !env_path.is_dir() {
+            errors.push(format!(
+                "profile envDir '{}' exists but is not a directory",
+                env_path.display()
+            ));
+        } else if !env_path.exists() {
+            warnings.push(format!(
+                "profile envDir '{}' will be created",
+                env_path.display()
+            ));
+        }
+        (
+            Some(env_dir.to_string()),
+            Some(env_path.display().to_string()),
+        )
+    } else {
+        warnings.push("profile does not declare envDir".to_string());
+        (None, None)
+    };
+
+    if let Some(binding) = runtime_binding.as_ref() {
+        match binding.scope.as_str() {
+            "external" => {
+                if let Some(python) = binding
+                    .python
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    if !Path::new(python).is_file() {
+                        warnings.push(format!(
+                            "external runtime python '{}' was not found",
+                            python
+                        ));
+                    }
+                } else {
+                    warnings.push("external runtime binding does not declare python".to_string());
+                }
+            }
+            "shared" | "plugin" => {}
+            "" => warnings.push("runtime binding is missing scope".to_string()),
+            other => warnings.push(format!("runtime binding uses unknown scope '{}'", other)),
+        }
+    }
+
+    let (requirements, requirements_path) =
+        if let Some(requirements) = profile_requirements(profile) {
+            if !safe_profile_relative_path(requirements) {
+                errors.push(format!(
+                    "Install profile '{}' has unsafe requirements path '{}'",
+                    profile.id, requirements
+                ));
+            }
+            let requirements_path = root.join(requirements);
+            if !requirements_path.is_file() {
+                warnings.push(format!(
+                    "requirements file '{}' is not present yet",
+                    requirements_path.display()
+                ));
+            }
+            (
+                Some(requirements.to_string()),
+                Some(requirements_path.display().to_string()),
+            )
+        } else {
+            warnings.push("profile does not declare requirements".to_string());
+            (None, None)
+        };
+
+    AiPluginSetupPreview {
+        plugin_id: plugin_id.to_string(),
+        profile_id: profile.id.clone(),
+        backend: backend.to_string(),
+        capability: capability.to_string(),
+        command: command.to_string(),
+        command_path: command_path.display().to_string(),
+        working_dir: root.display().to_string(),
+        env_dir,
+        env_path,
+        requirements,
+        requirements_path,
+        runtime_binding: runtime_binding.clone(),
+        environment: match build_setup_environment(root, plugin_id, profile, backend, capability) {
+            Ok(environment) => environment,
+            Err(error) => {
+                errors.push(error);
+                HashMap::new()
+            }
+        },
+        warnings,
+        errors,
+    }
+}
+
+async fn run_setup_command(
+    root: &Path,
+    command: &str,
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+    backend: &str,
+    capability: &str,
+    job: &mut AiPluginSetupJob,
+    cancel_state: Option<&SetupCancellationState>,
+) -> Result<SetupCommandOutcome, String> {
+    if !is_safe_relative_command(command) {
+        return Err("setup command must be a safe relative path".to_string());
+    }
+
+    let command_path = root.join(command);
+    if !command_path.exists() {
+        return Err(format!("setup command '{}' does not exist", command));
+    }
+
+    job.log
+        .push(format!("Executing setup command: {}", command));
+    job.log.push("Injected setup environment:".to_string());
+    job.log.push(format!("PICAIPIC_PLUGIN_ID={}", plugin_id));
+    job.log
+        .push(format!("PICAIPIC_PLUGIN_PROFILE_ID={}", profile.id));
+    job.log.push(format!("PICAIPIC_PLUGIN_BACKEND={}", backend));
+    job.log
+        .push(format!("PICAIPIC_PLUGIN_CAPABILITY={}", capability));
+    let environment = build_setup_environment(root, plugin_id, profile, backend, capability)?;
+    for key in [
+        "PICAIPIC_PLUGIN_ID",
+        "PICAIPIC_PLUGIN_PROFILE_ID",
+        "PICAIPIC_PLUGIN_BACKEND",
+        "PICAIPIC_PLUGIN_CAPABILITY",
+        "PICAIPIC_PLUGIN_ROOT",
+        "PICAIPIC_PLUGIN_DATA_DIR",
+        "PICAIPIC_PLUGIN_CACHE_DIR",
+        "PICAIPIC_PLUGIN_LOG_DIR",
+        "PICAIPIC_PLUGIN_MODEL_DIR",
+        "PICAIPIC_PLUGIN_CONFIG_PATH",
+        "PICAIPIC_PLUGIN_RUNTIME_DIR",
+        "PICAIPIC_PLUGIN_ENV_DIR",
+        "PICAIPIC_PLUGIN_ENV_PATH",
+        "PICAIPIC_PLUGIN_REQUIREMENTS",
+        "PICAIPIC_PLUGIN_REQUIREMENTS_PATH",
+    ] {
+        if let Some(value) = environment.get(key) {
+            job.log.push(format!("{}={}", key, value));
+        }
+    }
+    append_setup_log(plugin_id, job)?;
+
+    let mut cmd = Command::new(&command_path);
+    cmd.current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in &environment {
+        cmd.env(key, value);
+    }
+    hide_command_window(&mut cmd);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to execute setup command '{}': {}", command, e))?;
+
+    job.status = "running".to_string();
+    job.message = Some("Setup command is running...".to_string());
+    job.updated_at = Utc::now().to_rfc3339();
+    save_setup_job(job.clone())?;
+
+    let mut stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::io::BufReader::new(stdout).lines());
+    let mut stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::io::BufReader::new(stderr).lines());
+
+    let job_id = job.id.clone();
+    let mut line_counter: u32 = 0;
+    let mut stdout_done = stdout_reader.is_none();
+    let mut stderr_done = stderr_reader.is_none();
+
+    while !stdout_done || !stderr_done {
+        tokio::select! {
+            stdout_line = async {
+                match stdout_reader.as_mut() {
+                    Some(reader) if !stdout_done => reader.next_line().await,
+                    _ => std::future::pending().await,
+                }
+            } => match stdout_line {
+                Ok(Some(line)) => {
+                    job.log.push(line);
+                    line_counter += 1;
+                }
+                Ok(None) => {
+                    stdout_done = true;
+                }
+                Err(error) => {
+                    return Err(format!("Failed to read setup stdout: {}", error));
+                }
+            },
+            stderr_line = async {
+                match stderr_reader.as_mut() {
+                    Some(reader) if !stderr_done => reader.next_line().await,
+                    _ => std::future::pending().await,
+                }
+            } => match stderr_line {
+                Ok(Some(line)) => {
+                    job.log.push(line);
+                    line_counter += 1;
+                }
+                Ok(None) => {
+                    stderr_done = true;
+                }
+                Err(error) => {
+                    return Err(format!("Failed to read setup stderr: {}", error));
+                }
+            },
+            _ = async {
+                if let Some(cancel_state) = cancel_state {
+                    loop {
+                        if cancel_state.is_cancelled(&job_id).await {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                job.status = "cancelled".to_string();
+                job.progress = 100;
+                job.message = Some("Setup command was cancelled.".to_string());
+                job.log.push("Setup command cancelled by user.".to_string());
+                job.updated_at = Utc::now().to_rfc3339();
+                if let Some(cancel_state) = cancel_state {
+                    cancel_state.clear(&job_id).await;
+                }
+                append_setup_log(plugin_id, job)?;
+                save_setup_job(job.clone())?;
+                return Ok(SetupCommandOutcome::Cancelled);
+            }
+        }
+
+        if line_counter > 0 && line_counter % 5 == 0 {
+            job.updated_at = Utc::now().to_rfc3339();
+            save_setup_job(job.clone())?;
+            line_counter = 0;
+        }
+    }
+
+    tokio::select! {
+        wait_result = child.wait() => {
+            let status = wait_result
+                .map_err(|e| format!("Failed to wait for setup command: {}", e))?;
+            if let Some(cancel_state) = cancel_state {
+                if cancel_state.is_cancelled(&job_id).await {
+                    job.status = "cancelled".to_string();
+                    job.progress = 100;
+                    job.message = Some("Setup command was cancelled.".to_string());
+                    job.log.push("Setup command cancelled by user.".to_string());
+                    job.updated_at = Utc::now().to_rfc3339();
+                    cancel_state.clear(&job_id).await;
+                    append_setup_log(plugin_id, job)?;
+                    save_setup_job(job.clone())?;
+                    return Ok(SetupCommandOutcome::Cancelled);
+                }
+            }
+            if !status.success() {
+                job.log
+                    .push(format!("Setup command exited with {}", status));
+                return Err(format!(
+                    "setup command '{}' exited with {}",
+                    command, status
+                ));
+            }
+        },
+        _ = async {
+            if let Some(cancel_state) = cancel_state {
+                loop {
+                    if cancel_state.is_cancelled(&job_id).await {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            job.status = "cancelled".to_string();
+            job.progress = 100;
+            job.message = Some("Setup command was cancelled.".to_string());
+            job.log.push("Setup command cancelled by user.".to_string());
+            job.updated_at = Utc::now().to_rfc3339();
+            if let Some(cancel_state) = cancel_state {
+                cancel_state.clear(&job_id).await;
+            }
+            append_setup_log(plugin_id, job)?;
+            save_setup_job(job.clone())?;
+            return Ok(SetupCommandOutcome::Cancelled);
+        }
+    }
+
+    // Save final streamed logs before the caller marks the job outcome.
+    job.updated_at = Utc::now().to_rfc3339();
+    append_setup_log(plugin_id, job)?;
+    save_setup_job(job.clone())?;
+    Ok(SetupCommandOutcome::Completed)
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn is_manifest_path(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(MANIFEST_FILE_NAME)
+}
+
+fn push_manifest_if_exists(
+    manifests: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+) {
+    let manifest_path = if path.is_file() && is_manifest_path(&path) {
+        path
+    } else if path.is_dir() {
+        path.join(MANIFEST_FILE_NAME)
+    } else {
+        return;
+    };
+
+    if !manifest_path.exists() {
+        return;
+    }
+
+    let key = normalize_path(&manifest_path);
+    if seen.insert(key) {
+        manifests.push(manifest_path);
+    }
+}
+
+fn collect_child_manifests(root: &Path, manifests: &mut Vec<PathBuf>, seen: &mut HashSet<String>) {
+    if !root.exists() || !root.is_dir() {
+        return;
+    }
+
+    if root.join(MANIFEST_FILE_NAME).exists() {
+        push_manifest_if_exists(manifests, seen, root.to_path_buf());
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            push_manifest_if_exists(manifests, seen, path);
+        }
+    }
+}
+
+fn env_registered_paths() -> Vec<PathBuf> {
+    let Some(value) = std::env::var_os("PICAIPIC_PLUGIN_PATHS") else {
+        return Vec::new();
+    };
+
+    std::env::split_paths(&value).collect()
+}
+
+fn discover_manifest_paths() -> Result<Vec<PathBuf>, String> {
+    let registry = load_registry()?;
+    let mut manifests = Vec::new();
+    let mut seen = HashSet::new();
+
+    collect_child_manifests(&plugin_home_dir()?, &mut manifests, &mut seen);
+    if let Some(program_data) = program_data_plugin_dir() {
+        collect_child_manifests(&program_data, &mut manifests, &mut seen);
+    }
+
+    for path in registry.registered_paths {
+        let path = PathBuf::from(path);
+        if path.is_dir() && !path.join(MANIFEST_FILE_NAME).exists() {
+            collect_child_manifests(&path, &mut manifests, &mut seen);
+        } else {
+            push_manifest_if_exists(&mut manifests, &mut seen, path);
+        }
+    }
+
+    for path in env_registered_paths() {
+        if path.is_dir() && !path.join(MANIFEST_FILE_NAME).exists() {
+            collect_child_manifests(&path, &mut manifests, &mut seen);
+        } else {
+            push_manifest_if_exists(&mut manifests, &mut seen, path);
+        }
+    }
+
+    Ok(manifests)
+}
+
+fn read_manifest(path: &Path) -> Result<AiPluginManifest, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read manifest '{}': {}", path.display(), e))?;
+    serde_json::from_str::<AiPluginManifest>(&content)
+        .map_err(|e| format!("Failed to parse manifest '{}': {}", path.display(), e))
+}
+
+fn current_platform() -> String {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    };
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        std::env::consts::ARCH
+    };
+
+    format!("{}-{}", os, arch)
+}
+
+fn current_os() -> String {
+    if cfg!(target_os = "windows") {
+        "windows".to_string()
+    } else if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(target_os = "linux") {
+        "linux".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
+fn current_arch() -> String {
+    if cfg!(target_arch = "x86_64") {
+        "x64".to_string()
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64".to_string()
+    } else {
+        std::env::consts::ARCH.to_string()
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|item| item == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn gpu_vendor_from_text(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("rtx") {
+        "nvidia".to_string()
+    } else if lower.contains("amd")
+        || lower.contains("advanced micro devices")
+        || lower.contains("radeon")
+    {
+        "amd".to_string()
+    } else if lower.contains("intel") || lower.contains("arc") || lower.contains("iris") {
+        "intel".to_string()
+    } else if lower.contains("apple") {
+        "apple".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn backend_candidates_for_vendor(vendor: &str) -> Vec<String> {
+    let mut backends = Vec::new();
+    match vendor {
+        "nvidia" => {
+            push_unique(&mut backends, "cuda");
+        }
+        "amd" => {
+            if cfg!(target_os = "windows") || cfg!(target_os = "linux") {
+                push_unique(&mut backends, "rocm");
+            }
+            if cfg!(target_os = "windows") {
+                push_unique(&mut backends, "directml");
+            }
+        }
+        "intel" => {
+            push_unique(&mut backends, "openvino");
+            if cfg!(target_os = "windows") {
+                push_unique(&mut backends, "directml");
+            }
+        }
+        "apple" => {
+            if cfg!(target_os = "macos") {
+                push_unique(&mut backends, "mps");
+            }
+        }
+        _ => {}
+    }
+    push_unique(&mut backends, "cpu");
+    backends
+}
+
+#[cfg(target_os = "windows")]
+fn detect_host_gpus() -> Result<Vec<AiPluginHostGpu>, String> {
+    let script = "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility | ConvertTo-Json -Compress";
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to probe GPU with PowerShell: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "GPU probe command failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let value: Value = serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse GPU probe output: {}", e))?;
+    let items: Vec<Value> = match value {
+        Value::Array(items) => items,
+        Value::Object(_) => vec![value],
+        _ => Vec::new(),
+    };
+
+    let mut gpus = Vec::new();
+    for item in items {
+        let name = item
+            .get("Name")
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown GPU")
+            .trim()
+            .to_string();
+        let adapter = item
+            .get("AdapterCompatibility")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let vendor = gpu_vendor_from_text(&format!("{} {}", name, adapter));
+        gpus.push(AiPluginHostGpu {
+            name,
+            vendor: vendor.clone(),
+            backend_candidates: backend_candidates_for_vendor(&vendor),
+        });
+    }
+    Ok(gpus)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_host_gpus() -> Result<Vec<AiPluginHostGpu>, String> {
+    Ok(vec![AiPluginHostGpu {
+        name: "Apple GPU".to_string(),
+        vendor: "apple".to_string(),
+        backend_candidates: backend_candidates_for_vendor("apple"),
+    }])
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn detect_host_gpus() -> Result<Vec<AiPluginHostGpu>, String> {
+    Ok(Vec::new())
+}
+
+fn python_runtime_from_path(
+    id: String,
+    label: String,
+    scope: String,
+    python: String,
+    root: Option<String>,
+    source: String,
+) -> AiPluginPythonRuntime {
+    let mut cmd = std::process::Command::new(&python);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    match cmd.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let version = if !stdout.is_empty() {
+                stdout
+            } else {
+                stderr.clone()
+            };
+            AiPluginPythonRuntime {
+                id,
+                label,
+                scope,
+                python,
+                root,
+                source,
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
+                available: output.status.success(),
+                error: if output.status.success() {
+                    None
+                } else if stderr.is_empty() {
+                    Some(format!("Python probe exited with {}", output.status))
+                } else {
+                    Some(stderr)
+                },
+            }
+        }
+        Err(error) => AiPluginPythonRuntime {
+            id,
+            label,
+            scope,
+            python,
+            root,
+            source,
+            version: None,
+            available: false,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn discover_path_python_runtimes() -> Vec<AiPluginPythonRuntime> {
+    let mut candidates = Vec::new();
+    if cfg!(target_os = "windows") {
+        candidates.push(("python".to_string(), "PATH python".to_string()));
+        candidates.push(("py".to_string(), "Python launcher".to_string()));
+    } else {
+        candidates.push(("python3".to_string(), "PATH python3".to_string()));
+        candidates.push(("python".to_string(), "PATH python".to_string()));
+    }
+
+    candidates
+        .into_iter()
+        .map(|(python, label)| {
+            python_runtime_from_path(
+                format!("path:{}", python),
+                label,
+                "external".to_string(),
+                python,
+                None,
+                "path".to_string(),
+            )
+        })
+        .collect()
+}
+
+fn python_executable_in_env(env_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        env_dir.join("Scripts").join("python.exe")
+    } else {
+        env_dir.join("bin").join("python")
+    }
+}
+
+fn push_python_candidate(
+    candidates: &mut Vec<(String, String, String, String, Option<String>, String)>,
+    seen: &mut HashSet<String>,
+    id: String,
+    label: String,
+    scope: String,
+    python: PathBuf,
+    root: Option<PathBuf>,
+    source: String,
+) {
+    if candidates.len() >= PYTHON_RUNTIME_DISCOVERY_LIMIT {
+        return;
+    }
+    if !python.is_file() {
+        return;
+    }
+    let normalized = normalize_path(&python);
+    if seen.insert(normalized.clone().to_lowercase()) {
+        candidates.push((
+            id,
+            label,
+            scope,
+            normalized,
+            root.map(|path| normalize_path(&path)),
+            source,
+        ));
+    }
+}
+
+fn common_python_env_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_root = |path: PathBuf| {
+        let key = normalize_path(&path).to_lowercase();
+        if seen.insert(key) {
+            roots.push(path);
+        }
+    };
+
+    if let Ok(cwd) = std::env::current_dir() {
+        push_root(cwd);
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+    {
+        push_root(home.clone());
+        push_root(home.join(".virtualenvs"));
+        push_root(home.join("venvs"));
+        push_root(home.join("miniconda3").join("envs"));
+        push_root(home.join("anaconda3").join("envs"));
+        push_root(home.join("mambaforge").join("envs"));
+        push_root(home.join("micromamba").join("envs"));
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            push_root(
+                local_app_data
+                    .join("pypoetry")
+                    .join("Cache")
+                    .join("virtualenvs"),
+            );
+        }
+        if let Some(program_data) = std::env::var_os("PROGRAMDATA").map(PathBuf::from) {
+            push_root(program_data.join("Anaconda3").join("envs"));
+            push_root(program_data.join("Miniconda3").join("envs"));
+            push_root(program_data.join("mambaforge").join("envs"));
+        }
+        push_root(PathBuf::from(r"C:\ProgramData\Anaconda3\envs"));
+        push_root(PathBuf::from(r"C:\ProgramData\Miniconda3\envs"));
+    }
+
+    roots
+}
+
+fn discover_common_venv_python_runtimes() -> Vec<AiPluginPythonRuntime> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    let Ok(manifests) = discover_manifest_paths() else {
+        return Vec::new();
+    };
+    for manifest_path in manifests {
+        if candidates.len() >= PYTHON_RUNTIME_DISCOVERY_LIMIT {
+            break;
+        }
+        let Some(plugin_root) = manifest_path.parent() else {
+            continue;
+        };
+        for env_name in [".venv", "venv", "env"] {
+            let env_dir = plugin_root.join(env_name);
+            let python = python_executable_in_env(&env_dir);
+            push_python_candidate(
+                &mut candidates,
+                &mut seen,
+                format!("venv:{}", normalize_path(&env_dir)),
+                format!("Plugin {} Python", env_name),
+                "plugin".to_string(),
+                python,
+                Some(env_dir),
+                "common-venv".to_string(),
+            );
+        }
+    }
+
+    candidates
+        .into_iter()
+        .map(|(id, label, scope, python, root, source)| {
+            python_runtime_from_path(id, label, scope, python, root, source)
+        })
+        .collect()
+}
+
+fn discover_conda_python_runtimes() -> Vec<AiPluginPythonRuntime> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for env_root in common_python_env_roots() {
+        if candidates.len() >= PYTHON_RUNTIME_DISCOVERY_LIMIT {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&env_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if candidates.len() >= PYTHON_RUNTIME_DISCOVERY_LIMIT {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let env_dir = entry.path();
+            let python = python_executable_in_env(&env_dir);
+            let env_name = env_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Python environment")
+                .to_string();
+            push_python_candidate(
+                &mut candidates,
+                &mut seen,
+                format!("conda:{}", normalize_path(&env_dir)),
+                format!("Conda/venv {}", env_name),
+                "external".to_string(),
+                python,
+                Some(env_dir),
+                "conda-or-venv".to_string(),
+            );
+        }
+    }
+
+    candidates
+        .into_iter()
+        .map(|(id, label, scope, python, root, source)| {
+            python_runtime_from_path(id, label, scope, python, root, source)
+        })
+        .collect()
+}
+
+fn discover_manifest_python_runtimes() -> Vec<AiPluginPythonRuntime> {
+    let Ok(manifests) = discover_manifest_paths() else {
+        return Vec::new();
+    };
+    let mut runtimes = Vec::new();
+    let mut seen = HashSet::new();
+    for manifest_path in manifests {
+        let Ok(manifest) = read_manifest(&manifest_path) else {
+            continue;
+        };
+        for profile in &manifest.install_profiles {
+            for binding in profile_runtime_bindings(profile) {
+                if binding.scope != "external" {
+                    continue;
+                }
+                let Some(python) = binding
+                    .python
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    continue;
+                };
+                if !seen.insert(python.clone()) {
+                    continue;
+                }
+                let id = binding
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("external:{}", python));
+                let label = binding
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("{} external Python", manifest.name));
+                runtimes.push(python_runtime_from_path(
+                    id,
+                    label,
+                    binding.scope,
+                    python,
+                    binding.root.clone(),
+                    format!("manifest:{}", manifest.id),
+                ));
+            }
+        }
+    }
+    runtimes
+}
+
+fn discover_python_runtimes() -> Vec<AiPluginPythonRuntime> {
+    let mut runtimes = Vec::new();
+    let mut seen = HashSet::new();
+    for runtime in discover_manifest_python_runtimes()
+        .into_iter()
+        .chain(discover_common_venv_python_runtimes())
+        .chain(discover_conda_python_runtimes())
+        .chain(discover_path_python_runtimes())
+    {
+        let key = runtime.python.to_lowercase();
+        if seen.insert(key) && runtimes.len() < PYTHON_RUNTIME_DISCOVERY_LIMIT {
+            runtimes.push(runtime);
+        }
+    }
+    runtimes
+}
+
+fn python_runtime_probe_script() -> &'static str {
+    r#"
+import importlib
+import json
+import platform
+import sys
+import time
+
+requested_backend = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
+
+def package_version(name):
+    try:
+        module = importlib.import_module(name)
+        return {
+            "available": True,
+            "version": getattr(module, "__version__", None),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+        }
+
+started = time.perf_counter()
+result = {
+    "python": {
+        "executable": sys.executable,
+        "version": platform.python_version(),
+        "platform": platform.platform(),
+    },
+    "requestedBackend": requested_backend or None,
+    "packages": {},
+    "backends": {
+        "cpu": {"available": True},
+    },
+}
+
+torch_info = package_version("torch")
+result["packages"]["torch"] = torch_info
+if torch_info.get("available"):
+    import torch
+    torch_backend = {
+        "available": True,
+        "version": getattr(torch, "__version__", None),
+        "cudaAvailable": bool(torch.cuda.is_available()),
+        "cudaDeviceCount": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "cudaVersion": getattr(torch.version, "cuda", None),
+        "hipVersion": getattr(torch.version, "hip", None),
+        "mpsAvailable": bool(getattr(getattr(torch.backends, "mps", None), "is_available", lambda: False)()),
+    }
+    result["torch"] = torch_backend
+    result["backends"]["cuda"] = {
+        "available": bool(torch_backend["cudaAvailable"] and not torch_backend.get("hipVersion")),
+        "deviceCount": torch_backend["cudaDeviceCount"],
+        "version": torch_backend.get("cudaVersion"),
+    }
+    result["backends"]["rocm"] = {
+        "available": bool(torch_backend["cudaAvailable"] and torch_backend.get("hipVersion")),
+        "deviceCount": torch_backend["cudaDeviceCount"],
+        "version": torch_backend.get("hipVersion"),
+    }
+    result["backends"]["mps"] = {
+        "available": torch_backend["mpsAvailable"],
+    }
+    if requested_backend in ("cuda", "rocm") and torch.cuda.is_available():
+        try:
+            tensor = torch.ones((1,), device="cuda")
+            result["backends"][requested_backend]["probe"] = {
+                "ok": bool((tensor + 1).detach().cpu().item() == 2),
+            }
+        except Exception as exc:
+            result["backends"][requested_backend]["probe"] = {
+                "ok": False,
+                "error": str(exc),
+            }
+            result["backends"][requested_backend]["available"] = False
+
+directml_info = package_version("torch_directml")
+result["packages"]["torchDirectML"] = directml_info
+result["backends"]["directml"] = {
+    "available": bool(directml_info.get("available")),
+}
+if requested_backend == "directml" and directml_info.get("available"):
+    try:
+        import torch_directml
+        result["backends"]["directml"]["device"] = str(torch_directml.device())
+    except Exception as exc:
+        result["backends"]["directml"]["probe"] = {
+            "ok": False,
+            "error": str(exc),
+        }
+        result["backends"]["directml"]["available"] = False
+
+onnx_info = package_version("onnxruntime")
+result["packages"]["onnxruntime"] = onnx_info
+if onnx_info.get("available"):
+    try:
+        import onnxruntime
+        result["onnxruntime"] = {
+            "available": True,
+            "version": getattr(onnxruntime, "__version__", None),
+            "providers": list(onnxruntime.get_available_providers()),
+        }
+        providers = set(result["onnxruntime"]["providers"])
+        result["backends"]["openvino"] = {
+            "available": "OpenVINOExecutionProvider" in providers,
+        }
+        if "DmlExecutionProvider" in providers:
+            result["backends"]["directml"]["available"] = True
+    except Exception as exc:
+        result["onnxruntime"] = {
+            "available": False,
+            "error": str(exc),
+        }
+
+result["packages"]["numpy"] = package_version("numpy")
+result["packages"]["opencv-python"] = package_version("cv2")
+result["packages"]["rawpy"] = package_version("rawpy")
+
+result["elapsedMs"] = int((time.perf_counter() - started) * 1000)
+print(json.dumps(result, ensure_ascii=False))
+"#
+}
+
+async fn probe_python_runtime(
+    request: AiPluginPythonRuntimeProbeRequest,
+) -> Result<AiPluginPythonRuntimeProbeResult, String> {
+    let python = request.python.trim().to_string();
+    if python.is_empty() {
+        return Err("Python runtime probe requires a python path".to_string());
+    }
+
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new(&python);
+    cmd.arg("-c")
+        .arg(python_runtime_probe_script())
+        .arg(request.backend.clone().unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_command_window(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start Python runtime probe: {}", e))?;
+    let output = match tokio::time::timeout(
+        Duration::from_millis(PYTHON_RUNTIME_PROBE_TIMEOUT_MS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| format!("Python runtime probe failed: {}", e))?,
+        Err(_) => {
+            let error = Some(format!(
+                "Python runtime probe timed out after {}ms",
+                PYTHON_RUNTIME_PROBE_TIMEOUT_MS
+            ));
+            let state = maybe_persist_runtime_probe_state(
+                &request,
+                false,
+                started.elapsed().as_millis() as u64,
+                None,
+                error.clone(),
+            )?;
+            return Ok(AiPluginPythonRuntimeProbeResult {
+                python,
+                backend: request.backend,
+                available: false,
+                duration_ms: started.elapsed().as_millis(),
+                result: None,
+                error,
+                state,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let result = parse_optional_json_object_from_process_stdout(&stdout);
+        let error = Some(if stderr.is_empty() {
+            format!("Python runtime probe exited with {}", output.status)
+        } else {
+            stderr
+        });
+        let state = maybe_persist_runtime_probe_state(
+            &request,
+            false,
+            started.elapsed().as_millis() as u64,
+            result.clone(),
+            error.clone(),
+        )?;
+        return Ok(AiPluginPythonRuntimeProbeResult {
+            python,
+            backend: request.backend,
+            available: false,
+            duration_ms: started.elapsed().as_millis(),
+            result,
+            error,
+            state,
+        });
+    }
+
+    let result = parse_json_object_from_process_stdout(&stdout)
+        .map_err(|e| format!("Failed to parse Python runtime probe output: {}", e))?;
+    let backend = request
+        .backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase());
+    let backend_available = backend.as_deref().map_or(true, |backend| {
+        result
+            .get("backends")
+            .and_then(|backends| backends.get(backend))
+            .and_then(|backend| backend.get("available"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+
+    let state = maybe_persist_runtime_probe_state(
+        &request,
+        backend_available,
+        started.elapsed().as_millis() as u64,
+        Some(result.clone()),
+        None,
+    )?;
+
+    Ok(AiPluginPythonRuntimeProbeResult {
+        python,
+        backend: request.backend,
+        available: backend_available,
+        duration_ms: started.elapsed().as_millis(),
+        result: Some(result),
+        error: None,
+        state,
+    })
+}
+
+fn build_host_environment() -> AiPluginHostEnvironment {
+    let os = current_os();
+    let arch = current_arch();
+    let platform = format!("{}-{}", os, arch);
+    let mut probe_error = None;
+    let gpus = match detect_host_gpus() {
+        Ok(gpus) => gpus,
+        Err(error) => {
+            probe_error = Some(error);
+            Vec::new()
+        }
+    };
+
+    let mut candidate_backends = Vec::new();
+    for gpu in &gpus {
+        for backend in &gpu.backend_candidates {
+            push_unique(&mut candidate_backends, backend);
+        }
+    }
+
+    if gpus.is_empty() {
+        if cfg!(target_os = "macos") {
+            push_unique(&mut candidate_backends, "mps");
+        }
+        push_unique(&mut candidate_backends, "cpu");
+    }
+
+    AiPluginHostEnvironment {
+        os,
+        arch,
+        platform,
+        gpus,
+        candidate_backends,
+        python_runtimes: discover_python_runtimes(),
+        probe_error,
+    }
+}
+
+fn is_safe_relative_command(command: &str) -> bool {
+    let path = Path::new(command);
+    !path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn plugin_api_major_compatible(plugin_api: &str) -> bool {
+    let trimmed = plugin_api.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('^') {
+        return rest
+            .split('.')
+            .next()
+            .and_then(|part| part.parse::<i64>().ok())
+            == Some(PLUGIN_API_MAJOR);
+    }
+
+    trimmed
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        == Some(PLUGIN_API_MAJOR)
+}
+
+fn validate_manifest(manifest: &AiPluginManifest, root: &Path) -> PluginValidationReport {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if manifest.schema_version != 1 {
+        errors.push(format!(
+            "Unsupported schemaVersion {}; expected 1",
+            manifest.schema_version
+        ));
+    }
+
+    if manifest.id.trim().is_empty() {
+        errors.push("Missing plugin id".to_string());
+    } else if !manifest
+        .id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        errors.push("Plugin id must use lowercase letters, numbers, dots, or hyphens".to_string());
+    }
+
+    if manifest.name.trim().is_empty() {
+        errors.push("Missing plugin name".to_string());
+    }
+
+    if manifest.version.trim().is_empty() {
+        errors.push("Missing plugin version".to_string());
+    }
+
+    if manifest.platforms.is_empty() {
+        warnings.push("No platforms declared".to_string());
+    } else if !platform_supported(manifest) {
+        errors.push(format!(
+            "Current platform '{}' is not declared in manifest",
+            current_platform()
+        ));
+    }
+
+    if let Some(compatibility) = &manifest.compatibility {
+        if let Some(plugin_api) = &compatibility.plugin_api {
+            if !plugin_api_major_compatible(plugin_api) {
+                errors.push(format!(
+                    "Unsupported pluginApi '{}'; expected major version {}",
+                    plugin_api, PLUGIN_API_MAJOR
+                ));
+            }
+        }
+    }
+
+    let Some(entry) = &manifest.entry else {
+        errors.push("Missing entry".to_string());
+        return PluginValidationReport {
+            valid: errors.is_empty(),
+            errors,
+            warnings,
+        };
+    };
+
+    match entry.kind.as_str() {
+        "local-http" => {
+            let Some(base_url) = &entry.base_url else {
+                errors.push("local-http entry requires baseUrl".to_string());
+                return PluginValidationReport {
+                    valid: errors.is_empty(),
+                    errors,
+                    warnings,
+                };
+            };
+
+            if !(base_url.starts_with("http://127.0.0.1")
+                || base_url.starts_with("http://localhost"))
+            {
+                errors.push("local-http baseUrl must bind to loopback by default".to_string());
+            }
+
+            if let Some(command) = &entry.start_command {
+                if !is_safe_relative_command(command) {
+                    errors.push("startCommand must be a safe relative path".to_string());
+                } else if !root.join(command).exists() {
+                    warnings.push(format!("startCommand '{}' does not exist yet", command));
+                }
+            }
+
+            if let Some(command) = &entry.stop_command {
+                if !is_safe_relative_command(command) {
+                    errors.push("stopCommand must be a safe relative path".to_string());
+                }
+            }
+        }
+        "local-command" => {
+            let Some(command) = &entry.command else {
+                errors.push("local-command entry requires command".to_string());
+                return PluginValidationReport {
+                    valid: errors.is_empty(),
+                    errors,
+                    warnings,
+                };
+            };
+
+            if !is_safe_relative_command(command) {
+                errors.push("command must be a safe relative path".to_string());
+            } else if !root.join(command).exists() {
+                warnings.push(format!("command '{}' does not exist yet", command));
+            }
+        }
+        "" => errors.push("Missing entry kind".to_string()),
+        other => errors.push(format!("Unsupported entry kind '{}'", other)),
+    }
+
+    if let Some(install) = &manifest.install {
+        if install.kind.trim().is_empty() {
+            warnings.push("Install entry is missing kind".to_string());
+        }
+
+        if let Some(command) = install.command.as_deref() {
+            if !is_safe_relative_command(command) {
+                errors.push("install command must be a safe relative path".to_string());
+            } else if !root.join(command).exists() {
+                warnings.push(format!("install command '{}' does not exist yet", command));
+            }
+        }
+    }
+
+    if let Some(runtime) = &manifest.runtime {
+        if runtime.kind.trim().is_empty() {
+            warnings.push("Runtime entry is missing kind".to_string());
+        }
+    }
+
+    let mut install_profile_ids = HashSet::new();
+    for profile in &manifest.install_profiles {
+        if profile.id.trim().is_empty() {
+            errors.push("Install profile is missing id".to_string());
+        } else if !install_profile_ids.insert(profile.id.clone()) {
+            errors.push(format!("Duplicate install profile id '{}'", profile.id));
+        }
+
+        if profile.backend.trim().is_empty() {
+            errors.push(format!(
+                "Install profile '{}' is missing backend",
+                profile.id
+            ));
+        } else if !matches!(
+            profile.backend.as_str(),
+            "cuda" | "rocm" | "directml" | "openvino" | "mps" | "cpu"
+        ) {
+            warnings.push(format!(
+                "Install profile '{}' uses unknown backend '{}'",
+                profile.id, profile.backend
+            ));
+        }
+
+        for binding in profile_runtime_bindings(profile) {
+            match binding.scope.as_str() {
+                "external" => {
+                    if binding
+                        .python
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                    {
+                        warnings.push(format!(
+                            "Install profile '{}' external runtime binding is missing python",
+                            profile.id
+                        ));
+                    }
+                }
+                "shared" | "plugin" => {}
+                "" => warnings.push(format!(
+                    "Install profile '{}' runtime binding is missing scope",
+                    profile.id
+                )),
+                other => warnings.push(format!(
+                    "Install profile '{}' uses unknown runtime binding scope '{}'",
+                    profile.id, other
+                )),
+            }
+        }
+    }
+
+    if manifest.capabilities.is_empty() {
+        warnings.push("No capabilities declared".to_string());
+    }
+
+    let mut capability_ids = HashSet::new();
+    for capability in &manifest.capabilities {
+        if capability.id.trim().is_empty() {
+            errors.push("Capability is missing id".to_string());
+        } else if !capability_ids.insert(capability.id.clone()) {
+            errors.push(format!("Duplicate capability id '{}'", capability.id));
+        }
+
+        if capability.kind.trim().is_empty() {
+            errors.push(format!("Capability '{}' is missing kind", capability.id));
+        }
+
+        if capability.name.trim().is_empty() {
+            warnings.push(format!(
+                "Capability '{}' is missing display name",
+                capability.id
+            ));
+        }
+    }
+
+    if let Some(contributes) = &manifest.contributes {
+        let mut menu_ids = HashSet::new();
+        for menu in &contributes.menus {
+            if menu.id.trim().is_empty() {
+                errors.push("Menu contribution is missing id".to_string());
+            } else if !menu_ids.insert(menu.id.clone()) {
+                errors.push(format!("Duplicate menu contribution id '{}'", menu.id));
+            }
+
+            if menu.label.trim().is_empty() {
+                warnings.push(format!(
+                    "Menu contribution '{}' is missing display label",
+                    menu.id
+                ));
+            }
+
+            if menu.capability.trim().is_empty() {
+                errors.push(format!(
+                    "Menu contribution '{}' is missing capability",
+                    menu.id
+                ));
+            } else if !capability_ids.contains(&menu.capability) {
+                errors.push(format!(
+                    "Menu contribution '{}' references unknown capability '{}'",
+                    menu.id, menu.capability
+                ));
+            }
+
+            if menu.contexts.is_empty() {
+                warnings.push(format!("Menu contribution '{}' has no contexts", menu.id));
+            }
+
+            if menu.placements.is_empty() {
+                warnings.push(format!("Menu contribution '{}' has no placements", menu.id));
+            }
+        }
+    }
+
+    PluginValidationReport {
+        valid: errors.is_empty(),
+        errors,
+        warnings,
+    }
+}
+
+fn platform_supported(manifest: &AiPluginManifest) -> bool {
+    if manifest.platforms.is_empty() {
+        return true;
+    }
+
+    let current = current_platform();
+    manifest
+        .platforms
+        .iter()
+        .any(|platform| platform == &current || platform == "all")
+}
+
+fn plugin_storage_summary(plugin_id: &str, code_dir: &Path) -> AiPluginStorageSummary {
+    let path_or_empty = |result: Result<PathBuf, String>| {
+        result
+            .map(|path| normalize_path(&path))
+            .unwrap_or_else(|_| String::new())
+    };
+    let model_dirs = find_plugin_manifest(plugin_id)
+        .and_then(|(_, manifest)| plugin_model_drop_dirs(&manifest))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| normalize_path(&path))
+        .collect();
+    let runtime_dirs = find_plugin_manifest(plugin_id)
+        .map(|(_, manifest)| plugin_runtime_display_dirs(plugin_id, &manifest))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| normalize_path(&path))
+        .collect();
+    AiPluginStorageSummary {
+        store_dir: path_or_empty(plugin_store_dir()),
+        code_dir: normalize_path(code_dir),
+        data_dir: path_or_empty(plugin_data_dir(plugin_id)),
+        model_dir: path_or_empty(plugin_model_dir(plugin_id)),
+        model_dirs,
+        log_dir: path_or_empty(plugin_logs_dir(plugin_id)),
+        config_path: path_or_empty(plugin_config_path(plugin_id)),
+        runtime_dir: path_or_empty(plugin_runtime_root(plugin_id)),
+        runtime_dirs,
+        cache_dir: path_or_empty(plugin_cache_dir(plugin_id)),
+        output_dir: path_or_empty(plugin_output_dir(plugin_id)),
+    }
+}
+
+fn manifest_to_summary(
+    manifest_path: &Path,
+    manifest: AiPluginManifest,
+    validation: PluginValidationReport,
+    permission_grant: Option<AiPluginPermissionGrant>,
+    profile_states: &HashMap<String, AiPluginProfileState>,
+    setup_jobs: &HashMap<String, AiPluginSetupJob>,
+    runtime_probe_states: &HashMap<String, AiPluginRuntimeProbeState>,
+    task_states: &HashMap<String, AiPluginTaskState>,
+) -> AiPluginSummary {
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+    let platform_supported = platform_supported(&manifest);
+    let plugin_id = manifest.id.clone();
+    let storage = plugin_storage_summary(&plugin_id, root);
+    let permissions = normalize_plugin_permissions(manifest.permissions.as_ref());
+    let entry = manifest.entry.as_ref().map(|entry| PluginEntrySummary {
+        kind: entry.kind.clone(),
+        base_url: entry.base_url.clone(),
+        start_command: entry
+            .start_command
+            .clone()
+            .or_else(|| entry.command.clone()),
+        status_path: entry.status.as_ref().map(|status| status.path.clone()),
+        health_path: entry.health.as_ref().map(|health| health.path.clone()),
+    });
+    let install = manifest
+        .install
+        .as_ref()
+        .map(|install| PluginInstallSummary {
+            kind: install.kind.clone(),
+            command: install.command.clone(),
+            estimated_disk_mb: install.estimated_disk_mb,
+            requires_admin: install.requires_admin.unwrap_or(false),
+        });
+    let runtime = manifest
+        .runtime
+        .as_ref()
+        .map(|runtime| PluginRuntimeSummary {
+            kind: runtime.kind.clone(),
+            cuda_api_compatible: runtime.cuda_api_compatible.unwrap_or(false),
+            notes: runtime.notes.clone(),
+        });
+    let install_profiles = manifest
+        .install_profiles
+        .iter()
+        .map(|profile| {
+            let state = profile_states
+                .get(&profile_state_key(&plugin_id, &profile.id))
+                .cloned();
+            let setup_job = state
+                .as_ref()
+                .and_then(|state| state.setup_job_id.as_ref())
+                .and_then(|job_id| setup_jobs.get(job_id))
+                .cloned();
+            let runtime_binding = profile.runtime_binding.clone();
+            let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+            let runtime_probe_state = runtime_probe_states
+                .get(&runtime_probe_key(
+                    &plugin_id,
+                    &profile.id,
+                    &profile.backend,
+                    runtime_binding.as_ref(),
+                ))
+                .cloned()
+                .map(|state| {
+                    mark_runtime_probe_staleness(
+                        state,
+                        runtime_probe_fingerprint(
+                            root,
+                            &effective_profile,
+                            runtime_binding.as_ref(),
+                        ),
+                    )
+                });
+            // Collect probe states for all bindings of this plugin+profile
+            let profile_prefix = format!("{}:{}:", plugin_id, profile.id);
+            let runtime_probe_states: Vec<AiPluginRuntimeProbeState> = runtime_probe_states
+                .iter()
+                .filter(|(key, _)| key.starts_with(&profile_prefix))
+                .map(|(_, state)| {
+                    mark_runtime_probe_staleness(
+                        state.clone(),
+                        runtime_probe_fingerprint(
+                            root,
+                            &effective_profile,
+                            state.runtime_binding.as_ref(),
+                        ),
+                    )
+                })
+                .collect();
+            let active_binding = state
+                .as_ref()
+                .and_then(|s| s.runtime_binding.clone())
+                .or_else(|| profile.runtime_binding.clone());
+            let effective_for_path = profile_with_runtime_binding(profile, active_binding.clone());
+            let resolved_runtime_dir = (|| {
+                let scope = active_binding
+                    .as_ref()
+                    .map(|b| b.scope.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if scope == "external" {
+                    if let Some(root) = active_binding
+                        .as_ref()
+                        .and_then(|b| b.root.clone())
+                        .filter(|root| !root.trim().is_empty())
+                    {
+                        return Some(root);
+                    }
+                    return active_binding
+                        .as_ref()
+                        .and_then(|b| b.python.clone())
+                        .and_then(|python| {
+                            Path::new(&python)
+                                .parent()
+                                .map(|parent| parent.to_string_lossy().to_string())
+                        });
+                }
+                if scope == "shared" {
+                    if let Ok(dir) = profile_runtime_root(&plugin_id, &effective_for_path) {
+                        return Some(dir.to_string_lossy().to_string());
+                    }
+                }
+                if let Ok(Some(dir)) = profile_runtime_dir(&plugin_id, &effective_for_path) {
+                    return Some(dir.to_string_lossy().to_string());
+                }
+                if let Ok(dir) = profile_runtime_root(&plugin_id, &effective_for_path) {
+                    return Some(dir.to_string_lossy().to_string());
+                }
+                None
+            })();
+            // Detect version conflicts between declared requirements and the
+            // versions reported by the probe. Only run when we have a
+            // non-stale, passed probe so the comparison is against current
+            // runtime state.
+            let runtime_conflicts = (|| {
+                let probe_state = runtime_probe_state.as_ref()?;
+                if probe_state.stale || probe_state.status != "passed" {
+                    return Some(Vec::new());
+                }
+                let requirements_rel = profile_requirements(profile)?;
+                if !safe_profile_relative_path(requirements_rel) {
+                    return Some(Vec::new());
+                }
+                let requirements_path = root.join(requirements_rel);
+                if !requirements_path.is_file() {
+                    return Some(Vec::new());
+                }
+                let probe_result = probe_state.result.as_ref()?;
+                Some(detect_runtime_conflicts(&requirements_path, probe_result))
+            })()
+            .unwrap_or_default();
+            PluginInstallProfileSummary {
+                id: profile.id.clone(),
+                backend: profile.backend.clone(),
+                label: profile.label.clone(),
+                support_level: profile
+                    .support_level
+                    .clone()
+                    .unwrap_or_else(|| "experimental".to_string()),
+                derived_from: profile.derived_from.clone(),
+                env_dir: profile.env_dir.clone(),
+                requirements: profile.requirements.clone(),
+                runtime_binding: profile.runtime_binding.clone(),
+                runtime_bindings: profile.runtime_bindings.clone(),
+                notes: profile.notes.clone(),
+                resolved_runtime_dir,
+                state,
+                setup_job,
+                runtime_probe_state,
+                runtime_probe_states,
+                runtime_conflicts,
+            }
+        })
+        .collect();
+    let smoke_test = manifest
+        .smoke_test
+        .as_ref()
+        .map(|smoke_test| PluginSmokeTestSummary {
+            command: smoke_test.command.clone(),
+            capability: smoke_test.capability.clone(),
+            timeout_ms: smoke_test.timeout_ms,
+        });
+    let capabilities = manifest
+        .capabilities
+        .iter()
+        .map(|capability| PluginCapabilitySummary {
+            id: capability.id.clone(),
+            kind: capability.kind.clone(),
+            name: capability.name.clone(),
+            version: capability.version.clone(),
+            inputs: capability.inputs.clone(),
+            outputs: capability.outputs.clone(),
+            parameters: capability.parameters.clone(),
+        })
+        .collect();
+    let contributes = PluginContributesSummary {
+        menus: manifest
+            .contributes
+            .as_ref()
+            .map(|contributes| {
+                contributes
+                    .menus
+                    .iter()
+                    .map(|menu| PluginMenuContributionSummary {
+                        id: menu.id.clone(),
+                        label: menu.label.clone(),
+                        capability: menu.capability.clone(),
+                        contexts: menu.contexts.clone(),
+                        placements: menu.placements.clone(),
+                        icon: menu.icon.clone(),
+                        order: menu.order.unwrap_or(1000),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut plugin_task_states: Vec<AiPluginTaskState> = task_states
+        .values()
+        .filter(|state| state.plugin_id == plugin_id)
+        .cloned()
+        .collect();
+    plugin_task_states.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    plugin_task_states.truncate(8);
+
+    AiPluginSummary {
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        publisher: manifest.publisher,
+        path: normalize_path(root),
+        manifest_path: normalize_path(manifest_path),
+        platform_supported,
+        validation,
+        permissions,
+        permission_grant,
+        runtimes: manifest.runtimes,
+        runtime,
+        entry,
+        install,
+        storage,
+        install_profiles,
+        smoke_test,
+        capabilities,
+        contributes,
+        task_states: plugin_task_states,
+    }
+}
+
+fn status_path_for(entry: &PluginEntry) -> String {
+    entry
+        .status
+        .as_ref()
+        .map(|status| status.path.clone())
+        .unwrap_or_else(|| {
+            if let Some(health) = &entry.health {
+                if health.path == "/status" {
+                    return health.path.clone();
+                }
+            }
+            "/status".to_string()
+        })
+}
+
+fn health_path_for(entry: &PluginEntry) -> String {
+    entry
+        .health
+        .as_ref()
+        .map(|health| health.path.clone())
+        .unwrap_or_else(|| "/health".to_string())
+}
+
+fn invoke_path_for(capability: &PluginCapability) -> String {
+    capability
+        .invoke
+        .as_ref()
+        .and_then(|invoke| invoke.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| path.to_string())
+        .unwrap_or_else(|| format!("/invoke/{}", capability.id))
+}
+
+fn join_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    format!("{}{}", base, path)
+}
+
+fn loopback_base_url(port: u16) -> String {
+    format!("http://127.0.0.1:{}", port)
+}
+
+/// Generate a cryptographically random auth token (32 bytes, hex-encoded to 64
+/// characters). Injected into the plugin process as `PICAIPIC_PLUGIN_AUTH_TOKEN`
+/// and sent by the host as `Authorization: Bearer <token>` on every request
+/// except `/health`.
+fn generate_plugin_auth_token() -> String {
+    use rand::Rng;
+    let bytes: [u8; 32] = rand::thread_rng().r#gen();
+    let mut hex = String::with_capacity(64);
+    for byte in bytes {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    hex
+}
+
+/// Build a `reqwest::Client` with an optional `Authorization: Bearer <token>`
+/// default header. When `token` is `None`, no auth header is added (used for
+/// stale-service reachability probes and post-stop liveness checks).
+fn plugin_http_client(token: Option<&str>, timeout_ms: u64) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms));
+    if let Some(token) = token.filter(|t| !t.is_empty()) {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token)) {
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+            builder = builder.default_headers(headers);
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+/// Look up the auth token for a managed plugin runtime, if it is currently
+/// tracked by the host.
+async fn runtime_auth_token(state: &AiPluginRuntimeState, plugin_id: &str) -> Option<String> {
+    let processes = state.processes.lock().await;
+    processes
+        .get(plugin_id)
+        .map(|runtime| runtime.auth_token.clone())
+}
+
+fn plugin_port(entry: &PluginEntry) -> Option<u16> {
+    if let Some(port) = entry.default_port {
+        return Some(port);
+    }
+
+    let base_url = entry.base_url.as_deref()?;
+    let after_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let port_text = host_port.rsplit(':').next()?;
+    port_text.parse::<u16>().ok()
+}
+
+fn is_port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+async fn allocate_plugin_port(
+    plugin_id: &str,
+    entry: &PluginEntry,
+    state: &AiPluginRuntimeState,
+) -> Result<u16, String> {
+    let used_ports: HashSet<u16> = {
+        let processes = state.processes.lock().await;
+        processes
+            .iter()
+            .filter(|(id, _)| id.as_str() != plugin_id)
+            .map(|(_, runtime)| runtime.port)
+            .collect()
+    };
+
+    if let Some(port) = plugin_port(entry) {
+        if !used_ports.contains(&port) && is_port_available(port) {
+            return Ok(port);
+        }
+    }
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Failed to allocate plugin port: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to inspect allocated plugin port: {}", e))?
+        .port();
+    Ok(port)
+}
+
+async fn runtime_base_url(state: Option<&AiPluginRuntimeState>, plugin_id: &str) -> Option<String> {
+    let state = state?;
+    let processes = state.processes.lock().await;
+    processes
+        .get(plugin_id)
+        .map(|runtime| runtime.base_url.clone())
+}
+
+async fn plugin_base_url(
+    plugin_id: &str,
+    entry: &PluginEntry,
+    state: Option<&AiPluginRuntimeState>,
+) -> Option<String> {
+    runtime_base_url(state, plugin_id)
+        .await
+        .or_else(|| entry.base_url.clone())
+}
+
+fn plugin_data_dir(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_store_dir()?.join("plugin-data").join(plugin_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin data directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_logs_dir(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_data_dir(plugin_id)?.join("logs");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin logs directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_model_dir(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_data_dir(plugin_id)?.join("models");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin model directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_config_path(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_data_dir(plugin_id)?.join("config");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin config directory: {}", e))?;
+    Ok(dir.join("plugin.local.json"))
+}
+
+fn plugin_runtime_root(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_store_dir()?.join("plugin-runtimes").join(plugin_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin runtime directory: {}", e))?;
+    Ok(dir)
+}
+
+fn shared_runtime_root(runtime_id: &str) -> Result<PathBuf, String> {
+    let runtime_id = runtime_id.trim();
+    if runtime_id.is_empty() || safe_relative_path_from_str(runtime_id).is_none() {
+        return Err(format!("Shared runtime id is not safe: {}", runtime_id));
+    }
+    let dir = plugin_store_dir()?.join("shared-runtimes").join(runtime_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create shared runtime directory: {}", e))?;
+    Ok(dir)
+}
+
+fn profile_runtime_root(
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+) -> Result<PathBuf, String> {
+    if profile
+        .runtime_binding
+        .as_ref()
+        .map(|binding| binding.scope.eq_ignore_ascii_case("shared"))
+        .unwrap_or(false)
+    {
+        let runtime_id = profile
+            .runtime_binding
+            .as_ref()
+            .and_then(|binding| binding.id.as_deref())
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(&profile.id);
+        shared_runtime_root(runtime_id)
+    } else {
+        plugin_runtime_root(plugin_id)
+    }
+}
+
+fn profile_runtime_dir(
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+) -> Result<Option<PathBuf>, String> {
+    let Some(env_dir) = profile
+        .env_dir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    if !safe_profile_relative_path(env_dir) {
+        return Err(format!(
+            "Install profile '{}' has unsafe envDir '{}'",
+            profile.id, env_dir
+        ));
+    }
+    let dir = if profile
+        .runtime_binding
+        .as_ref()
+        .map(|binding| binding.scope.eq_ignore_ascii_case("shared"))
+        .unwrap_or(false)
+    {
+        profile_runtime_root(plugin_id, profile)?
+    } else {
+        profile_runtime_root(plugin_id, profile)?.join(env_dir)
+    };
+    Ok(Some(dir))
+}
+
+fn plugin_cache_dir(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_store_dir()?.join("plugin-cache").join(plugin_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin cache directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_task_temp_dir(plugin_id: &str, task_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_cache_dir(plugin_id)?.join("tasks").join(task_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin task directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_task_output_dir(plugin_id: &str, task_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_task_temp_dir(plugin_id, task_id)?.join("outputs");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin task output directory: {}", e))?;
+    Ok(dir)
+}
+
+fn plugin_output_dir(plugin_id: &str) -> Result<PathBuf, String> {
+    let dir = plugin_store_dir()?.join("plugin-outputs").join(plugin_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create plugin output directory: {}", e))?;
+    Ok(dir)
+}
+
+fn path_modified_age_secs(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|duration| duration.as_secs())
+}
+
+fn task_updated_age_secs(state: &AiPluginTaskState) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(&state.updated_at)
+        .ok()
+        .map(|updated_at| {
+            Utc::now()
+                .signed_duration_since(updated_at.with_timezone(&Utc))
+                .num_seconds()
+                .max(0) as u64
+        })
+}
+
+fn plugin_task_dir_matches(state: &AiPluginTaskState, path: &Path) -> bool {
+    let state_dir = PathBuf::from(&state.task_dir);
+    let canonical_state = state_dir.canonicalize().unwrap_or(state_dir);
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical_state == canonical_path
+}
+
+fn cleanup_orphan_plugin_task_dirs(
+    plugin_id: &str,
+    registry: &AiPluginRegistry,
+) -> Result<(), String> {
+    let tasks_dir = plugin_cache_dir(plugin_id)?.join("tasks");
+    let Ok(entries) = fs::read_dir(&tasks_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("tmp"))
+                .unwrap_or(false)
+                && path_modified_age_secs(&path).unwrap_or(0) > PLUGIN_TASK_TMP_TTL_SECS
+            {
+                let _ = fs::remove_file(&path);
+            }
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let has_ledger_record = registry
+            .task_states
+            .values()
+            .any(|state| state.plugin_id == plugin_id && plugin_task_dir_matches(state, &path));
+        if !has_ledger_record
+            && path_modified_age_secs(&path).unwrap_or(0) > PLUGIN_TASK_CACHE_TTL_SECS
+        {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_stale_plugin_tasks_in_registry(
+    plugin_id: &str,
+    registry: &mut AiPluginRegistry,
+) -> bool {
+    let mut changed = false;
+    for state in registry.task_states.values_mut() {
+        if state.plugin_id != plugin_id {
+            continue;
+        }
+        if matches!(state.status.as_str(), "failed" | "cancelled" | "canceled") {
+            cleanup_failed_plugin_task_dir(state);
+            continue;
+        }
+        if state.status == "succeeded"
+            && !state.adopted
+            && task_updated_age_secs(state).unwrap_or(0) > PLUGIN_TASK_SUCCESS_TTL_SECS
+        {
+            let task_dir = PathBuf::from(&state.task_dir);
+            if task_dir.exists() {
+                let _ = fs::remove_dir_all(&task_dir);
+            }
+            state.status = "discarded".to_string();
+            state.updated_at = Utc::now().to_rfc3339();
+            state.outputs.clear();
+            state.progress = Some(100);
+            state.message = Some("Unadopted outputs expired and were cleaned up.".to_string());
+            state.error = None;
+            state.error_code = None;
+            state.error_domain = None;
+            state.error_details = None;
+            state.retryable = false;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn cleanup_plugin_task_cache_with_registry(
+    plugin_id: &str,
+    registry: &mut AiPluginRegistry,
+) -> Result<bool, String> {
+    let changed = cleanup_stale_plugin_tasks_in_registry(plugin_id, registry);
+    cleanup_orphan_plugin_task_dirs(plugin_id, registry)?;
+    Ok(changed)
+}
+
+fn cleanup_plugin_task_cache(plugin_id: &str) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    let changed = cleanup_plugin_task_cache_with_registry(plugin_id, &mut registry)?;
+    if changed {
+        save_registry(&registry)?;
+    }
+    Ok(())
+}
+
+fn validate_plugin_output_paths(result: &Value, output_dir: &Path) -> Result<(), String> {
+    let Some(outputs) = result.get("outputs").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let output_root = output_dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve plugin output directory: {}", e))?;
+    for output in outputs {
+        let Some(path) = output.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let output_path = PathBuf::from(path);
+        let canonical = output_path
+            .canonicalize()
+            .map_err(|e| format!("Plugin returned missing output '{}': {}", path, e))?;
+        if !canonical.starts_with(&output_root) {
+            return Err(format!(
+                "Plugin returned output outside the task output directory: {}",
+                path
+            ));
+        }
+        let metadata = fs::metadata(&canonical)
+            .map_err(|e| format!("Failed to read plugin output '{}': {}", path, e))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!(
+                "Plugin returned empty or non-file output: {}",
+                path
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Stage external input files into the plugin's readable area for sandboxing.
+///
+/// When the process sandbox is enabled (Windows + not disabled), the plugin
+/// cannot read arbitrary files on disk. This rewrites every `path` field in
+/// `inputs` that points outside the plugin's writable directories: the file
+/// is copied into `<task_dir>/inputs/<original_name>` and the path is
+/// replaced with the staging location. Files already inside a writable dir
+/// are left untouched.
+///
+/// Returns the (possibly rewritten) inputs value. When the sandbox is off,
+/// returns the inputs unchanged without any filesystem work.
+fn stage_input_files_for_sandbox(
+    plugin_id: &str,
+    task_id: &str,
+    inputs: &Value,
+    writable_dirs: &[PathBuf],
+) -> Result<Value, String> {
+    if !t_sandbox::sandbox_enabled() {
+        return Ok(inputs.clone());
+    }
+    let task_dir = plugin_task_temp_dir(plugin_id, task_id)?;
+    let staging_dir = task_dir.join("inputs");
+    fs::create_dir_all(&staging_dir)
+        .map_err(|e| format!("Failed to create input staging directory: {}", e))?;
+    let mut staged = inputs.clone();
+    stage_paths_in_value(&mut staged, &staging_dir, writable_dirs);
+    Ok(staged)
+}
+
+/// Recursively walk a JSON value, rewriting every `path` string field that
+/// points outside the writable dirs to a staged copy under `staging_dir`.
+fn stage_paths_in_value(value: &mut Value, staging_dir: &Path, writable_dirs: &[PathBuf]) {
+    match value {
+        Value::Object(map) => {
+            if let Some(path_str) = map.get("path").and_then(Value::as_str) {
+                let path = PathBuf::from(path_str);
+                if path.is_absolute() && path.exists() {
+                    let inside_writable = writable_dirs.iter().any(|w| is_path_inside(&path, w));
+                    let inside_staging = is_path_inside(&path, staging_dir);
+                    if !inside_writable && !inside_staging {
+                        if let Ok(staged_path) = stage_one_file(&path, staging_dir) {
+                            map["path"] = Value::String(staged_path.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+            for (_, child) in map.iter_mut() {
+                stage_paths_in_value(child, staging_dir, writable_dirs);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                stage_paths_in_value(item, staging_dir, writable_dirs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Copy a single file into the staging directory, generating a unique name to
+/// avoid collisions when multiple inputs share a basename.
+fn stage_one_file(src: &Path, staging_dir: &Path) -> Result<PathBuf, String> {
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "input".to_string());
+    let ext = src
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+    // Disambiguate collisions with a counter.
+    let mut candidate = staging_dir.join(format!("{}{}", stem, ext));
+    let mut counter = 1;
+    while candidate.exists() {
+        candidate = staging_dir.join(format!("{}_{}{}", stem, counter, ext));
+        counter += 1;
+    }
+    fs::copy(src, &candidate)
+        .map_err(|e| format!("Failed to stage input '{}': {}", src.display(), e))?;
+    Ok(candidate)
+}
+
+fn cleanup_failed_plugin_task_dir(state: &AiPluginTaskState) {
+    if !matches!(state.status.as_str(), "failed" | "cancelled" | "canceled") {
+        return;
+    }
+    let task_dir = PathBuf::from(&state.task_dir);
+    if task_dir.exists() {
+        let _ = fs::remove_dir_all(task_dir);
+    }
+}
+
+fn task_error_retryable(code: &str, domain: Option<&str>) -> bool {
+    let code = code.to_ascii_uppercase();
+    if matches!(
+        code.as_str(),
+        "DEVICE_OOM"
+            | "PLUGIN_NOT_READY"
+            | "TIMEOUT"
+            | "HTTP_ERROR"
+            | "RESPONSE_PARSE_FAILED"
+            | "OUTPUT_VALIDATION_FAILED"
+    ) {
+        return true;
+    }
+    matches!(
+        domain,
+        Some("device_backend") | Some("runtime") | Some("transport")
+    )
+}
+
+fn apply_task_error(
+    state: &mut AiPluginTaskState,
+    code: &str,
+    domain: Option<&str>,
+    message: String,
+    details: Option<Value>,
+) {
+    state.status = "failed".to_string();
+    state.updated_at = Utc::now().to_rfc3339();
+    state.error = Some(message);
+    state.error_code = Some(code.to_string());
+    state.error_domain = domain.map(str::to_string);
+    state.error_details = details;
+    state.retryable = task_error_retryable(code, domain);
+    cleanup_failed_plugin_task_dir(state);
+}
+
+fn apply_plugin_task_progress(state: &mut AiPluginTaskState, result: &Value) {
+    if let Some(progress) = result.get("progress").and_then(Value::as_u64) {
+        state.progress = Some(progress.min(100) as u8);
+    }
+    if let Some(message) = result.get("message").and_then(Value::as_str) {
+        state.message = Some(message.to_string());
+    }
+}
+
+fn apply_plugin_error(state: &mut AiPluginTaskState, result: &Value, fallback: String) {
+    let error = result.get("error").unwrap_or(&Value::Null);
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("PLUGIN_ERROR");
+    let domain = error.get("domain").and_then(Value::as_str);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or(fallback);
+    let details = error.get("details").cloned();
+    apply_task_error(state, code, domain, message, details);
+}
+
+fn plugin_task_status(result: &Value) -> Option<&str> {
+    result
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| result.get("taskStatus").and_then(Value::as_str))
+}
+
+fn is_plugin_task_terminal(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "succeeded" | "completed" | "failed" | "error" | "cancelled" | "canceled"
+    )
+}
+
+fn apply_plugin_task_result(
+    state: &mut AiPluginTaskState,
+    result: &Value,
+    output_dir: &Path,
+) -> Result<(), String> {
+    let status = plugin_task_status(result)
+        .unwrap_or_else(|| {
+            if result.get("ok").and_then(Value::as_bool) == Some(false) {
+                "failed"
+            } else {
+                ""
+            }
+        })
+        .to_ascii_lowercase();
+
+    match status.as_str() {
+        "queued" | "running" | "cancelling" => {
+            state.status = status;
+            state.updated_at = Utc::now().to_rfc3339();
+            apply_plugin_task_progress(state, result);
+        }
+        "succeeded" | "completed" => {
+            if let Err(error) = validate_plugin_output_paths(result, output_dir) {
+                apply_task_error(
+                    state,
+                    "OUTPUT_VALIDATION_FAILED",
+                    Some("filesystem"),
+                    error.clone(),
+                    None,
+                );
+                return Err(error);
+            }
+            state.status = "succeeded".to_string();
+            state.updated_at = Utc::now().to_rfc3339();
+            state.outputs = result
+                .get("outputs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            state.progress = Some(100);
+            apply_plugin_task_progress(state, result);
+            if state.message.is_none() {
+                state.message = Some("Completed".to_string());
+            }
+            state.error = None;
+            state.error_code = None;
+            state.error_domain = None;
+            state.error_details = None;
+            state.retryable = false;
+        }
+        "cancelled" | "canceled" => {
+            state.status = "cancelled".to_string();
+            state.updated_at = Utc::now().to_rfc3339();
+            apply_plugin_task_progress(state, result);
+            state.error = result
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            state.error_code = result
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            state.error_domain = result
+                .get("error")
+                .and_then(|error| error.get("domain"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            state.error_details = result
+                .get("error")
+                .and_then(|error| error.get("details"))
+                .cloned();
+            state.retryable = false;
+            cleanup_failed_plugin_task_dir(state);
+        }
+        "failed" | "error" => {
+            apply_plugin_task_progress(state, result);
+            apply_plugin_error(state, result, "Plugin task failed".to_string());
+            cleanup_failed_plugin_task_dir(state);
+        }
+        "" => {}
+        other => {
+            state.status = other.to_string();
+            state.updated_at = Utc::now().to_rfc3339();
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_plugin_task_event(
+    state: &mut AiPluginTaskState,
+    event: &Value,
+    output_dir: &Path,
+) -> Result<(), String> {
+    if let Some(task_state) = event.get("state") {
+        apply_plugin_task_result(state, task_state, output_dir)
+    } else {
+        apply_plugin_task_result(state, event, output_dir)
+    }
+}
+
+async fn poll_plugin_task_until_terminal(
+    base_url: &str,
+    task_id: &str,
+    token: &str,
+    state: &mut AiPluginTaskState,
+    output_dir: &Path,
+) -> Result<Value, String> {
+    let url = join_url(base_url, &format!("/tasks/{}", task_id));
+    let events_url = join_url(base_url, &format!("/tasks/{}/events", task_id));
+    let client = plugin_http_client(Some(token), 30_000)?;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(PLUGIN_TASK_POLL_TIMEOUT_MS))
+        .unwrap_or_else(tokio::time::Instant::now);
+    let mut event_cursor: i64 = 0;
+    let mut events_supported = true;
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            let _ = request_plugin_task_cancel(base_url, task_id, token).await;
+            apply_task_error(
+                state,
+                "TIMEOUT",
+                Some("transport"),
+                format!(
+                    "Plugin task did not finish within {} ms",
+                    PLUGIN_TASK_POLL_TIMEOUT_MS
+                ),
+                None,
+            );
+            save_task_state(state.clone())?;
+            return Err(state
+                .error
+                .clone()
+                .unwrap_or_else(|| "Plugin task polling timed out".to_string()));
+        }
+
+        let response = if events_supported {
+            match client
+                .get(&events_url)
+                .query(&[
+                    ("after", event_cursor.to_string()),
+                    ("timeoutMs", "25000".to_string()),
+                ])
+                .send()
+                .await
+            {
+                Ok(response) if response.status().as_u16() != 404 => Some(response),
+                Ok(_) => {
+                    events_supported = false;
+                    None
+                }
+                Err(_) => {
+                    events_supported = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let response = match response {
+            Some(response) => response,
+            None => match client.get(&url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    apply_task_error(
+                        state,
+                        "HTTP_ERROR",
+                        Some("transport"),
+                        format!("Failed to query plugin task status: {}", error),
+                        None,
+                    );
+                    save_task_state(state.clone())?;
+                    return Err(format!("Failed to query plugin task status: {}", error));
+                }
+            },
+        };
+        let status_code = response.status();
+        let result = match response.json::<Value>().await {
+            Ok(result) => result,
+            Err(error) => {
+                apply_task_error(
+                    state,
+                    "RESPONSE_PARSE_FAILED",
+                    Some("transport"),
+                    format!("Failed to parse plugin task status: {}", error),
+                    None,
+                );
+                save_task_state(state.clone())?;
+                return Err(format!("Failed to parse plugin task status: {}", error));
+            }
+        };
+
+        if !status_code.is_success() {
+            apply_plugin_error(
+                state,
+                &result,
+                format!("Task status endpoint returned {}", status_code),
+            );
+            save_task_state(state.clone())?;
+            return Err(format!(
+                "Task status endpoint returned {}: {}",
+                status_code, result
+            ));
+        }
+
+        if events_supported {
+            if let Some(events) = result.get("events").and_then(Value::as_array) {
+                for event in events {
+                    apply_plugin_task_event(state, event, output_dir)?;
+                    if let Some(seq) = event.get("seq").and_then(Value::as_i64) {
+                        event_cursor = event_cursor.max(seq);
+                    }
+                }
+                if events.is_empty() {
+                    if let Some(plugin_state) = result.get("state") {
+                        apply_plugin_task_result(state, plugin_state, output_dir)?;
+                    }
+                }
+            } else {
+                apply_plugin_task_result(state, &result, output_dir)?;
+            }
+        } else {
+            apply_plugin_task_result(state, &result, output_dir)?;
+        }
+        save_task_state(state.clone())?;
+
+        if is_plugin_task_terminal(&state.status) {
+            return Ok(result);
+        }
+
+        tokio::time::sleep(Duration::from_millis(PLUGIN_TASK_POLL_INTERVAL_MS)).await;
+    }
+}
+
+async fn request_plugin_task_cancel(
+    base_url: &str,
+    task_id: &str,
+    token: &str,
+) -> Result<(), String> {
+    let url = join_url(base_url, &format!("/tasks/{}/cancel", task_id));
+    let client = plugin_http_client(Some(token), PLUGIN_TASK_CANCEL_TIMEOUT_MS)?;
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({ "taskId": task_id }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request plugin task cancel: {}", e))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Plugin task cancel endpoint returned {}",
+            response.status()
+        ))
+    }
+}
+
+fn spawn_plugin_task_poll(
+    base_url: String,
+    task_id: String,
+    token: String,
+    mut state: AiPluginTaskState,
+    output_dir: PathBuf,
+) {
+    tokio::spawn(async move {
+        let _ =
+            poll_plugin_task_until_terminal(&base_url, &task_id, &token, &mut state, &output_dir)
+                .await;
+    });
+}
+
+async fn query_plugin_task_once(
+    base_url: &str,
+    task_id: &str,
+    token: &str,
+    state: &mut AiPluginTaskState,
+    output_dir: &Path,
+) -> Result<Value, String> {
+    let client = plugin_http_client(Some(token), PLUGIN_DIAGNOSTICS_TIMEOUT_MS)?;
+    let events_url = join_url(base_url, &format!("/tasks/{}/events", task_id));
+    let status_url = join_url(base_url, &format!("/tasks/{}", task_id));
+
+    if let Ok(response) = client
+        .get(&events_url)
+        .query(&[("after", "0"), ("timeoutMs", "0")])
+        .send()
+        .await
+    {
+        if response.status().is_success() {
+            let value = response
+                .json::<Value>()
+                .await
+                .map_err(|e| format!("Failed to parse plugin task events: {}", e))?;
+            if let Some(events) = value.get("events").and_then(Value::as_array) {
+                for event in events {
+                    apply_plugin_task_event(state, event, output_dir)?;
+                }
+            }
+            if let Some(plugin_state) = value.get("state") {
+                apply_plugin_task_result(state, plugin_state, output_dir)?;
+            }
+            save_task_state(state.clone())?;
+            return Ok(value);
+        }
+    }
+
+    let response = client
+        .get(&status_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to query plugin task status: {}", e))?;
+    let status_code = response.status();
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("Failed to parse plugin task status: {}", e))?;
+    if !status_code.is_success() {
+        return Err(format!(
+            "Task status endpoint returned {}: {}",
+            status_code, value
+        ));
+    }
+    apply_plugin_task_result(state, &value, output_dir)?;
+    save_task_state(state.clone())?;
+    Ok(value)
+}
+
+fn find_plugin_manifest(plugin_id: &str) -> Result<(PathBuf, AiPluginManifest), String> {
+    for manifest_path in discover_manifest_paths()? {
+        let manifest = read_manifest(&manifest_path)?;
+        if manifest.id == plugin_id {
+            return Ok((manifest_path, manifest));
+        }
+    }
+    Err(format!("Plugin '{}' was not found", plugin_id))
+}
+
+fn find_plugin_capability<'a>(
+    manifest: &'a AiPluginManifest,
+    capability_id: &str,
+) -> Result<&'a PluginCapability, String> {
+    manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == capability_id)
+        .ok_or_else(|| {
+            format!(
+                "Capability '{}' was not found in plugin '{}'",
+                capability_id, manifest.id
+            )
+        })
+}
+
+fn default_smoke_capability(manifest: &AiPluginManifest) -> String {
+    manifest
+        .smoke_test
+        .as_ref()
+        .and_then(|smoke_test| smoke_test.capability.clone())
+        .or_else(|| {
+            manifest
+                .capabilities
+                .first()
+                .map(|capability| capability.id.clone())
+        })
+        .unwrap_or_default()
+}
+
+fn requested_backend_from_runtime(runtime: Option<&Value>) -> Option<String> {
+    runtime
+        .and_then(|runtime| runtime.get("preferredDevice"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "auto")
+        .map(|value| value.to_lowercase())
+}
+
+fn profile_for_invocation<'a>(
+    manifest: &'a AiPluginManifest,
+    runtime: Option<&Value>,
+) -> Option<&'a PluginInstallProfile> {
+    if let Some(backend) = requested_backend_from_runtime(runtime) {
+        return manifest
+            .install_profiles
+            .iter()
+            .find(|profile| profile.backend.eq_ignore_ascii_case(&backend));
+    }
+
+    manifest
+        .install_profiles
+        .iter()
+        .find(|profile| {
+            profile
+                .runtime_binding
+                .as_ref()
+                .and_then(|binding| binding.python.as_ref())
+                .is_some()
+        })
+        .or_else(|| {
+            manifest.install_profiles.iter().find(|profile| {
+                profile
+                    .runtime_bindings
+                    .iter()
+                    .any(|binding| binding.python.as_ref().is_some())
+            })
+        })
+}
+
+fn ensure_runtime_probe_gate(
+    plugin_id: &str,
+    capability_id: &str,
+    manifest_path: &Path,
+    manifest: &AiPluginManifest,
+    runtime: Option<&Value>,
+) -> Result<(), String> {
+    let Some(profile) = profile_for_invocation(manifest, runtime) else {
+        return Ok(());
+    };
+    let runtime_binding = selected_runtime_binding(profile, None, None)?;
+    let Some(binding) = runtime_binding.as_ref() else {
+        return Ok(());
+    };
+    if binding
+        .python
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Ok(());
+    }
+
+    let registry = load_registry()?;
+    if let Some(profile_state) = registry
+        .profile_states
+        .get(&profile_state_key(plugin_id, &profile.id))
+    {
+        let same_backend = profile_state.backend.trim().is_empty()
+            || profile_state.backend.eq_ignore_ascii_case(&profile.backend);
+        let same_binding = runtime_binding_signature(profile_state.runtime_binding.as_ref())
+            == runtime_binding_signature(runtime_binding.as_ref());
+        if profile_state.verified
+            && profile_state.status == "verified"
+            && same_backend
+            && same_binding
+        {
+            return Ok(());
+        }
+    }
+    let key = runtime_probe_key(
+        plugin_id,
+        &profile.id,
+        &profile.backend,
+        runtime_binding.as_ref(),
+    );
+    let Some(state) = registry.runtime_probe_states.get(&key).cloned() else {
+        return Err(format!(
+            "Runtime probe is required before invoking '{}'. Probe profile '{}' ({}) first.",
+            capability_id, profile.id, profile.backend
+        ));
+    };
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+    let state = mark_runtime_probe_staleness(
+        state,
+        runtime_probe_fingerprint(root, &effective_profile, runtime_binding.as_ref()),
+    );
+    if state.stale {
+        return Err(format!(
+            "Runtime probe for profile '{}' is stale: {}. Run Probe again before invoking '{}'.",
+            profile.id,
+            state.stale_reason.unwrap_or_else(|| "unknown".to_string()),
+            capability_id
+        ));
+    }
+    if !state.available || state.status != "passed" {
+        return Err(format!(
+            "Runtime probe for profile '{}' failed. {}",
+            profile.id,
+            state
+                .error
+                .unwrap_or_else(|| "Run Probe and inspect the runtime diagnostics.".to_string())
+        ));
+    }
+    // Block invocation when declared requirements conflict with the versions
+    // installed in the probed runtime. This catches environment drift (e.g.
+    // numpy upgraded to 2.x in a shared runtime that still pins ==1.26.4)
+    // before a capability call fails with a confusing import or ABI error.
+    if let Some(requirements_rel) = profile_requirements(profile) {
+        if safe_profile_relative_path(requirements_rel) {
+            let requirements_path = root.join(requirements_rel);
+            if requirements_path.is_file() {
+                if let Some(probe_result) = state.result.as_ref() {
+                    let conflicts = detect_runtime_conflicts(&requirements_path, probe_result);
+                    let blocking: Vec<&RuntimeConflict> = conflicts
+                        .iter()
+                        .filter(|c| c.kind == "version_mismatch" || c.kind == "missing")
+                        .collect();
+                    if !blocking.is_empty() {
+                        let summary = blocking
+                            .iter()
+                            .map(|c| c.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(format!(
+                            "Runtime conflicts for profile '{}': {}. Switch to a plugin-private runtime or re-run Setup.",
+                            profile.id, summary
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_valid_manifest(manifest_path: &Path, manifest: &AiPluginManifest) -> Result<(), String> {
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+    let validation = validate_manifest(manifest, root);
+    if validation.valid {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Plugin manifest is invalid: {}",
+        validation.errors.join("; ")
+    ))
+}
+
+#[tauri::command]
+pub fn get_ai_plugin_registry() -> Result<AiPluginRegistry, String> {
+    load_registry()
+}
+
+#[tauri::command]
+pub fn grant_ai_plugin_permissions(
+    plugin_id: String,
+    request: AiPluginPermissionGrantRequest,
+) -> Result<AiPluginPermissionGrant, String> {
+    let plugin_id = plugin_id.trim().to_string();
+    if plugin_id.is_empty() {
+        return Err("Plugin id is required".to_string());
+    }
+
+    let mut registry = load_registry()?;
+    let grant = AiPluginPermissionGrant {
+        plugin_id: plugin_id.clone(),
+        runtime_network: request.runtime_network,
+        setup_downloads: request.setup_downloads,
+        upload_selected_files: request.upload_selected_files,
+        upload_outputs: request.upload_outputs,
+        allowed_domains: request
+            .allowed_domains
+            .into_iter()
+            .map(|domain| domain.trim().to_string())
+            .filter(|domain| !domain.is_empty())
+            .collect(),
+        updated_at: Some(Utc::now().to_rfc3339()),
+    };
+    registry
+        .permission_grants
+        .insert(permission_grant_key(&plugin_id), grant.clone());
+    save_registry(&registry)?;
+    Ok(grant)
+}
+
+#[tauri::command]
+pub fn revoke_ai_plugin_permissions(plugin_id: String) -> Result<AiPluginRegistry, String> {
+    let plugin_id = plugin_id.trim().to_string();
+    if plugin_id.is_empty() {
+        return Err("Plugin id is required".to_string());
+    }
+
+    let mut registry = load_registry()?;
+    registry
+        .permission_grants
+        .remove(&permission_grant_key(&plugin_id));
+    save_registry(&registry)?;
+    Ok(registry)
+}
+
+#[tauri::command]
+pub fn list_trusted_publishers() -> Result<Vec<AiPluginTrustedPublisher>, String> {
+    let registry = load_registry()?;
+    Ok(registry.trusted_publishers.values().cloned().collect())
+}
+
+#[tauri::command]
+pub fn trust_publisher(
+    publisher: String,
+    public_key: String,
+) -> Result<Vec<AiPluginTrustedPublisher>, String> {
+    let publisher = publisher.trim().to_string();
+    let public_key = public_key.trim().to_string();
+    if publisher.is_empty() || public_key.is_empty() {
+        return Err("Publisher and public key are required".to_string());
+    }
+    let mut registry = load_registry()?;
+    registry.trusted_publishers.insert(
+        publisher.clone(),
+        AiPluginTrustedPublisher {
+            publisher,
+            public_key,
+            trusted_at: Utc::now().to_rfc3339(),
+        },
+    );
+    save_registry(&registry)?;
+    Ok(registry.trusted_publishers.values().cloned().collect())
+}
+
+#[tauri::command]
+pub fn remove_trusted_publisher(
+    publisher: String,
+) -> Result<Vec<AiPluginTrustedPublisher>, String> {
+    let publisher = publisher.trim().to_string();
+    let mut registry = load_registry()?;
+    registry.trusted_publishers.remove(&publisher);
+    save_registry(&registry)?;
+    Ok(registry.trusted_publishers.values().cloned().collect())
+}
+
+#[tauri::command]
+pub fn get_ai_plugin_host_environment() -> Result<AiPluginHostEnvironment, String> {
+    Ok(build_host_environment())
+}
+
+#[tauri::command]
+pub async fn probe_ai_plugin_python_runtime(
+    request: AiPluginPythonRuntimeProbeRequest,
+) -> Result<AiPluginPythonRuntimeProbeResult, String> {
+    probe_python_runtime(request).await
+}
+
+#[tauri::command]
+pub fn register_ai_plugin_path(path: String) -> Result<AiPluginRegistry, String> {
+    let mut registry = load_registry()?;
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err(format!("Plugin path does not exist: {}", path));
+    }
+
+    let normalized = normalize_path(&path_buf);
+    if !registry.registered_paths.iter().any(|p| p == &normalized) {
+        registry.registered_paths.push(normalized);
+        registry.registered_paths.sort();
+        save_registry(&registry)?;
+    }
+
+    Ok(registry)
+}
+
+fn zip_entry_normalized_path(name: &str) -> Result<PathBuf, String> {
+    if name.trim().is_empty() {
+        return Err("Package entry path must not be empty".to_string());
+    }
+
+    let normalized = name.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.contains(':') {
+        return Err(format!("Package entry must be relative: {}", name));
+    }
+
+    let mut path = PathBuf::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err(format!(
+                "Package entry must not escape the plugin root: {}",
+                name
+            ));
+        }
+        path.push(part);
+    }
+
+    if path.as_os_str().is_empty() {
+        return Err(format!("Package entry path must not be empty: {}", name));
+    }
+
+    Ok(path)
+}
+
+fn zip_top_level_name(name: &str) -> Result<Option<String>, String> {
+    let path = zip_entry_normalized_path(name)?;
+    Ok(path
+        .components()
+        .next()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .filter(|part| !part.trim().is_empty()))
+}
+
+fn safe_relative_path_from_str(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.contains(':') {
+        return None;
+    }
+
+    let mut path = PathBuf::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        path.push(part);
+    }
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn plugin_model_relative_path(model: &Value) -> Option<PathBuf> {
+    let path = model.get("path").and_then(Value::as_str)?;
+    let relative = safe_relative_path_from_str(path)?;
+    relative
+        .strip_prefix("models")
+        .ok()
+        .map(PathBuf::from)
+        .or(Some(relative))
+}
+
+fn plugin_model_file_summaries(
+    manifest: &AiPluginManifest,
+) -> Result<Vec<AiPluginModelFileSummary>, String> {
+    let model_dir = plugin_model_dir(&manifest.id)?;
+    let mut summaries = Vec::new();
+    for model in &manifest.models {
+        let Some(relative) = plugin_model_relative_path(model) else {
+            continue;
+        };
+        let path = model_dir.join(relative);
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("model")
+            .to_string();
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&id)
+            .to_string();
+        summaries.push(AiPluginModelFileSummary {
+            id,
+            name,
+            required: model
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            exists: path.is_file(),
+            path: normalize_path(&path),
+            purpose: model
+                .get("purpose")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string()),
+        });
+    }
+    Ok(summaries)
+}
+
+fn plugin_model_drop_dirs(manifest: &AiPluginManifest) -> Result<Vec<PathBuf>, String> {
+    let model_dir = plugin_model_dir(&manifest.id)?;
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+
+    for model in &manifest.models {
+        let Some(relative) = plugin_model_relative_path(model) else {
+            continue;
+        };
+        let target = model_dir.join(relative);
+        let drop_dir = if target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some()
+        {
+            target
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| model_dir.clone())
+        } else {
+            target
+        };
+        let key = normalize_path(&drop_dir);
+        if seen.insert(key) {
+            dirs.push(drop_dir);
+        }
+    }
+
+    if dirs.is_empty() {
+        dirs.push(model_dir);
+    }
+    Ok(dirs)
+}
+
+fn runtime_binding_display_dir(
+    plugin_id: &str,
+    profile: &PluginInstallProfile,
+    binding: &PluginRuntimeBinding,
+) -> Result<Option<PathBuf>, String> {
+    if binding.scope.eq_ignore_ascii_case("shared") {
+        let runtime_id = binding
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(&profile.id);
+        return shared_runtime_root(runtime_id).map(Some);
+    }
+
+    if binding.scope.eq_ignore_ascii_case("external") {
+        if let Some(root) = binding
+            .root
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Ok(Some(PathBuf::from(root)));
+        }
+        if let Some(python) = binding
+            .python
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Ok(Path::new(python).parent().map(PathBuf::from));
+        }
+        return Ok(None);
+    }
+
+    profile_runtime_dir(plugin_id, profile)
+}
+
+fn plugin_runtime_display_dirs(plugin_id: &str, manifest: &AiPluginManifest) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+
+    for profile in &manifest.install_profiles {
+        for binding in profile_runtime_bindings(profile) {
+            let Ok(Some(dir)) = runtime_binding_display_dir(plugin_id, profile, &binding) else {
+                continue;
+            };
+            let key = normalize_path(&dir);
+            if seen.insert(key) {
+                dirs.push(dir);
+            }
+        }
+    }
+
+    if dirs.is_empty() {
+        if let Ok(dir) = plugin_runtime_root(plugin_id) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+fn prepare_installed_plugin_storage(manifest: &AiPluginManifest) -> Result<(), String> {
+    let data_dir = plugin_data_dir(&manifest.id)?;
+    let model_dir = plugin_model_dir(&manifest.id)?;
+    let logs_dir = plugin_logs_dir(&manifest.id)?;
+    let runtime_dir = plugin_runtime_root(&manifest.id)?;
+    let cache_dir = plugin_cache_dir(&manifest.id)?;
+    let output_dir = plugin_output_dir(&manifest.id)?;
+    let config_path = plugin_config_path(&manifest.id)?;
+
+    let drop_dirs = plugin_model_drop_dirs(manifest)?;
+    for model in &manifest.models {
+        let Some(relative) = plugin_model_relative_path(model) else {
+            continue;
+        };
+        let target = model_dir.join(relative);
+        let parent = if target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some()
+        {
+            target.parent().map(PathBuf::from)
+        } else {
+            Some(target)
+        };
+        if let Some(parent) = parent {
+            fs::create_dir_all(&parent).map_err(|e| {
+                format!(
+                    "Failed to create plugin model directory '{}': {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    let mut readme = String::new();
+    readme.push_str(&format!("PicAiPic plugin storage for {}\n\n", manifest.id));
+    readme.push_str("Put model files under this plugin's models directory.\n\n");
+    readme.push_str(&format!("Plugin data: {}\n", data_dir.display()));
+    readme.push_str(&format!("Models: {}\n", model_dir.display()));
+    readme.push_str(&format!("Logs: {}\n", logs_dir.display()));
+    readme.push_str(&format!("Runtime envs: {}\n", runtime_dir.display()));
+    readme.push_str(&format!("Task cache: {}\n", cache_dir.display()));
+    readme.push_str(&format!("Outputs: {}\n", output_dir.display()));
+    readme.push_str(&format!("Local config: {}\n\n", config_path.display()));
+    readme.push_str("Expected models:\n");
+    if manifest.models.is_empty() {
+        readme.push_str("- This plugin did not declare model files.\n");
+    } else {
+        for model in &manifest.models {
+            let id = model.get("id").and_then(Value::as_str).unwrap_or("model");
+            let name = model.get("name").and_then(Value::as_str).unwrap_or(id);
+            let required = model
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let required_label = if required { "required" } else { "optional" };
+            if let Some(relative) = plugin_model_relative_path(model) {
+                readme.push_str(&format!(
+                    "- [{}] {}: {}\n",
+                    required_label,
+                    name,
+                    model_dir.join(relative).display()
+                ));
+            }
+        }
+    }
+    if !drop_dirs.is_empty() {
+        readme.push_str("\nModel drop folders:\n");
+        for dir in &drop_dirs {
+            readme.push_str(&format!("- {}\n", dir.display()));
+        }
+    }
+    fs::write(model_dir.join("README.txt"), &readme).map_err(|e| {
+        format!(
+            "Failed to write plugin model README for '{}': {}",
+            manifest.id, e
+        )
+    })?;
+    for dir in drop_dirs {
+        if dir != model_dir {
+            fs::create_dir_all(&dir).map_err(|e| {
+                format!(
+                    "Failed to create plugin model directory '{}': {}",
+                    dir.display(),
+                    e
+                )
+            })?;
+            fs::write(dir.join("README.txt"), &readme).map_err(|e| {
+                format!(
+                    "Failed to write plugin model README for '{}': {}",
+                    manifest.id, e
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_plugin_package_file(zip_path: &Path, entry_path: &str) -> Result<String, String> {
+    let file = fs::File::open(zip_path).map_err(|e| {
+        format!(
+            "Failed to open plugin package '{}': {}",
+            zip_path.display(),
+            e
+        )
+    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+    let expected = entry_path.replace('\\', "/");
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read zip entry {}: {}", index, e))?;
+        if entry.name().replace('\\', "/") != expected {
+            continue;
+        }
+
+        let mut content = String::new();
+        entry
+            .read_to_string(&mut content)
+            .map_err(|e| format!("Failed to read '{}': {}", entry_path, e))?;
+        return Ok(content);
+    }
+
+    Err(format!("Package is missing '{}'", entry_path))
+}
+
+/// Result of checking a package's signature against the trust store.
+enum SignatureVerifyResult {
+    /// Signature is valid and the publisher is already trusted.
+    Verified,
+    /// Signature is valid but the publisher is not yet trusted. The frontend
+    /// should prompt the user to trust this publisher, then retry install.
+    NeedsTrust {
+        publisher: String,
+        public_key: String,
+    },
+    /// No signature present. Allowed only in developer mode.
+    UnsignedAllowed,
+}
+
+/// Check whether a package's Ed25519 signature is valid and whether the
+/// publisher is in the user's trust store. In developer mode
+/// (`PICAIPIC_ALLOW_UNSIGNED_PLUGINS` env), unsigned packages are allowed.
+fn verify_package_signature(
+    package_manifest: &AiPluginPackageManifest,
+    publisher: &Option<String>,
+    registry: &AiPluginRegistry,
+) -> Result<SignatureVerifyResult, String> {
+    use base64::Engine;
+    use ed25519_dalek::{Verifier, VerifyingKey};
+
+    let Some(signature) = package_manifest.signature.as_ref() else {
+        // No signature. Allow only in developer mode.
+        let dev_mode = std::env::var("PICAIPIC_ALLOW_UNSIGNED_PLUGINS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if dev_mode {
+            return Ok(SignatureVerifyResult::UnsignedAllowed);
+        }
+        return Err(
+            "Plugin package is not signed. Enable developer mode to allow unsigned plugins."
+                .to_string(),
+        );
+    };
+
+    if signature.algorithm != "ed25519" {
+        return Err(format!(
+            "Unsupported signature algorithm '{}'. Only 'ed25519' is supported.",
+            signature.algorithm
+        ));
+    }
+
+    // Reconstruct the signed content: the package manifest JSON without the
+    // `signature` field. We re-serialize with a default (None) signature to
+    // get the canonical bytes the signer signed.
+    //
+    // Canonicalization: serialize via `serde_json::Value` so that object keys
+    // are emitted in lexicographic order (serde_json's default `Map` is a
+    // BTreeMap when the `preserve_order` feature is off, which it is here).
+    // The Python signer (`sign_plugin.py`) uses `json.dumps(sort_keys=True)`
+    // with the same compact separators, so both sides produce byte-identical
+    // output regardless of struct field declaration order or manifest file
+    // key order. This is what makes the signature robust against reordering.
+    let mut unsigned = package_manifest.clone();
+    unsigned.signature = None;
+    let unsigned_value = serde_json::to_value(&unsigned).map_err(|e| {
+        format!(
+            "Failed to serialize package manifest for verification: {}",
+            e
+        )
+    })?;
+    let signed_bytes = serde_json::to_vec(&unsigned_value).map_err(|e| {
+        format!(
+            "Failed to serialize package manifest for verification: {}",
+            e
+        )
+    })?;
+
+    // Decode public key.
+    let public_key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature.public_key.as_bytes())
+        .map_err(|e| format!("Invalid signature public key (base64 decode failed): {}", e))?;
+    if public_key_bytes.len() != 32 {
+        return Err(format!(
+            "Invalid Ed25519 public key length: expected 32 bytes, got {}",
+            public_key_bytes.len()
+        ));
+    }
+    let mut pk_array = [0u8; 32];
+    pk_array.copy_from_slice(&public_key_bytes);
+    let verifying_key = VerifyingKey::from_bytes(&pk_array)
+        .map_err(|e| format!("Invalid Ed25519 public key: {}", e))?;
+
+    // Decode signature value.
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature.value.as_bytes())
+        .map_err(|e| format!("Invalid signature value (base64 decode failed): {}", e))?;
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "Invalid Ed25519 signature length: expected 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let mut sig_array = [0u8; 64];
+    sig_array.copy_from_slice(&sig_bytes);
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_array);
+
+    // Verify.
+    verifying_key
+        .verify(&signed_bytes, &sig)
+        .map_err(|e| format!("Package signature verification failed: {}", e))?;
+
+    // Signature is valid. Check trust store.
+    let publisher_name = publisher
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or("unknown");
+    let trusted = registry.trusted_publishers.get(publisher_name);
+    match trusted {
+        Some(tp) if tp.public_key == signature.public_key => Ok(SignatureVerifyResult::Verified),
+        _ => Ok(SignatureVerifyResult::NeedsTrust {
+            publisher: publisher_name.to_string(),
+            public_key: signature.public_key.clone(),
+        }),
+    }
+}
+
+fn validate_package_manifest_file_list(
+    zip_path: &Path,
+    top_level: &str,
+    package_manifest: &AiPluginPackageManifest,
+) -> Result<(), String> {
+    let mut expected = HashMap::new();
+    for file in &package_manifest.files {
+        if file.path.trim().is_empty() {
+            return Err("Package manifest contains an empty file path".to_string());
+        }
+        if file.sha256.trim().is_empty() {
+            return Err(format!(
+                "Package manifest file '{}' is missing sha256",
+                file.path
+            ));
+        }
+        zip_entry_normalized_path(&file.path)?;
+        expected.insert(file.path.replace('\\', "/"), file.clone());
+    }
+
+    if expected.is_empty() {
+        return Err("Package manifest file list is empty".to_string());
+    }
+
+    let file = fs::File::open(zip_path).map_err(|e| {
+        format!(
+            "Failed to open plugin package '{}': {}",
+            zip_path.display(),
+            e
+        )
+    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read zip entry {}: {}", index, e))?;
+        let name = entry.name().replace('\\', "/");
+        if name.ends_with('/') {
+            continue;
+        }
+        let relative = name
+            .strip_prefix(&format!("{}/", top_level))
+            .ok_or_else(|| {
+                format!(
+                    "Package entry is outside top-level plugin directory: {}",
+                    name
+                )
+            })?
+            .to_string();
+        if relative == "picaipic.package.json" {
+            continue;
+        }
+        let Some(expected_file) = expected.remove(&relative) else {
+            return Err(format!(
+                "Package contains file not declared in manifest: {}",
+                relative
+            ));
+        };
+        if expected_file.size != entry.size() {
+            return Err(format!(
+                "Package file size mismatch for '{}': manifest {}, zip {}",
+                relative,
+                expected_file.size,
+                entry.size()
+            ));
+        }
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut entry, &mut hasher)
+            .map_err(|e| format!("Failed to hash package file '{}': {}", relative, e))?;
+        let actual = format!("{:X}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(&expected_file.sha256) {
+            return Err(format!("Package file sha256 mismatch for '{}'", relative));
+        }
+    }
+
+    if !expected.is_empty() {
+        let missing = expected.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "Package manifest declares missing files: {}",
+            missing
+        ));
+    }
+
+    Ok(())
+}
+
+fn unpack_plugin_package(zip_path: &Path, destination: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path).map_err(|e| {
+        format!(
+            "Failed to open plugin package '{}': {}",
+            zip_path.display(),
+            e
+        )
+    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read zip entry {}: {}", index, e))?;
+        let relative = zip_entry_normalized_path(entry.name())?;
+        let output_path = destination.join(relative);
+        if !output_path.starts_with(destination) {
+            return Err(format!(
+                "Refusing to unpack entry outside destination: {}",
+                entry.name()
+            ));
+        }
+
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path).map_err(|e| {
+                format!(
+                    "Failed to create plugin package directory '{}': {}",
+                    output_path.display(),
+                    e
+                )
+            })?;
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create plugin package directory '{}': {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        let mut output = fs::File::create(&output_path)
+            .map_err(|e| format!("Failed to create '{}': {}", output_path.display(), e))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|e| format!("Failed to unpack '{}': {}", output_path.display(), e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn install_ai_plugin_package(
+    package_path: String,
+) -> Result<AiPluginPackageInstallResult, String> {
+    let zip_path = PathBuf::from(&package_path);
+    if !zip_path.exists() {
+        return Err(format!("Plugin package does not exist: {}", package_path));
+    }
+    if zip_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| !extension.eq_ignore_ascii_case("zip"))
+        .unwrap_or(true)
+    {
+        return Err("Plugin package must be a .zip file".to_string());
+    }
+
+    let file = fs::File::open(&zip_path).map_err(|e| {
+        format!(
+            "Failed to open plugin package '{}': {}",
+            zip_path.display(),
+            e
+        )
+    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+    let mut top_levels = HashSet::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read zip entry {}: {}", index, e))?;
+        if let Some(top_level) = zip_top_level_name(entry.name())? {
+            top_levels.insert(top_level);
+        }
+    }
+    drop(archive);
+
+    if top_levels.len() != 1 {
+        return Err("Plugin package must contain exactly one top-level directory".to_string());
+    }
+    let top_level = top_levels
+        .iter()
+        .next()
+        .cloned()
+        .ok_or_else(|| "Plugin package is empty".to_string())?;
+
+    let manifest_entry = format!("{}/{}", top_level, MANIFEST_FILE_NAME);
+    let package_entry = format!("{}/picaipic.package.json", top_level);
+    let manifest_content = read_plugin_package_file(&zip_path, &manifest_entry)?;
+    let package_content = read_plugin_package_file(&zip_path, &package_entry)?;
+    let manifest =
+        serde_json::from_str::<AiPluginManifest>(manifest_content.trim_start_matches('\u{feff}'))
+            .map_err(|e| format!("Failed to parse package plugin manifest: {}", e))?;
+    let package_manifest = serde_json::from_str::<AiPluginPackageManifest>(
+        package_content.trim_start_matches('\u{feff}'),
+    )
+    .map_err(|e| format!("Failed to parse package manifest: {}", e))?;
+
+    if package_manifest.schema_version != 1 {
+        return Err(format!(
+            "Unsupported package schemaVersion {}; expected 1",
+            package_manifest.schema_version
+        ));
+    }
+    if package_manifest.package_kind != "picaipic-plugin-package" {
+        return Err(format!(
+            "Unsupported packageKind '{}'",
+            package_manifest.package_kind
+        ));
+    }
+    if package_manifest.plugin_id != manifest.id {
+        return Err(format!(
+            "Package pluginId '{}' does not match manifest id '{}'",
+            package_manifest.plugin_id, manifest.id
+        ));
+    }
+    if package_manifest.version != manifest.version {
+        return Err(format!(
+            "Package version '{}' does not match manifest version '{}'",
+            package_manifest.version, manifest.version
+        ));
+    }
+    if top_level != manifest.id {
+        return Err(format!(
+            "Package top-level directory '{}' must match plugin id '{}'",
+            top_level, manifest.id
+        ));
+    }
+
+    validate_package_manifest_file_list(&zip_path, &top_level, &package_manifest)?;
+
+    // Verify package signature and check the publisher trust store.
+    let registry_for_sig = load_registry()?;
+    let sig_result =
+        verify_package_signature(&package_manifest, &manifest.publisher, &registry_for_sig)?;
+    let (signature_verified, needs_trust) = match &sig_result {
+        SignatureVerifyResult::Verified => (true, None),
+        SignatureVerifyResult::UnsignedAllowed => (false, None),
+        SignatureVerifyResult::NeedsTrust {
+            publisher,
+            public_key,
+        } => (false, Some((publisher.clone(), public_key.clone()))),
+    };
+    if let Some((publisher, public_key)) = needs_trust {
+        return Err(format!(
+            "TRUST_REQUIRED:{}:{}:{}",
+            publisher, public_key, manifest.id
+        ));
+    }
+
+    let plugin_root = plugin_home_dir()?;
+    let destination = plugin_root.join(&manifest.id);
+    let staging_root = plugin_root.join(format!(".installing-{}-{}", manifest.id, Uuid::new_v4()));
+    fs::create_dir_all(&plugin_root)
+        .map_err(|e| format!("Failed to create plugin directory: {}", e))?;
+    fs::create_dir_all(&staging_root)
+        .map_err(|e| format!("Failed to create plugin staging directory: {}", e))?;
+
+    let install_result = (|| -> Result<(AiPluginManifest, PluginValidationReport), String> {
+        unpack_plugin_package(&zip_path, &staging_root)?;
+        let staged_destination = staging_root.join(&manifest.id);
+        let staged_manifest_path = staged_destination.join(MANIFEST_FILE_NAME);
+        let staged_manifest = read_manifest(&staged_manifest_path)?;
+        let validation = validate_manifest(&staged_manifest, &staged_destination);
+        if !validation.valid {
+            return Err(format!(
+                "Installed plugin manifest is invalid: {}",
+                validation.errors.join("; ")
+            ));
+        }
+
+        if !is_path_inside(&staged_destination, &staging_root) {
+            return Err(format!(
+                "Refusing to install staged plugin outside staging directory: {}",
+                staged_destination.display()
+            ));
+        }
+
+        Ok((staged_manifest, validation))
+    })();
+
+    let (installed_manifest, validation) = match install_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+    };
+
+    if destination.exists() {
+        if !is_path_inside(&destination, &plugin_root) {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "Refusing to replace plugin outside user plugin directory: {}",
+                destination.display()
+            ));
+        }
+        if let Err(error) = fs::remove_dir_all(&destination) {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "Failed to replace existing plugin '{}': {}",
+                destination.display(),
+                error
+            ));
+        }
+    }
+    let staged_destination = staging_root.join(&manifest.id);
+    if let Err(error) = fs::rename(&staged_destination, &destination) {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(format!(
+            "Failed to move plugin into install directory '{}': {}",
+            destination.display(),
+            error
+        ));
+    }
+    let _ = fs::remove_dir_all(&staging_root);
+
+    prepare_installed_plugin_storage(&installed_manifest)?;
+    let storage = plugin_storage_summary(&installed_manifest.id, &destination);
+    let model_files = plugin_model_file_summaries(&installed_manifest)?;
+
+    let registry = register_ai_plugin_path(normalize_path(&destination))?;
+    Ok(AiPluginPackageInstallResult {
+        plugin_id: installed_manifest.id,
+        version: installed_manifest.version,
+        installed_path: normalize_path(&destination),
+        registered_paths: registry.registered_paths,
+        package_warnings: package_manifest.warnings,
+        validation,
+        storage,
+        model_files,
+        signature_verified,
+        publisher: installed_manifest.publisher,
+    })
+}
+
+#[tauri::command]
+pub fn unregister_ai_plugin_path(path: String) -> Result<AiPluginRegistry, String> {
+    let mut registry = load_registry()?;
+    let normalized = normalize_path(&PathBuf::from(path));
+    registry.registered_paths.retain(|p| p != &normalized);
+    save_registry(&registry)?;
+    Ok(registry)
+}
+
+fn clear_plugin_registry_state(registry: &mut AiPluginRegistry, plugin_id: &str) {
+    registry
+        .permission_grants
+        .retain(|_, grant| grant.plugin_id != plugin_id);
+    registry
+        .profile_states
+        .retain(|_, state| state.plugin_id != plugin_id);
+    registry
+        .setup_jobs
+        .retain(|_, job| job.plugin_id != plugin_id);
+    registry
+        .runtime_probe_states
+        .retain(|_, state| state.plugin_id != plugin_id);
+    registry
+        .task_states
+        .retain(|_, state| state.plugin_id != plugin_id);
+}
+
+#[tauri::command]
+pub async fn uninstall_ai_plugin(
+    plugin_id: String,
+    mode: Option<String>,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginUninstallResult, String> {
+    let plugin_id = plugin_id.trim().to_string();
+    if plugin_id.is_empty() {
+        return Err("Plugin id is required".to_string());
+    }
+
+    let mode = mode
+        .as_deref()
+        .map(|m| m.trim().to_ascii_lowercase())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "code_only".to_string());
+    let purge_data = mode == "code_and_data";
+
+    let plugin_root = plugin_home_dir()?;
+    let target = plugin_root.join(&plugin_id);
+    if !target.exists() {
+        return Err(format!("Installed plugin was not found: {}", plugin_id));
+    }
+    if !target.is_dir() {
+        return Err(format!(
+            "Installed plugin path is not a directory: {}",
+            target.display()
+        ));
+    }
+    if !is_path_inside(&target, &plugin_root) {
+        return Err(format!(
+            "Refusing to uninstall plugin outside user plugin directory: {}",
+            target.display()
+        ));
+    }
+
+    let manifest_path = target.join(MANIFEST_FILE_NAME);
+    let manifest = read_manifest(&manifest_path)?;
+    if manifest.id != plugin_id {
+        return Err(format!(
+            "Installed plugin id mismatch: expected '{}', found '{}'",
+            plugin_id, manifest.id
+        ));
+    }
+
+    let _ = stop_ai_plugin_runtime(plugin_id.clone(), &state).await;
+
+    if let Err(error) = fs::remove_dir_all(&target) {
+        return Err(format!(
+            "Failed to remove installed plugin '{}': {}",
+            target.display(),
+            error
+        ));
+    }
+
+    let normalized = normalize_path(&target);
+
+    // In "code_and_data" mode, additionally remove per-plugin data, cache,
+    // outputs, and plugin-private runtimes. Shared runtimes are intentionally
+    // never deleted because other plugins may depend on them.
+    let mut removed_extra_paths: Vec<String> = Vec::new();
+    if purge_data {
+        let store = plugin_store_dir()?;
+        for sub in [
+            "plugin-data",
+            "plugin-cache",
+            "plugin-outputs",
+            "plugin-runtimes",
+        ] {
+            let dir = store.join(sub).join(&plugin_id);
+            if let Some(removed) = remove_existing_dir(&dir, &store) {
+                removed_extra_paths.push(removed);
+            }
+        }
+    }
+
+    let mut registry = load_registry()?;
+    registry.registered_paths.retain(|path| path != &normalized);
+    clear_plugin_registry_state(&mut registry, &plugin_id);
+    save_registry(&registry)?;
+
+    Ok(AiPluginUninstallResult {
+        plugin_id,
+        removed_path: normalized,
+        registered_paths: registry.registered_paths,
+        mode,
+        removed_extra_paths,
+    })
+}
+
+#[tauri::command]
+pub fn validate_ai_plugin_manifest(path: String) -> Result<PluginManifestValidationResult, String> {
+    let input = PathBuf::from(path);
+    let manifest_path = if input.is_dir() {
+        input.join(MANIFEST_FILE_NAME)
+    } else {
+        input
+    };
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+
+    match read_manifest(&manifest_path) {
+        Ok(manifest) => {
+            let validation = validate_manifest(&manifest, root);
+            Ok(PluginManifestValidationResult {
+                manifest_path: normalize_path(&manifest_path),
+                manifest: Some(manifest),
+                validation,
+            })
+        }
+        Err(error) => Ok(PluginManifestValidationResult {
+            manifest_path: normalize_path(&manifest_path),
+            manifest: None,
+            validation: PluginValidationReport {
+                valid: false,
+                errors: vec![error],
+                warnings: Vec::new(),
+            },
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn list_ai_plugins() -> Result<Vec<AiPluginSummary>, String> {
+    let mut registry = load_registry()?;
+    let manifest_paths = discover_manifest_paths()?;
+    let mut duplicate_counts: HashMap<String, usize> = HashMap::new();
+    let mut loaded = Vec::new();
+    let mut registry_changed = false;
+
+    for manifest_path in manifest_paths {
+        match read_manifest(&manifest_path) {
+            Ok(manifest) => {
+                if !manifest.id.is_empty() {
+                    *duplicate_counts.entry(manifest.id.clone()).or_default() += 1;
+                }
+                loaded.push((manifest_path, Some(manifest), None));
+            }
+            Err(error) => loaded.push((manifest_path, None, Some(error))),
+        }
+    }
+
+    for (_, manifest, _) in &loaded {
+        if let Some(manifest) = manifest {
+            if !manifest.id.is_empty() {
+                registry_changed |=
+                    cleanup_plugin_task_cache_with_registry(&manifest.id, &mut registry)?;
+            }
+        }
+    }
+    if registry_changed {
+        save_registry(&registry)?;
+    }
+
+    let profile_states = registry.profile_states;
+    let permission_grants = registry.permission_grants;
+    let setup_jobs = registry.setup_jobs;
+    let runtime_probe_states = registry.runtime_probe_states;
+    let task_states = registry.task_states;
+
+    let mut summaries = Vec::new();
+    for (manifest_path, manifest, error) in loaded {
+        if let Some(manifest) = manifest {
+            let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+            let mut validation = validate_manifest(&manifest, root);
+            if duplicate_counts.get(&manifest.id).copied().unwrap_or(0) > 1 {
+                validation.valid = false;
+                validation
+                    .errors
+                    .push(format!("Duplicate plugin id '{}'", manifest.id));
+            }
+            let permission_grant = permission_grants
+                .get(&permission_grant_key(&manifest.id))
+                .cloned();
+            summaries.push(manifest_to_summary(
+                &manifest_path,
+                manifest,
+                validation,
+                permission_grant,
+                &profile_states,
+                &setup_jobs,
+                &runtime_probe_states,
+                &task_states,
+            ));
+        } else {
+            let error = error.unwrap_or_else(|| "Failed to read manifest".to_string());
+            let root_path = manifest_path
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            summaries.push(AiPluginSummary {
+                id: String::new(),
+                name: String::new(),
+                version: String::new(),
+                publisher: None,
+                path: normalize_path(&root_path),
+                manifest_path: normalize_path(&manifest_path),
+                platform_supported: false,
+                validation: PluginValidationReport {
+                    valid: false,
+                    errors: vec![error],
+                    warnings: Vec::new(),
+                },
+                permissions: AiPluginPermissionsSummary::default(),
+                permission_grant: None,
+                runtimes: Vec::new(),
+                runtime: None,
+                entry: None,
+                install: None,
+                storage: plugin_storage_summary("", &root_path),
+                install_profiles: Vec::new(),
+                smoke_test: None,
+                capabilities: Vec::new(),
+                contributes: PluginContributesSummary::default(),
+                task_states: Vec::new(),
+            });
+        }
+    }
+
+    summaries.sort_by(|a, b| {
+        a.id.cmp(&b.id)
+            .then_with(|| a.manifest_path.cmp(&b.manifest_path))
+    });
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn get_ai_plugin_status(
+    plugin_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginStatus, String> {
+    get_ai_plugin_status_runtime(plugin_id, Some(&state)).await
+}
+
+async fn get_ai_plugin_status_runtime(
+    plugin_id: String,
+    state: Option<&AiPluginRuntimeState>,
+) -> Result<AiPluginStatus, String> {
+    let (_manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    let Some(entry) = manifest.entry else {
+        return Ok(ai_plugin_status(
+            plugin_id,
+            false,
+            false,
+            None,
+            None,
+            Some("Plugin has no entry".to_string()),
+        ));
+    };
+
+    if entry.kind != "local-http" {
+        return Ok(ai_plugin_status(
+            plugin_id,
+            false,
+            false,
+            None,
+            None,
+            Some(format!(
+                "Status probing is not supported for '{}'",
+                entry.kind
+            )),
+        ));
+    }
+
+    let Some(base_url) = plugin_base_url(&plugin_id, &entry, state).await else {
+        return Ok(ai_plugin_status(
+            plugin_id,
+            false,
+            false,
+            None,
+            None,
+            Some("Plugin has no baseUrl".to_string()),
+        ));
+    };
+
+    let managed = runtime_base_url(state, &plugin_id).await.is_some();
+    let token = if managed {
+        match state {
+            Some(s) => runtime_auth_token(s, &plugin_id).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    probe_ai_plugin_status(plugin_id, &entry, base_url, managed, token.as_deref()).await
+}
+
+async fn probe_ai_plugin_status(
+    plugin_id: String,
+    entry: &PluginEntry,
+    base_url: String,
+    managed: bool,
+    token: Option<&str>,
+) -> Result<AiPluginStatus, String> {
+    let url = join_url(&base_url, &status_path_for(&entry));
+    let client = plugin_http_client(token, 1200)?;
+
+    match client.get(&url).send().await {
+        Ok(response) => {
+            let status_code = response.status();
+            match response.json::<Value>().await {
+                Ok(value)
+                    if status_code.is_success() && !plugin_status_matches(&plugin_id, &value) =>
+                {
+                    Ok(ai_plugin_status(
+                        plugin_id,
+                        false,
+                        managed,
+                        Some(url),
+                        Some(value),
+                        Some("Status endpoint belongs to a different plugin".to_string()),
+                    ))
+                }
+                Ok(value) if status_code.is_success() => Ok(ai_plugin_status(
+                    plugin_id,
+                    true,
+                    managed,
+                    Some(url),
+                    Some(value),
+                    None,
+                )),
+                Ok(value) => Ok(ai_plugin_status(
+                    plugin_id,
+                    false,
+                    managed,
+                    Some(url),
+                    Some(value),
+                    Some(format!("Status endpoint returned {}", status_code)),
+                )),
+                Err(error) => Ok(ai_plugin_status(
+                    plugin_id,
+                    false,
+                    managed,
+                    Some(url),
+                    None,
+                    Some(format!("Failed to parse status response: {}", error)),
+                )),
+            }
+        }
+        Err(error) => Ok(ai_plugin_status(
+            plugin_id,
+            false,
+            managed,
+            Some(url),
+            None,
+            Some(error.to_string()),
+        )),
+    }
+}
+
+fn plugin_status_matches(plugin_id: &str, value: &Value) -> bool {
+    value
+        .get("pluginId")
+        .and_then(Value::as_str)
+        .map(|id| id == plugin_id)
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+pub async fn get_ai_plugin_diagnostics(
+    plugin_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginDiagnostics, String> {
+    get_ai_plugin_diagnostics_runtime(plugin_id, Some(&state)).await
+}
+
+async fn get_ai_plugin_diagnostics_runtime(
+    plugin_id: String,
+    state: Option<&AiPluginRuntimeState>,
+) -> Result<AiPluginDiagnostics, String> {
+    let (_manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    let Some(entry) = manifest.entry else {
+        return Ok(AiPluginDiagnostics {
+            plugin_id,
+            reachable: false,
+            url: None,
+            diagnostics: None,
+            error: Some("Plugin has no entry".to_string()),
+        });
+    };
+
+    if entry.kind != "local-http" {
+        return Ok(AiPluginDiagnostics {
+            plugin_id,
+            reachable: false,
+            url: None,
+            diagnostics: None,
+            error: Some(format!(
+                "Diagnostics are not supported for '{}'",
+                entry.kind
+            )),
+        });
+    }
+
+    let Some(base_url) = plugin_base_url(&plugin_id, &entry, state).await else {
+        return Ok(AiPluginDiagnostics {
+            plugin_id,
+            reachable: false,
+            url: None,
+            diagnostics: None,
+            error: Some("Plugin has no baseUrl".to_string()),
+        });
+    };
+
+    let url = join_url(&base_url, "/diagnostics");
+    let token = match state {
+        Some(s) => runtime_auth_token(s, &plugin_id).await,
+        None => None,
+    };
+    let client = plugin_http_client(token.as_deref(), PLUGIN_DIAGNOSTICS_TIMEOUT_MS)?;
+
+    match client.get(&url).send().await {
+        Ok(response) => {
+            let status_code = response.status();
+            match response.json::<Value>().await {
+                Ok(value) if status_code.is_success() => Ok(AiPluginDiagnostics {
+                    plugin_id,
+                    reachable: true,
+                    url: Some(url),
+                    diagnostics: Some(value),
+                    error: None,
+                }),
+                Ok(value) => Ok(AiPluginDiagnostics {
+                    plugin_id,
+                    reachable: false,
+                    url: Some(url),
+                    diagnostics: Some(value),
+                    error: Some(format!("Diagnostics endpoint returned {}", status_code)),
+                }),
+                Err(error) => Ok(AiPluginDiagnostics {
+                    plugin_id,
+                    reachable: false,
+                    url: Some(url),
+                    diagnostics: None,
+                    error: Some(format!("Failed to parse diagnostics response: {}", error)),
+                }),
+            }
+        }
+        Err(error) => Ok(AiPluginDiagnostics {
+            plugin_id,
+            reachable: false,
+            url: Some(url),
+            diagnostics: None,
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn mark_ai_plugin_profile_setup_needed(
+    plugin_id: String,
+    request: AiPluginProfileSetupRequest,
+) -> Result<AiPluginProfileState, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+
+    let profile = find_manifest_profile(&manifest, &plugin_id, &request.profile_id)?;
+    let capability = setup_capability(&manifest, request.capability)?;
+    let runtime_binding = selected_runtime_binding(
+        profile,
+        request.runtime_binding_id.as_deref(),
+        request.runtime_binding.clone(),
+    )?;
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let mut job = new_setup_job(
+        &plugin_id,
+        &effective_profile,
+        &request.backend,
+        &capability,
+        root,
+        "Preparing local runtime setup artifacts. No dependency installation will be executed yet.",
+    );
+    match prepare_profile_local_artifacts(root, &effective_profile, &mut job) {
+        Ok(()) => {
+            job.status = "needsVerify".to_string();
+            job.progress = 100;
+            job.updated_at = Utc::now().to_rfc3339();
+            job.message =
+                Some("Runtime setup artifacts are ready. Run Verify or Smoke next.".to_string());
+            job.log.push(
+                "Dependency installation is not implemented yet; no setup command was executed."
+                    .to_string(),
+            );
+            job.log
+                .push("Run Verify or Smoke to validate the existing runtime.".to_string());
+        }
+        Err(error) => {
+            job.status = "failed".to_string();
+            job.progress = 100;
+            job.updated_at = Utc::now().to_rfc3339();
+            job.message = Some("Runtime setup artifact preparation failed.".to_string());
+            job.error = Some(error.clone());
+            job.log.push(format!("Setup failed: {}", error));
+        }
+    }
+    save_setup_job(job.clone())?;
+
+    let state = AiPluginProfileState {
+        plugin_id: plugin_id.clone(),
+        profile_id: request.profile_id,
+        backend: request.backend,
+        capability,
+        status: if job.status == "failed" {
+            "failed".to_string()
+        } else {
+            "needsVerify".to_string()
+        },
+        verified: false,
+        updated_at: job.updated_at.clone(),
+        setup_attempted: true,
+        setup_job_id: Some(job.id.clone()),
+        duration_ms: None,
+        error: job.error.clone(),
+        result: None,
+        runtime_binding,
+    };
+    save_profile_state(state.clone())?;
+    clear_profile_runtime_probe_states(&plugin_id, &state.profile_id, &state.backend)?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn cancel_ai_plugin_setup(
+    job_id: String,
+    cancel_state: tauri::State<'_, SetupCancellationState>,
+) -> Result<(), String> {
+    let registry = load_registry()?;
+    let job = registry
+        .setup_jobs
+        .get(&job_id)
+        .ok_or_else(|| format!("Setup job '{}' was not found", job_id))?;
+    if job.status != "running" {
+        return Err(format!(
+            "Setup job '{}' cannot be cancelled from status '{}'",
+            job_id, job.status
+        ));
+    }
+    cancel_state.request_cancel(&job_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn preview_ai_plugin_profile_setup_command(
+    plugin_id: String,
+    request: AiPluginProfileSetupRequest,
+) -> Result<AiPluginSetupPreview, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let profile = find_manifest_profile(&manifest, &plugin_id, &request.profile_id)?;
+    let capability = setup_capability(&manifest, request.capability)?;
+    let runtime_binding = selected_runtime_binding(
+        profile,
+        request.runtime_binding_id.as_deref(),
+        request.runtime_binding.clone(),
+    )?;
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let command = manifest
+        .install
+        .as_ref()
+        .and_then(|install| install.command.as_deref())
+        .ok_or_else(|| "Plugin has no setup command".to_string())?;
+
+    Ok(build_setup_preview(
+        &plugin_id,
+        root,
+        command,
+        &effective_profile,
+        &request.backend,
+        &capability,
+        runtime_binding,
+    ))
+}
+
+#[tauri::command]
+pub async fn run_ai_plugin_profile_setup_command(
+    plugin_id: String,
+    request: AiPluginProfileSetupRequest,
+    cancel_state: tauri::State<'_, SetupCancellationState>,
+) -> Result<AiPluginProfileState, String> {
+    if !request.allow_command_execution {
+        return Err("Setup command execution requires explicit confirmation".to_string());
+    }
+
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let profile = find_manifest_profile(&manifest, &plugin_id, &request.profile_id)?;
+    let capability = setup_capability(&manifest, request.capability)?;
+    let runtime_binding = selected_runtime_binding(
+        profile,
+        request.runtime_binding_id.as_deref(),
+        request.runtime_binding.clone(),
+    )?;
+    let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let command = manifest
+        .install
+        .as_ref()
+        .and_then(|install| install.command.as_deref())
+        .ok_or_else(|| "Plugin has no setup command".to_string())?;
+
+    let mut job = new_setup_job(
+        &plugin_id,
+        &effective_profile,
+        &request.backend,
+        &capability,
+        root,
+        "Running plugin setup command.",
+    );
+    save_setup_job(job.clone())?;
+    save_profile_state(AiPluginProfileState {
+        plugin_id: plugin_id.clone(),
+        profile_id: request.profile_id.clone(),
+        backend: request.backend.clone(),
+        capability: capability.clone(),
+        status: "running".to_string(),
+        verified: false,
+        updated_at: job.updated_at.clone(),
+        setup_attempted: true,
+        setup_job_id: Some(job.id.clone()),
+        duration_ms: None,
+        error: None,
+        result: None,
+        runtime_binding: runtime_binding.clone(),
+    })?;
+
+    let status: String;
+    let mut error: Option<String> = None;
+    match prepare_profile_local_artifacts(root, &effective_profile, &mut job) {
+        Ok(()) => match run_setup_command(
+            root,
+            command,
+            &plugin_id,
+            &effective_profile,
+            &request.backend,
+            &capability,
+            &mut job,
+            Some(&cancel_state),
+        )
+        .await
+        {
+            Ok(SetupCommandOutcome::Completed) => {
+                status = "needsVerify".to_string();
+                job.status = "needsVerify".to_string();
+                job.progress = 100;
+                job.message =
+                    Some("Setup command completed. Run Verify or Smoke next.".to_string());
+                job.log
+                    .push("Setup command completed successfully.".to_string());
+                job.log
+                    .push("Run Verify or Smoke to validate this profile.".to_string());
+            }
+            Ok(SetupCommandOutcome::Cancelled) => {
+                status = "cancelled".to_string();
+                job.status = "cancelled".to_string();
+                job.progress = 100;
+                job.message = Some("Setup command was cancelled.".to_string());
+                job.error = None;
+            }
+            Err(command_error) => {
+                status = "failed".to_string();
+                error = Some(command_error.clone());
+                job.status = "failed".to_string();
+                job.progress = 100;
+                job.message = Some("Setup command failed.".to_string());
+                job.error = Some(command_error.clone());
+                job.log
+                    .push(format!("Setup command failed: {}", command_error));
+            }
+        },
+        Err(artifact_error) => {
+            status = "failed".to_string();
+            error = Some(artifact_error.clone());
+            job.status = "failed".to_string();
+            job.progress = 100;
+            job.message = Some("Runtime setup artifact preparation failed.".to_string());
+            job.error = Some(artifact_error.clone());
+            job.log.push(format!("Setup failed: {}", artifact_error));
+        }
+    }
+    job.updated_at = Utc::now().to_rfc3339();
+    append_setup_log(&plugin_id, &job)?;
+    save_setup_job(job.clone())?;
+
+    let state = AiPluginProfileState {
+        plugin_id: plugin_id.clone(),
+        profile_id: request.profile_id,
+        backend: request.backend,
+        capability,
+        status,
+        verified: false,
+        updated_at: job.updated_at.clone(),
+        setup_attempted: true,
+        setup_job_id: Some(job.id.clone()),
+        duration_ms: None,
+        error,
+        result: None,
+        runtime_binding,
+    };
+    save_profile_state(state.clone())?;
+    clear_profile_runtime_probe_states(&plugin_id, &state.profile_id, &state.backend)?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn smoke_test_ai_plugin(
+    plugin_id: String,
+    request: AiPluginSmokeTestRequest,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginSmokeTestResult, String> {
+    let start = tokio::time::Instant::now();
+    let start_status = start_ai_plugin(
+        plugin_id.clone(),
+        Some(AiPluginStartRequest {
+            profile_id: Some(request.profile_id.clone()),
+            backend: Some(request.backend.clone()),
+            capability: Some(request.capability.clone()),
+            runtime_binding_id: request.runtime_binding_id.clone(),
+            runtime_binding: request.runtime_binding.clone(),
+        }),
+        state.clone(),
+    )
+    .await?;
+    if !start_status.reachable {
+        let startup_status = start_status.clone();
+        return Ok(AiPluginSmokeTestResult {
+            plugin_id,
+            profile_id: request.profile_id,
+            backend: request.backend,
+            capability: request.capability,
+            reachable: false,
+            url: start_status.url.clone(),
+            passed: false,
+            duration_ms: Some(start.elapsed().as_millis() as u64),
+            result: start_status.status.clone(),
+            error: start_status
+                .error
+                .or_else(|| Some("Plugin did not start".to_string())),
+            startup_status: Some(startup_status),
+        });
+    }
+
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+
+    let Some(entry) = manifest.entry.as_ref() else {
+        return Err("Plugin has no entry".to_string());
+    };
+    if entry.kind != "local-http" {
+        return Err(format!(
+            "Smoke tests are not supported for '{}'",
+            entry.kind
+        ));
+    }
+
+    find_plugin_capability(&manifest, &request.capability)?;
+
+    let profile = if request.profile_id.trim().is_empty() {
+        None
+    } else {
+        Some(find_manifest_profile(
+            &manifest,
+            &plugin_id,
+            &request.profile_id,
+        )?)
+    };
+    let runtime_binding = match profile {
+        Some(profile) => selected_runtime_binding(
+            profile,
+            request.runtime_binding_id.as_deref(),
+            request.runtime_binding.clone(),
+        )?,
+        None => None,
+    };
+
+    let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(&state)).await else {
+        return Ok(AiPluginSmokeTestResult {
+            plugin_id,
+            profile_id: request.profile_id,
+            backend: request.backend,
+            capability: request.capability,
+            reachable: false,
+            url: None,
+            passed: false,
+            duration_ms: Some(start.elapsed().as_millis() as u64),
+            result: None,
+            error: Some("Plugin has no baseUrl".to_string()),
+            startup_status: None,
+        });
+    };
+
+    let url = join_url(&base_url, "/smoke-test");
+    let timeout_ms = manifest
+        .smoke_test
+        .as_ref()
+        .and_then(|smoke_test| smoke_test.timeout_ms)
+        .unwrap_or(PLUGIN_SMOKE_TEST_TIMEOUT_MS);
+    let client = plugin_http_client(
+        runtime_auth_token(&state, &plugin_id).await.as_deref(),
+        timeout_ms,
+    )?;
+
+    let payload = serde_json::json!({
+        "profileId": request.profile_id,
+        "backend": request.backend,
+        "capability": request.capability,
+        "runtimeBinding": runtime_binding.clone(),
+    });
+
+    match client.post(&url).json(&payload).send().await {
+        Ok(response) => {
+            let status_code = response.status();
+            match response.json::<Value>().await {
+                Ok(value) => {
+                    let passed = status_code.is_success()
+                        && value
+                            .get("passed")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                    let duration_ms = value
+                        .get("durationMs")
+                        .and_then(Value::as_u64)
+                        .or_else(|| Some(start.elapsed().as_millis() as u64));
+                    let error = if passed {
+                        None
+                    } else {
+                        value
+                            .get("error")
+                            .and_then(|error| {
+                                error
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| error.as_str())
+                            })
+                            .map(|error| error.to_string())
+                            .or_else(|| {
+                                Some(format!("Smoke test endpoint returned {}", status_code))
+                            })
+                    };
+                    let state = AiPluginProfileState {
+                        plugin_id: plugin_id.clone(),
+                        profile_id: request.profile_id.clone(),
+                        backend: request.backend.clone(),
+                        capability: request.capability.clone(),
+                        status: if passed { "verified" } else { "failed" }.to_string(),
+                        verified: passed,
+                        updated_at: Utc::now().to_rfc3339(),
+                        setup_attempted: true,
+                        setup_job_id: load_registry().ok().and_then(|registry| {
+                            registry
+                                .profile_states
+                                .get(&profile_state_key(&plugin_id, &request.profile_id))
+                                .and_then(|state| state.setup_job_id.clone())
+                        }),
+                        duration_ms,
+                        error: error.clone(),
+                        result: Some(value.clone()),
+                        runtime_binding: runtime_binding.clone(),
+                    };
+                    save_profile_state(state)?;
+
+                    Ok(AiPluginSmokeTestResult {
+                        plugin_id,
+                        profile_id: request.profile_id,
+                        backend: request.backend,
+                        capability: request.capability,
+                        reachable: status_code.is_success(),
+                        url: Some(url),
+                        passed,
+                        duration_ms,
+                        result: Some(value),
+                        error,
+                        startup_status: None,
+                    })
+                }
+                Err(error) => Ok(AiPluginSmokeTestResult {
+                    plugin_id,
+                    profile_id: request.profile_id,
+                    backend: request.backend,
+                    capability: request.capability,
+                    reachable: false,
+                    url: Some(url),
+                    passed: false,
+                    duration_ms: Some(start.elapsed().as_millis() as u64),
+                    result: None,
+                    error: Some(format!("Failed to parse smoke test response: {}", error)),
+                    startup_status: None,
+                }),
+            }
+        }
+        Err(error) => Ok(AiPluginSmokeTestResult {
+            plugin_id,
+            profile_id: request.profile_id,
+            backend: request.backend,
+            capability: request.capability,
+            reachable: false,
+            url: Some(url),
+            passed: false,
+            duration_ms: Some(start.elapsed().as_millis() as u64),
+            result: None,
+            error: Some(error.to_string()),
+            startup_status: None,
+        }),
+    }
+}
+
+fn read_log_tail(path: &Path) -> Result<AiPluginLogFile, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|e| format!("Failed to read log metadata '{}': {}", path.display(), e))?;
+    let bytes = metadata.len();
+    let mut file = fs::File::open(path)
+        .map_err(|e| format!("Failed to open log file '{}': {}", path.display(), e))?;
+    let start = bytes.saturating_sub(PLUGIN_LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("Failed to seek log file '{}': {}", path.display(), e))?;
+
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .map_err(|e| format!("Failed to read log file '{}': {}", path.display(), e))?;
+    let content = String::from_utf8_lossy(&buffer).to_string();
+
+    Ok(AiPluginLogFile {
+        path: normalize_path(path),
+        name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("plugin.log")
+            .to_string(),
+        bytes,
+        content,
+    })
+}
+
+#[tauri::command]
+pub fn get_ai_plugin_logs(plugin_id: String) -> Result<AiPluginLogs, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+    let logs_dir = plugin_logs_dir(&plugin_id)?;
+
+    if !logs_dir.exists() && !root.join("logs").exists() {
+        return Ok(AiPluginLogs {
+            plugin_id,
+            files: Vec::new(),
+            error: Some("Plugin logs directory does not exist".to_string()),
+        });
+    }
+
+    let mut candidates = Vec::new();
+    for dir in [logs_dir, root.join("logs")] {
+        if !dir.exists() {
+            continue;
+        }
+        let entries = fs::read_dir(&dir)
+            .map_err(|e| format!("Failed to read plugin logs directory: {}", e))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        let modified_a = fs::metadata(a).and_then(|m| m.modified()).ok();
+        let modified_b = fs::metadata(b).and_then(|m| m.modified()).ok();
+        modified_b
+            .cmp(&modified_a)
+            .then_with(|| normalize_path(a).cmp(&normalize_path(b)))
+    });
+    candidates.truncate(3);
+
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in candidates {
+        match read_log_tail(&path) {
+            Ok(file) => files.push(file),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    Ok(AiPluginLogs {
+        plugin_id,
+        files,
+        error: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn start_ai_plugin(
+    plugin_id: String,
+    request: Option<AiPluginStartRequest>,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginStatus, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+
+    let Some(entry) = manifest.entry.clone() else {
+        return Err("Plugin has no entry".to_string());
+    };
+    if entry.kind != "local-http" {
+        return Err(format!(
+            "Starting plugins is not supported for '{}'",
+            entry.kind
+        ));
+    }
+
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let Some(command) = entry.start_command.as_deref() else {
+        return Err("Plugin has no startCommand".to_string());
+    };
+    if !is_safe_relative_command(command) {
+        return Err("startCommand must be a safe relative path".to_string());
+    }
+
+    let command_path = root.join(command);
+    if !command_path.exists() {
+        return Err(format!("startCommand '{}' does not exist", command));
+    }
+    let start_profile = resolve_start_profile(&manifest, &plugin_id, request.as_ref())?;
+    let desired_signature = start_profile_signature(start_profile.as_ref());
+
+    if let Ok(status) = get_ai_plugin_status_runtime(plugin_id.clone(), Some(&state)).await {
+        if status.reachable && status.managed {
+            let same_signature = {
+                let processes = state.processes.lock().await;
+                processes
+                    .get(&plugin_id)
+                    .map(|runtime| runtime.start_signature == desired_signature)
+                    .unwrap_or(false)
+            };
+            if same_signature {
+                return Ok(status);
+            }
+            let _ = stop_ai_plugin_runtime(plugin_id.clone(), &state).await;
+        }
+    }
+
+    {
+        let mut processes = state.processes.lock().await;
+        if let Some(runtime) = processes.get_mut(&plugin_id) {
+            match runtime.child.try_wait() {
+                Ok(None) if runtime.start_signature == desired_signature => {
+                    let base_url = runtime.base_url.clone();
+                    drop(processes);
+                    let start_log_path = plugin_logs_dir(&plugin_id)?.join("start.log");
+                    return wait_for_plugin_ready(
+                        plugin_id,
+                        &entry,
+                        base_url,
+                        &state,
+                        &start_log_path,
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    drop(processes);
+                    let _ = stop_ai_plugin_runtime(plugin_id.clone(), &state).await;
+                }
+                Ok(Some(_)) | Err(_) => {
+                    // Child already exited or try_wait failed: drop the
+                    // RunningPlugin (revokes sandbox ACLs via Drop).
+                    drop(processes.remove(&plugin_id));
+                }
+            }
+        }
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let data_dir = plugin_data_dir(&plugin_id)?;
+    let cache_dir = plugin_cache_dir(&plugin_id)?;
+    let task_dir = plugin_task_temp_dir(&plugin_id, &task_id)?;
+    let output_dir = plugin_output_dir(&plugin_id)?;
+    let model_dir = plugin_model_dir(&plugin_id)?;
+    let config_path = plugin_config_path(&plugin_id)?;
+    let runtime_dir = plugin_runtime_root(&plugin_id)?;
+    let port = allocate_plugin_port(&plugin_id, &entry, &state).await?;
+    let base_url = loopback_base_url(port);
+    let logs_dir = plugin_logs_dir(&plugin_id)?;
+    let start_log_path = logs_dir.join("start.log");
+    let mut start_log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&start_log_path)
+        .map_err(|e| format!("Failed to open plugin start log: {}", e))?;
+    let _ = writeln!(
+        start_log,
+        "\n=== {} start {} ===\ncommand: {}\nroot: {}\nbaseUrl: {}\nport: {}\nsignature: {}\n",
+        Utc::now().to_rfc3339(),
+        plugin_id,
+        normalize_path(&command_path),
+        normalize_path(root),
+        base_url,
+        port,
+        desired_signature.as_deref().unwrap_or("default")
+    );
+    let start_log_stdout = start_log
+        .try_clone()
+        .map_err(|e| format!("Failed to clone plugin start log for stdout: {}", e))?;
+    let start_log_stderr = start_log
+        .try_clone()
+        .map_err(|e| format!("Failed to clone plugin start log for stderr: {}", e))?;
+
+    let auth_token = generate_plugin_auth_token();
+
+    // Apply process sandbox (deny-ACL write confinement) before spawn.
+    // The handle's Drop revokes the ACLs when the RunningPlugin is torn down.
+    let writable_dirs = vec![
+        data_dir.clone(),
+        cache_dir.clone(),
+        output_dir.clone(),
+        model_dir.clone(),
+        runtime_dir.clone(),
+        task_dir.clone(),
+        root.to_path_buf(),
+    ];
+    let sandbox = match t_sandbox::apply_plugin_sandbox(&plugin_id, &writable_dirs) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            // Sandbox failure is non-fatal: log and continue without confinement.
+            let _ = writeln!(
+                start_log,
+                "sandbox: apply failed (continuing unsandboxed): {}",
+                e
+            );
+            None
+        }
+    };
+    if let Some(ref sandbox) = sandbox {
+        let _ = writeln!(start_log, "sandbox: {}", sandbox.summary());
+    }
+
+    let mut cmd = Command::new(&command_path);
+    cmd.current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(start_log_stdout))
+        .stderr(Stdio::from(start_log_stderr))
+        .kill_on_drop(false)
+        .env("PICAIPIC_PLUGIN_ID", &plugin_id)
+        .env("PICAIPIC_PLUGIN_ROOT", root)
+        .env("PICAIPIC_PLUGIN_DATA_DIR", &data_dir)
+        .env("PICAIPIC_PLUGIN_CACHE_DIR", &cache_dir)
+        .env("PICAIPIC_PLUGIN_LOG_DIR", &logs_dir)
+        .env("PICAIPIC_PLUGIN_MODEL_DIR", &model_dir)
+        .env("PICAIPIC_PLUGIN_CONFIG_PATH", &config_path)
+        .env("PICAIPIC_PLUGIN_RUNTIME_DIR", &runtime_dir)
+        .env("PICAIPIC_TASK_TEMP_DIR", &task_dir)
+        .env("PICAIPIC_OUTPUT_DIR", &output_dir);
+
+    cmd.env("PICAIPIC_PLUGIN_PORT", port.to_string())
+        .env("PICAIPIC_PLUGIN_BASE_URL", &base_url)
+        .env("PICAIPIC_PLUGIN_AUTH_TOKEN", &auth_token);
+    if let Some((profile, backend, capability)) = start_profile.as_ref() {
+        for (key, value) in build_setup_environment(root, &plugin_id, profile, backend, capability)?
+        {
+            cmd.env(key, value);
+        }
+    }
+    hide_command_window(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start plugin '{}': {}", plugin_id, e))?;
+
+    {
+        let mut processes = state.processes.lock().await;
+        processes.insert(
+            plugin_id.clone(),
+            RunningPlugin {
+                child,
+                port,
+                base_url: base_url.clone(),
+                start_signature: desired_signature,
+                auth_token: auth_token.clone(),
+                sandbox,
+            },
+        );
+    }
+
+    wait_for_plugin_ready(plugin_id, &entry, base_url, &state, &start_log_path).await
+}
+
+async fn wait_for_plugin_ready(
+    plugin_id: String,
+    entry: &PluginEntry,
+    base_url: String,
+    state: &AiPluginRuntimeState,
+    start_log_path: &Path,
+) -> Result<AiPluginStatus, String> {
+    let url = join_url(&base_url, &health_path_for(entry));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(PLUGIN_STARTUP_TIMEOUT_MS);
+    let client = plugin_http_client(None, 1200)?;
+
+    let mut last_error: Option<String>;
+    loop {
+        match client.get(&url).send().await {
+            Ok(response) => {
+                let status_code = response.status();
+                match response.json::<Value>().await {
+                    Ok(value) if status_code.is_success() => {
+                        if health_ready(entry, &value) {
+                            let token = runtime_auth_token(state, &plugin_id).await;
+                            return probe_ai_plugin_status(
+                                plugin_id,
+                                entry,
+                                base_url,
+                                true,
+                                token.as_deref(),
+                            )
+                            .await;
+                        }
+                        last_error = Some("Plugin health endpoint is not ready".to_string());
+                    }
+                    Ok(value) => {
+                        last_error = Some(format!(
+                            "Health endpoint returned {}: {}",
+                            status_code, value
+                        ));
+                    }
+                    Err(error) => {
+                        last_error = Some(format!("Failed to parse health response: {}", error));
+                    }
+                }
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+
+        if let Some(status) = take_exited_plugin_status(&plugin_id, state).await {
+            return Ok(plugin_startup_failure_status(
+                plugin_id,
+                Some(url),
+                Some(status),
+                last_error,
+                start_log_path,
+            ));
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(plugin_startup_failure_status(
+                plugin_id,
+                Some(url),
+                None,
+                last_error.or_else(|| Some("Plugin did not become ready".to_string())),
+                start_log_path,
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn take_exited_plugin_status(
+    plugin_id: &str,
+    state: &AiPluginRuntimeState,
+) -> Option<std::process::ExitStatus> {
+    let mut processes = state.processes.lock().await;
+    let runtime = processes.get_mut(plugin_id)?;
+    match runtime.child.try_wait() {
+        Ok(Some(status)) => {
+            // Removing drops RunningPlugin, which drops the sandbox handle
+            // and revokes the deny-ACLs applied at start.
+            drop(processes.remove(plugin_id));
+            Some(status)
+        }
+        Ok(None) => None,
+        Err(_) => {
+            drop(processes.remove(plugin_id));
+            None
+        }
+    }
+}
+
+fn plugin_startup_failure_status(
+    plugin_id: String,
+    url: Option<String>,
+    exit_status: Option<std::process::ExitStatus>,
+    last_error: Option<String>,
+    start_log_path: &Path,
+) -> AiPluginStatus {
+    let log_tail = if start_log_path.exists() {
+        read_log_tail(start_log_path).ok()
+    } else {
+        None
+    };
+    let log_content = log_tail
+        .as_ref()
+        .map(|log| log.content.clone())
+        .unwrap_or_default();
+    let exit_description = exit_status
+        .as_ref()
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| "still running but health check timed out".to_string());
+    let error = if exit_status.is_some() {
+        format!(
+            "Plugin start command exited before the health endpoint became ready ({})",
+            exit_description
+        )
+    } else {
+        last_error
+            .clone()
+            .unwrap_or_else(|| "Plugin did not become ready before startup timeout".to_string())
+    };
+    let mut status = ai_plugin_status(plugin_id, false, true, url, None, Some(error));
+    status.error_code = Some(
+        if exit_status.is_some() {
+            "start_command_exited"
+        } else {
+            "startup_timeout"
+        }
+        .to_string(),
+    );
+    status.error_domain = Some("runtime".to_string());
+    status.error_details = Some(serde_json::json!({
+        "startLogPath": normalize_path(start_log_path),
+        "exitStatus": exit_status.as_ref().map(|status| status.to_string()),
+        "lastHealthError": last_error,
+    }));
+    status.log_tail = log_tail;
+    status.advice = startup_failure_advice(&log_content);
+    status
+}
+
+fn startup_failure_advice(log_content: &str) -> Vec<String> {
+    let lower = log_content.to_lowercase();
+    let mut advice = Vec::new();
+
+    if lower.contains("syntax of the command is incorrect")
+        || lower.contains("was unexpected at this time")
+    {
+        advice.push(
+            "Check the plugin .bat syntax and make sure the file is saved with Windows CRLF line endings."
+                .to_string(),
+        );
+    }
+    if lower.contains("no module named")
+        || lower.contains("modulenotfounderror")
+        || lower.contains("importerror")
+    {
+        advice.push(
+            "Check the selected Python runtime. It may be missing torch or another package required by this plugin."
+                .to_string(),
+        );
+    }
+    if lower.contains("torch") && (lower.contains("cuda") || lower.contains("rocm")) {
+        advice.push(
+            "Verify that the selected runtime binding matches this machine's GPU backend and PyTorch build."
+                .to_string(),
+        );
+    }
+    if lower.contains("model")
+        || lower.contains(".pth")
+        || lower.contains(".ckpt")
+        || lower.contains("filenotfound")
+        || lower.contains("no such file")
+    {
+        advice.push(
+            "Check model/source paths and keep machine-specific overrides in the plugin .local.env file."
+                .to_string(),
+        );
+    }
+
+    advice.push("Open the plugin logs and inspect start.log for the command output.".to_string());
+    advice.push("Run Probe, then Smoke again after fixing the runtime or .local.env.".to_string());
+
+    advice.dedup();
+    advice
+}
+
+fn health_ready(entry: &PluginEntry, value: &Value) -> bool {
+    let Some(health) = &entry.health else {
+        return true;
+    };
+    let Some(field) = health.ready_field.as_deref() else {
+        return true;
+    };
+    value.get(field).and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn stop_ai_plugin(
+    plugin_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginStatus, String> {
+    stop_ai_plugin_runtime(plugin_id, &state).await
+}
+
+async fn stop_ai_plugin_runtime(
+    plugin_id: String,
+    state: &AiPluginRuntimeState,
+) -> Result<AiPluginStatus, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+    let entry = manifest.entry.clone();
+    let tracked_runtime = {
+        let processes = state.processes.lock().await;
+        processes.get(&plugin_id).map(|runtime| {
+            (
+                runtime.port,
+                runtime.base_url.clone(),
+                runtime.auth_token.clone(),
+            )
+        })
+    };
+
+    if let Some(entry) = &entry {
+        if let Some(command) = entry.stop_command.as_deref() {
+            if !is_safe_relative_command(command) {
+                return Err("stopCommand must be a safe relative path".to_string());
+            }
+            let command_path = root.join(command);
+            if command_path.exists() {
+                let mut cmd = Command::new(command_path);
+                cmd.current_dir(root)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some((port, base_url, token)) = &tracked_runtime {
+                    cmd.env("PICAIPIC_PLUGIN_PORT", port.to_string())
+                        .env("PICAIPIC_PLUGIN_BASE_URL", base_url)
+                        .env("PICAIPIC_PLUGIN_AUTH_TOKEN", token);
+                }
+                hide_command_window(&mut cmd);
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(PLUGIN_PROCESS_KILL_TIMEOUT_MS),
+                    cmd.output(),
+                )
+                .await;
+            }
+        }
+    }
+
+    let mut processes = state.processes.lock().await;
+    let runtime = processes.remove(&plugin_id);
+    drop(processes);
+
+    let runtime_port = runtime.as_ref().map(|runtime| runtime.port);
+    let runtime_base_url = runtime.as_ref().map(|runtime| runtime.base_url.clone());
+    if let Some(mut runtime) = runtime {
+        terminate_child_process_tree(&mut runtime.child).await;
+    }
+
+    if let Some(entry) = &entry {
+        if let Some(port) = runtime_port.or_else(|| plugin_port(entry)) {
+            kill_processes_listening_on_port(port).await;
+        }
+        return wait_for_plugin_stopped(plugin_id, entry, runtime_base_url).await;
+    }
+
+    get_ai_plugin_status_runtime(plugin_id, None).await
+}
+
+async fn terminate_child_process_tree(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = child.id() {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_command_window(&mut cmd);
+        let _ = tokio::time::timeout(
+            Duration::from_millis(PLUGIN_PROCESS_KILL_TIMEOUT_MS),
+            cmd.output(),
+        )
+        .await;
+    }
+
+    let _ = tokio::time::timeout(
+        Duration::from_millis(PLUGIN_PROCESS_KILL_TIMEOUT_MS),
+        async {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        },
+    )
+    .await;
+}
+
+async fn kill_processes_listening_on_port(port: u16) {
+    #[cfg(target_os = "windows")]
+    {
+        let output = tokio::time::timeout(
+            Duration::from_millis(PLUGIN_PROCESS_KILL_TIMEOUT_MS),
+            Command::new("netstat").args(["-ano", "-p", "tcp"]).output(),
+        )
+        .await;
+        let Ok(Ok(output)) = output else {
+            return;
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let needle = format!(":{}", port);
+        let mut pids = HashSet::new();
+        for line in stdout.lines() {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            if columns.len() < 5 {
+                continue;
+            }
+            if !columns[0].eq_ignore_ascii_case("TCP") {
+                continue;
+            }
+            if !columns[1].ends_with(&needle) {
+                continue;
+            }
+            if !columns[3].eq_ignore_ascii_case("LISTENING") {
+                continue;
+            }
+            if let Ok(pid) = columns[4].parse::<u32>() {
+                pids.insert(pid);
+            }
+        }
+
+        for pid in pids {
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            hide_command_window(&mut cmd);
+            let _ = tokio::time::timeout(
+                Duration::from_millis(PLUGIN_PROCESS_KILL_TIMEOUT_MS),
+                cmd.output(),
+            )
+            .await;
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = port;
+    }
+}
+
+async fn wait_for_plugin_stopped(
+    plugin_id: String,
+    entry: &PluginEntry,
+    base_url: Option<String>,
+) -> Result<AiPluginStatus, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(3_000);
+    let probe_status = |plugin_id: String| {
+        let base_url = base_url.clone();
+        async move {
+            if let Some(base_url) = base_url {
+                probe_ai_plugin_status(plugin_id, entry, base_url, true, None).await
+            } else {
+                Ok(ai_plugin_status(
+                    plugin_id,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some("Plugin has no managed runtime".to_string()),
+                ))
+            }
+        }
+    };
+
+    let mut last_status = probe_status(plugin_id.clone()).await?;
+
+    while last_status.reachable && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        last_status = probe_status(plugin_id.clone()).await?;
+    }
+
+    if last_status.reachable {
+        if let Some(port) = plugin_port(entry) {
+            kill_processes_listening_on_port(port).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            last_status = probe_status(plugin_id).await?;
+        }
+    }
+
+    Ok(last_status)
+}
+
+fn hide_command_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
+}
+
+#[tauri::command]
+pub async fn invoke_ai_plugin_capability(
+    plugin_id: String,
+    capability_id: String,
+    request: AiPluginInvokeRequest,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginInvokeResponse, String> {
+    invoke_ai_plugin_capability_inner(plugin_id, capability_id, request, &state).await
+}
+
+async fn invoke_ai_plugin_capability_inner(
+    plugin_id: String,
+    capability_id: String,
+    request: AiPluginInvokeRequest,
+    state: &AiPluginRuntimeState,
+) -> Result<AiPluginInvokeResponse, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+
+    let Some(entry) = manifest.entry.as_ref() else {
+        return Err("Plugin has no entry".to_string());
+    };
+    if entry.kind != "local-http" {
+        return Err(format!(
+            "Capability invocation is not supported for '{}'",
+            entry.kind
+        ));
+    }
+
+    let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(state)).await else {
+        return Err("Plugin has no baseUrl".to_string());
+    };
+    let token = runtime_auth_token(state, &plugin_id)
+        .await
+        .unwrap_or_default();
+
+    let capability = find_plugin_capability(&manifest, &capability_id)?;
+    ensure_runtime_probe_gate(
+        &plugin_id,
+        &capability_id,
+        &manifest_path,
+        &manifest,
+        request.runtime.as_ref(),
+    )?;
+    cleanup_plugin_task_cache(&plugin_id)?;
+    let task_id = request
+        .task_id
+        .clone()
+        .filter(|task_id| !task_id.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let output_dir_path = match request.output_dir.clone() {
+        Some(output_dir) if !output_dir.trim().is_empty() => PathBuf::from(output_dir),
+        _ => plugin_task_output_dir(&plugin_id, &task_id)?,
+    };
+    fs::create_dir_all(&output_dir_path)
+        .map_err(|e| format!("Failed to create plugin output directory: {}", e))?;
+    let output_dir = normalize_path(&output_dir_path);
+    let task_dir = plugin_task_temp_dir(&plugin_id, &task_id)?;
+    // Stage external input files into the plugin's readable area when the
+    // sandbox is active. The rewritten paths are used for both the task
+    // snapshot and the invoke payload so the plugin sees staged copies.
+    let root = manifest_path
+        .parent()
+        .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
+    let writable_dirs = vec![
+        plugin_data_dir(&plugin_id)?,
+        plugin_cache_dir(&plugin_id)?,
+        PathBuf::from(&output_dir),
+        plugin_model_dir(&plugin_id)?,
+        plugin_runtime_root(&plugin_id)?,
+        task_dir.clone(),
+        PathBuf::from(normalize_path(root)),
+    ];
+    let inputs =
+        stage_input_files_for_sandbox(&plugin_id, &task_id, &request.inputs, &writable_dirs)?;
+    let now = Utc::now().to_rfc3339();
+    let result_policy = request
+        .result_policy
+        .clone()
+        .unwrap_or_else(|| "copyIntoAlbum".to_string());
+    let mut task_state = AiPluginTaskState {
+        plugin_id: plugin_id.clone(),
+        capability_id: capability_id.clone(),
+        task_id: task_id.clone(),
+        status: "queued".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        task_dir: normalize_path(&task_dir),
+        output_dir: output_dir.clone(),
+        result_policy: Some(result_policy.clone()),
+        adopted: false,
+        outputs: Vec::new(),
+        progress: Some(0),
+        message: Some("Queued".to_string()),
+        error: None,
+        error_code: None,
+        error_domain: None,
+        error_details: None,
+        retryable: false,
+        request_snapshot: Some(AiPluginInvokeRequestSnapshot {
+            inputs: inputs.clone(),
+            parameters: request.parameters.clone(),
+            runtime: request.runtime.clone(),
+            result_policy: Some(result_policy.clone()),
+        }),
+    };
+    save_task_state(task_state.clone())?;
+
+    let payload = serde_json::json!({
+        "taskId": task_id,
+        "capability": capability_id,
+        "inputs": inputs,
+        "parameters": request.parameters,
+        "outputDir": output_dir,
+        "runtime": request.runtime,
+        "resultPolicy": result_policy,
+    });
+
+    let url = join_url(&base_url, &invoke_path_for(capability));
+    let client = plugin_http_client(Some(&token), PLUGIN_INVOKE_TIMEOUT_MS)?;
+
+    let response = match client.post(&url).json(&payload).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            apply_task_error(
+                &mut task_state,
+                "HTTP_ERROR",
+                Some("transport"),
+                format!("Failed to invoke plugin capability: {}", error),
+                None,
+            );
+            save_task_state(task_state)?;
+            return Err(format!("Failed to invoke plugin capability: {}", error));
+        }
+    };
+    let status_code = response.status();
+    let result = match response.json::<Value>().await {
+        Ok(result) => result,
+        Err(error) => {
+            apply_task_error(
+                &mut task_state,
+                "RESPONSE_PARSE_FAILED",
+                Some("transport"),
+                format!("Failed to parse invoke response: {}", error),
+                None,
+            );
+            save_task_state(task_state)?;
+            return Err(format!("Failed to parse invoke response: {}", error));
+        }
+    };
+
+    if !status_code.is_success() {
+        apply_plugin_error(
+            &mut task_state,
+            &result,
+            format!("Invoke endpoint returned {}", status_code),
+        );
+        task_state.outputs = result
+            .get("outputs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        save_task_state(task_state)?;
+        return Err(format!(
+            "Invoke endpoint returned {}: {}",
+            status_code, result
+        ));
+    }
+
+    let final_result = if plugin_task_status(&result).is_some() {
+        apply_plugin_task_result(&mut task_state, &result, &output_dir_path)?;
+        save_task_state(task_state.clone())?;
+        if is_plugin_task_terminal(&task_state.status) {
+            result
+        } else {
+            spawn_plugin_task_poll(
+                base_url.clone(),
+                task_id.clone(),
+                token.clone(),
+                task_state.clone(),
+                output_dir_path.clone(),
+            );
+            result
+        }
+    } else {
+        if let Err(error) = validate_plugin_output_paths(&result, &output_dir_path) {
+            apply_task_error(
+                &mut task_state,
+                "OUTPUT_VALIDATION_FAILED",
+                Some("filesystem"),
+                error.clone(),
+                None,
+            );
+            save_task_state(task_state)?;
+            return Err(error);
+        }
+        task_state.status = "succeeded".to_string();
+        task_state.updated_at = Utc::now().to_rfc3339();
+        task_state.outputs = result
+            .get("outputs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        save_task_state(task_state.clone())?;
+        result
+    };
+
+    if matches!(
+        task_state.status.as_str(),
+        "failed" | "error" | "cancelled" | "canceled"
+    ) {
+        let message = task_state.error.clone().unwrap_or_else(|| {
+            format!(
+                "Plugin task '{}' finished with status '{}'",
+                task_id, task_state.status
+            )
+        });
+        return Err(message);
+    }
+
+    Ok(AiPluginInvokeResponse {
+        plugin_id,
+        capability_id,
+        task_id,
+        url,
+        result: final_result,
+        task_state: Some(task_state),
+    })
+}
+
+#[tauri::command]
+pub fn adopt_ai_plugin_task_outputs(
+    plugin_id: String,
+    request: AiPluginTaskAdoptRequest,
+) -> Result<AiPluginTaskState, String> {
+    let mut registry = load_registry()?;
+    let key = plugin_task_state_key(&plugin_id, &request.task_id);
+    let mut state = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", request.task_id))?;
+    state.status = "imported".to_string();
+    state.adopted = true;
+    state.updated_at = Utc::now().to_rfc3339();
+    state.error = None;
+    state.error_code = None;
+    state.error_domain = None;
+    state.error_details = None;
+    state.retryable = false;
+
+    if request.delete_task_dir {
+        let task_dir = PathBuf::from(&state.task_dir);
+        if task_dir.exists() {
+            fs::remove_dir_all(&task_dir).map_err(|e| {
+                format!(
+                    "Failed to remove adopted plugin task directory '{}': {}",
+                    task_dir.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    registry.task_states.insert(key, state.clone());
+    save_registry(&registry)?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub fn discard_ai_plugin_task_outputs(
+    plugin_id: String,
+    request: AiPluginTaskAdoptRequest,
+) -> Result<AiPluginTaskState, String> {
+    let mut registry = load_registry()?;
+    let key = plugin_task_state_key(&plugin_id, &request.task_id);
+    let mut state = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", request.task_id))?;
+    state.status = "discarded".to_string();
+    state.adopted = false;
+    state.updated_at = Utc::now().to_rfc3339();
+    state.error = None;
+    state.error_code = None;
+    state.error_domain = None;
+    state.error_details = None;
+    state.retryable = false;
+
+    if request.delete_task_dir {
+        let task_dir = PathBuf::from(&state.task_dir);
+        if task_dir.exists() {
+            fs::remove_dir_all(&task_dir).map_err(|e| {
+                format!(
+                    "Failed to remove discarded plugin task directory '{}': {}",
+                    task_dir.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    registry.task_states.insert(key, state.clone());
+    save_registry(&registry)?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn retry_ai_plugin_task(
+    plugin_id: String,
+    task_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginInvokeResponse, String> {
+    let registry = load_registry()?;
+    let key = plugin_task_state_key(&plugin_id, &task_id);
+    let task = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", task_id))?;
+    if !task.retryable {
+        return Err(format!("Plugin task '{}' is not marked retryable", task_id));
+    }
+    let snapshot = task
+        .request_snapshot
+        .ok_or_else(|| format!("Plugin task '{}' has no request snapshot", task_id))?;
+    let request = AiPluginInvokeRequest {
+        task_id: None,
+        inputs: snapshot.inputs,
+        parameters: snapshot.parameters,
+        output_dir: None,
+        runtime: snapshot.runtime,
+        result_policy: snapshot.result_policy,
+    };
+    invoke_ai_plugin_capability_inner(plugin_id, task.capability_id, request, &state).await
+}
+
+#[tauri::command]
+pub async fn cancel_ai_plugin_task(
+    plugin_id: String,
+    task_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginTaskState, String> {
+    let mut registry = load_registry()?;
+    let key = plugin_task_state_key(&plugin_id, &task_id);
+    let mut task = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", task_id))?;
+    if !matches!(task.status.as_str(), "queued" | "running" | "cancelling") {
+        return Err(format!(
+            "Plugin task '{}' cannot be cancelled from status '{}'",
+            task_id, task.status
+        ));
+    }
+    task.status = "cancelling".to_string();
+    task.updated_at = Utc::now().to_rfc3339();
+    registry.task_states.insert(key.clone(), task.clone());
+    save_registry(&registry)?;
+
+    let (_manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    let Some(entry) = manifest.entry.as_ref() else {
+        return Err("Plugin has no entry".to_string());
+    };
+    let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(&state)).await else {
+        return Err("Plugin has no baseUrl".to_string());
+    };
+    let token = runtime_auth_token(&state, &plugin_id)
+        .await
+        .unwrap_or_default();
+    let mut registry = load_registry()?;
+    let mut task = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", task_id))?;
+    match request_plugin_task_cancel(&base_url, &task_id, &token).await {
+        Ok(()) => {
+            task.status = "cancelling".to_string();
+            task.updated_at = Utc::now().to_rfc3339();
+            task.message = Some("Cancel requested".to_string());
+            task.retryable = false;
+        }
+        Err(error) => {
+            task.status = "cancelling".to_string();
+            task.updated_at = Utc::now().to_rfc3339();
+            task.error = Some(error);
+            task.error_code = Some("CANCEL_REQUEST_FAILED".to_string());
+            task.error_domain = Some("transport".to_string());
+            task.retryable = false;
+        }
+    }
+    registry.task_states.insert(key, task.clone());
+    save_registry(&registry)?;
+    Ok(task)
+}
+
+#[tauri::command]
+pub async fn get_ai_plugin_task(
+    plugin_id: String,
+    task_id: String,
+    state: tauri::State<'_, AiPluginRuntimeState>,
+) -> Result<AiPluginTaskStatusResponse, String> {
+    let registry = load_registry()?;
+    let key = plugin_task_state_key(&plugin_id, &task_id);
+    let mut task = registry
+        .task_states
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("Plugin task '{}' was not found", task_id))?;
+    drop(registry);
+
+    let mut plugin_status = None;
+    let mut plugin_status_error = None;
+    if matches!(task.status.as_str(), "queued" | "running" | "cancelling") {
+        match find_plugin_manifest(&plugin_id) {
+            Ok((_manifest_path, manifest)) => {
+                if let Some(entry) = manifest.entry.as_ref() {
+                    if entry.kind == "local-http" {
+                        if let Some(base_url) =
+                            plugin_base_url(&plugin_id, entry, Some(&state)).await
+                        {
+                            let token = runtime_auth_token(&state, &plugin_id)
+                                .await
+                                .unwrap_or_default();
+                            let output_dir = PathBuf::from(&task.output_dir);
+                            match query_plugin_task_once(
+                                &base_url,
+                                &task_id,
+                                &token,
+                                &mut task,
+                                &output_dir,
+                            )
+                            .await
+                            {
+                                Ok(value) => plugin_status = Some(value),
+                                Err(error) => plugin_status_error = Some(error),
+                            }
+                        } else {
+                            plugin_status_error = Some("Plugin has no baseUrl".to_string());
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                plugin_status_error = Some(error);
+            }
+        }
+    }
+
+    Ok(AiPluginTaskStatusResponse {
+        plugin_id,
+        task_id,
+        state: task,
+        plugin_status,
+        plugin_status_error,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal manifest matching the one signed by `sign_plugin.py`
+    /// in the canonical-serialization test fixture. Field assignment order in
+    /// Rust is irrelevant to the signature because verification re-serializes
+    /// through `serde_json::Value` (BTreeMap → lexicographic key order).
+    fn fixture_manifest() -> AiPluginPackageManifest {
+        let mut m = AiPluginPackageManifest::default();
+        m.schema_version = 1;
+        m.package_kind = "picaipic-plugin-package".to_string();
+        m.plugin_id = "test-plugin".to_string();
+        m.version = "0.1.0".to_string();
+        m.created_at = Some("2026-01-01T00:00:00Z".to_string());
+        m.files = vec![AiPluginPackageFile {
+            path: "a.py".to_string(),
+            size: 100,
+            sha256: "abc".to_string(),
+        }];
+        m.warnings = vec![];
+        m
+    }
+
+    fn fixture_signature() -> AiPluginPackageSignature {
+        AiPluginPackageSignature {
+            algorithm: "ed25519".to_string(),
+            public_key: "dSlXXhlQVJRMsE0BAoc2vmaC/G1PG1W6e4g0lgqNw7o="
+                .to_string(),
+            value: "O32+sFP0worKsRYH3mv9gPYBv4myxGagbTR7k8R9SST9dqcBML+EqjGiDVjPa6edd3Wbyn8XEYn0lYHGIBRJAw==".to_string(),
+        }
+    }
+
+    fn empty_registry() -> AiPluginRegistry {
+        AiPluginRegistry::default()
+    }
+
+    /// A signed package produced by `sign_plugin.py` (with `sort_keys=True`)
+    /// must verify on the Rust side. This is the cross-language byte-level
+    /// consistency check: if either side changes its canonical serialization,
+    /// this test fails.
+    #[test]
+    fn signed_package_from_python_verifies() {
+        let mut manifest = fixture_manifest();
+        manifest.signature = Some(fixture_signature());
+        let publisher = Some("test-author".to_string());
+        let result = verify_package_signature(&manifest, &publisher, &empty_registry());
+        match result {
+            Ok(SignatureVerifyResult::NeedsTrust { .. }) | Ok(SignatureVerifyResult::Verified) => {
+                // Signature verified; publisher just isn't trusted yet.
+            }
+            Ok(SignatureVerifyResult::UnsignedAllowed) => {
+                panic!("expected signature to verify, but got UnsignedAllowed")
+            }
+            Err(e) => panic!("expected verification to pass, but got error: {}", e),
+        }
+    }
+
+    /// The signature must be independent of struct field declaration order and
+    /// of on-disk key order. Constructing the same manifest via a different
+    /// code path (here: just re-asserting the same values, which is the only
+    /// way to vary construction in Rust) must still verify. The real
+    /// order-independence guarantee comes from `serde_json::Value` sorting keys
+    /// during verification; this test guards against regressing that path back
+    /// to `serde_json::to_vec(&struct)`.
+    #[test]
+    fn canonical_serialization_sorts_keys() {
+        let mut m = fixture_manifest();
+        m.signature = None;
+        let value = serde_json::to_value(&m).unwrap();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        // createdAt must appear before files, which appears before packageKind,
+        // etc. — i.e. lexicographic, NOT struct declaration order
+        // (schemaVersion would come first if we used struct order).
+        let created_at = s.find("\"createdAt\"").unwrap();
+        let files = s.find("\"files\"").unwrap();
+        let package_kind = s.find("\"packageKind\"").unwrap();
+        let plugin_id = s.find("\"pluginId\"").unwrap();
+        let schema_version = s.find("\"schemaVersion\"").unwrap();
+        let version = s.find("\"version\"").unwrap();
+        let warnings = s.find("\"warnings\"").unwrap();
+        assert!(created_at < files);
+        assert!(files < package_kind);
+        assert!(package_kind < plugin_id);
+        assert!(plugin_id < schema_version);
+        assert!(schema_version < version);
+        assert!(version < warnings);
+    }
+
+    /// A tampered signature (flipped bit) must fail verification. This guards
+    /// against the verifier accidentally accepting arbitrary bytes.
+    #[test]
+    fn tampered_signature_is_rejected() {
+        let mut manifest = fixture_manifest();
+        let mut sig = fixture_signature();
+        // Flip a character in the signature value.
+        let mut chars: Vec<char> = sig.value.chars().collect();
+        chars[0] = if chars[0] == 'O' { 'P' } else { 'O' };
+        sig.value = chars.into_iter().collect();
+        manifest.signature = Some(sig);
+        let publisher = Some("test-author".to_string());
+        let result = verify_package_signature(&manifest, &publisher, &empty_registry());
+        assert!(
+            matches!(result, Err(_)),
+            "tampered signature should fail"
+        );
+    }
+
+    /// End-to-end verification of the real signed plugin zip packages in
+    /// `dist/plugins/`. Marked `#[ignore]` because it depends on the repo's
+    /// dist artifacts (which are rebuilt, not committed). Run with
+    /// `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn real_signed_zips_verify() {
+        use std::io::Read;
+        let repo_root = env!("CARGO_MANIFEST_DIR");
+        let zips = [
+            "picai-nafnet-restore-0.1.0.zip",
+            "picai-salut-color-0.1.0.zip",
+        ];
+        for name in zips {
+            let path = format!("{}/../dist/plugins/{}", repo_root, name);
+            let file = std::fs::File::open(&path).unwrap_or_else(|e| {
+                panic!("could not open {}: {} (did you run package_plugin.ps1?)", path, e)
+            });
+            let mut zip = zip::ZipArchive::new(file).expect("open zip");
+            // Find the manifest entry (top-level dir / picaipic.package.json).
+            let manifest_idx = (0..zip.len())
+                .find(|i| {
+                    zip.by_index(*i)
+                        .map(|r| r.name().ends_with("picaipic.package.json"))
+                        .unwrap_or(false)
+                })
+                .expect("manifest entry in zip");
+            let mut buf = String::new();
+            zip.by_index(manifest_idx)
+                .unwrap()
+                .read_to_string(&mut buf)
+                .unwrap();
+            let manifest: AiPluginPackageManifest =
+                serde_json::from_str(&buf).expect("parse manifest");
+            assert!(
+                manifest.signature.is_some(),
+                "{}: manifest has no signature",
+                name
+            );
+            let publisher = Some("local".to_string());
+            let result = verify_package_signature(&manifest, &publisher, &empty_registry());
+            match result {
+                Ok(SignatureVerifyResult::NeedsTrust { .. })
+                | Ok(SignatureVerifyResult::Verified) => {}
+                Ok(SignatureVerifyResult::UnsignedAllowed) => {
+                    panic!("{}: unexpectedly got UnsignedAllowed", name)
+                }
+                Err(e) => panic!("{}: verification failed: {}", name, e),
+            }
+        }
+    }
+}

@@ -1,0 +1,36 @@
+Created setup job record.
+Plugin root: D:\ailab\PicAiPic\plugins\picai-salut-color
+Profile: windows-amd-rocm
+Backend: rocm
+Profile environment directory declared: D:\ailab\PicAiPic\plugins\picai-salut-color\.venv-rocm
+Requirements file is present: D:\ailab\PicAiPic\plugins\picai-salut-color\backend/requirements-rocm.txt
+Wrote setup log: D:\ailab\PicAiPic\plugins\picai-salut-color\logs\setup-23799585-5afd-47a6-9370-3d88b368b654.log
+Executing setup command: install.bat
+Injected setup environment:
+PICAIPIC_PLUGIN_ID=picai-salut-color
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=color-transfer
+PICAIPIC_PLUGIN_ID=picai-salut-color
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=color-transfer
+PICAIPIC_PLUGIN_ROOT=D:\ailab\PicAiPic\plugins\picai-salut-color
+PICAIPIC_PLUGIN_ENV_DIR=.venv-rocm
+PICAIPIC_PLUGIN_ENV_PATH=D:\ailab\PicAiPic\plugins\picai-salut-color\.venv-rocm
+PICAIPIC_PLUGIN_REQUIREMENTS=backend/requirements-rocm.txt
+PICAIPIC_PLUGIN_REQUIREMENTS_PATH=D:\ailab\PicAiPic\plugins\picai-salut-color\backend/requirements-rocm.txt
+PicAiPic plugin setup
+  profile: windows-amd-rocm
+  backend: rocm
+  env: .venv-rocm
+  requirements: backend/requirements-rocm.txt
+
+Requirement already satisfied: pip in .\.venv-rocm\Lib\site-packages (26.1.2)
+
+Basic plugin server dependencies are installed.
+Profile setup finished. Run Smoke in PicAiPic before using this profile.
+Use .local.env for local development overrides such as SALUT_SOURCE_DIR,
+SALUT_MODEL_DIR, or PICAIPIC_SALUT_PYTHON.
+Setup command completed successfully.
+Run Verify or Smoke to validate this profile.

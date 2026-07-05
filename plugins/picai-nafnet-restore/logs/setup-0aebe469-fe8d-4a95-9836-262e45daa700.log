@@ -1,0 +1,165 @@
+Created setup job record.
+Plugin root: D:\ailab\PicAiPic\plugins\picai-nafnet-restore
+Profile: windows-amd-rocm
+Backend: rocm
+Created or confirmed profile environment directory: D:\ailab\PicAiPic\plugins\picai-nafnet-restore\.venv-rocm
+Requirements file is present: D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend/requirements-rocm.txt
+Wrote setup log: D:\ailab\PicAiPic\plugins\picai-nafnet-restore\logs\setup-0aebe469-fe8d-4a95-9836-262e45daa700.log
+Executing setup command: install.bat
+Injected setup environment:
+PICAIPIC_PLUGIN_ID=picai-nafnet-restore
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=denoise
+PICAIPIC_PLUGIN_ID=picai-nafnet-restore
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=denoise
+PICAIPIC_PLUGIN_ROOT=D:\ailab\PicAiPic\plugins\picai-nafnet-restore
+PICAIPIC_PLUGIN_ENV_DIR=.venv-rocm
+PICAIPIC_PLUGIN_ENV_PATH=D:\ailab\PicAiPic\plugins\picai-nafnet-restore\.venv-rocm
+PICAIPIC_PLUGIN_REQUIREMENTS=backend/requirements-rocm.txt
+PICAIPIC_PLUGIN_REQUIREMENTS_PATH=D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend/requirements-rocm.txt
+PicAiPic NAFNet setup
+  profile: windows-amd-rocm
+  backend: rocm
+  env: .venv-rocm
+  requirements: backend/requirements-rocm.txt
+
+The system cannot find the path specified.
+Requirement already satisfied: pip in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (26.0.1)
+Collecting pip
+  Using cached pip-26.1.2-py3-none-any.whl.metadata (4.6 kB)
+Using cached pip-26.1.2-py3-none-any.whl (1.8 MB)
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 26.0.1
+    Uninstalling pip-26.0.1:
+      Successfully uninstalled pip-26.0.1
+Successfully installed pip-26.1.2
+Looking in indexes: https://pypi.org/simple, https://pypi.org/simple
+Collecting rocm-sdk-core==7.2.1 (from -r backend/requirements-rocm.txt (line 1))
+  Using cached rocm_sdk_core-7.2.1-py3-none-win_amd64.whl (644.8 MB)
+Collecting rocm-sdk-devel==7.2.1 (from -r backend/requirements-rocm.txt (line 2))
+  Using cached rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl (232.8 MB)
+Collecting rocm-sdk-libraries-custom==7.2.1 (from -r backend/requirements-rocm.txt (line 3))
+  Using cached rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl (490.0 MB)
+Collecting https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz (from -r backend/requirements-rocm.txt (line 4))
+  Using cached rocm-7.2.1.tar.gz (15 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting torch==2.9.1+rocm7.2.1 (from -r backend/requirements-rocm.txt (line 5))
+  Using cached torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl (821.1 MB)
+Collecting torchvision==0.24.1+rocm7.2.1 (from -r backend/requirements-rocm.txt (line 6))
+  Using cached torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl (1.9 MB)
+Collecting numpy==1.26.4 (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 1))
+  Using cached numpy-1.26.4-cp312-cp312-win_amd64.whl.metadata (61 kB)
+Collecting opencv-python==4.9.0.80 (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 2))
+  Using cached opencv_python-4.9.0.80-cp37-abi3-win_amd64.whl.metadata (20 kB)
+Collecting addict==2.4.0 (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 3))
+  Using cached addict-2.4.0-py3-none-any.whl.metadata (1.0 kB)
+Requirement already satisfied: pyyaml==6.0.3 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 4)) (6.0.3)
+Collecting scikit-image==0.23.2 (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5))
+  Using cached scikit_image-0.23.2-cp312-cp312-win_amd64.whl.metadata (14 kB)
+Collecting timm==1.0.15 (from -r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6))
+  Using cached timm-1.0.15-py3-none-any.whl.metadata (52 kB)
+Requirement already satisfied: filelock in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (3.24.3)
+Requirement already satisfied: typing-extensions>=4.10.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (4.15.0)
+Requirement already satisfied: setuptools in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (81.0.0)
+Requirement already satisfied: sympy>=1.13.3 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (3.6.1)
+Requirement already satisfied: jinja2 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (2026.2.0)
+Requirement already satisfied: pillow!=8.3.*,>=5.3.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from torchvision==0.24.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 6)) (12.1.1)
+Requirement already satisfied: scipy>=1.9 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from scikit-image==0.23.2->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5)) (1.17.1)
+Requirement already satisfied: imageio>=2.33 in C:\Users\a7925\AppData\Roaming\Python\Python312\site-packages (from scikit-image==0.23.2->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5)) (2.37.2)
+Requirement already satisfied: tifffile>=2022.8.12 in C:\Users\a7925\AppData\Roaming\Python\Python312\site-packages (from scikit-image==0.23.2->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5)) (2026.2.24)
+Requirement already satisfied: packaging>=21 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from scikit-image==0.23.2->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5)) (26.0)
+Requirement already satisfied: lazy-loader>=0.4 in C:\Users\a7925\AppData\Roaming\Python\Python312\site-packages (from scikit-image==0.23.2->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 5)) (0.4)
+Requirement already satisfied: huggingface_hub in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (1.5.0)
+Requirement already satisfied: safetensors in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.7.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from sympy>=1.13.3->torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (1.3.0)
+Requirement already satisfied: hf-xet<2.0.0,>=1.2.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (1.3.1)
+Requirement already satisfied: httpx<1,>=0.23.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.28.1)
+Requirement already satisfied: tqdm>=4.42.1 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (4.67.3)
+Requirement already satisfied: typer in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.24.1)
+Requirement already satisfied: anyio in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (4.12.1)
+Requirement already satisfied: certifi in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (2026.2.25)
+Requirement already satisfied: httpcore==1.* in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (1.0.9)
+Requirement already satisfied: idna in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (3.11)
+Requirement already satisfied: h11>=0.16 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.16.0)
+Requirement already satisfied: colorama in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from tqdm>=4.42.1->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.4.6)
+Requirement already satisfied: MarkupSafe>=2.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from jinja2->torch==2.9.1+rocm7.2.1->-r backend/requirements-rocm.txt (line 5)) (3.0.3)
+Requirement already satisfied: click>=8.2.1 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (8.3.1)
+Requirement already satisfied: shellingham>=1.3.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (1.5.4)
+Requirement already satisfied: rich>=12.3.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (14.3.3)
+Requirement already satisfied: annotated-doc>=0.0.2 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.0.4)
+Requirement already satisfied: markdown-it-py>=2.2.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from rich>=12.3.0->typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (4.0.0)
+Requirement already satisfied: pygments<3.0.0,>=2.13.0 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from rich>=12.3.0->typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (2.19.2)
+Requirement already satisfied: mdurl~=0.1 in C:\Users\a7925\AppData\Local\Programs\Python\Python312\Lib\site-packages (from markdown-it-py>=2.2.0->rich>=12.3.0->typer->huggingface_hub->timm==1.0.15->-r D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend\requirements.txt (line 6)) (0.1.2)
+Using cached numpy-1.26.4-cp312-cp312-win_amd64.whl (15.5 MB)
+Using cached opencv_python-4.9.0.80-cp37-abi3-win_amd64.whl (38.6 MB)
+Using cached addict-2.4.0-py3-none-any.whl (3.8 kB)
+Using cached scikit_image-0.23.2-cp312-cp312-win_amd64.whl (12.8 MB)
+Using cached timm-1.0.15-py3-none-any.whl (2.4 MB)
+Building wheels for collected packages: rocm
+  Building wheel for rocm (pyproject.toml): started
+  Building wheel for rocm (pyproject.toml): finished with status 'done'
+  Created wheel for rocm: filename=rocm-7.2.1-py3-none-any.whl size=20090 sha256=f20f6507e9d5a6706bfee65cdc5769089c4f877d7e4d9de215bd3e7e67e0af4b
+  Stored in directory: c:\users\a7925\appdata\local\pip\cache\wheels\5f\25\fa\64c630e6b07d94199c5751c182617b4309379b85c58146d540
+Successfully built rocm
+Installing collected packages: rocm-sdk-libraries-custom, rocm-sdk-devel, rocm-sdk-core, addict, numpy, opencv-python, scikit-image, rocm, torch, torchvision, timm
+  Attempting uninstall: rocm-sdk-libraries-custom
+    Found existing installation: rocm-sdk-libraries-custom 7.2.0.dev0
+    Uninstalling rocm-sdk-libraries-custom-7.2.0.dev0:
+      Successfully uninstalled rocm-sdk-libraries-custom-7.2.0.dev0
+  Attempting uninstall: rocm-sdk-devel
+    Found existing installation: rocm-sdk-devel 7.2.0.dev0
+    Uninstalling rocm-sdk-devel-7.2.0.dev0:
+      Successfully uninstalled rocm-sdk-devel-7.2.0.dev0
+  Attempting uninstall: rocm-sdk-core
+    Found existing installation: rocm-sdk-core 7.2.0.dev0
+    Uninstalling rocm-sdk-core-7.2.0.dev0:
+      Successfully uninstalled rocm-sdk-core-7.2.0.dev0
+  Attempting uninstall: numpy
+    Found existing installation: numpy 2.4.2
+    Uninstalling numpy-2.4.2:
+      Successfully uninstalled numpy-2.4.2
+  Attempting uninstall: opencv-python
+    Found existing installation: opencv-python 4.13.0.92
+    Uninstalling opencv-python-4.13.0.92:
+      Successfully uninstalled opencv-python-4.13.0.92
+  Attempting uninstall: scikit-image
+    Found existing installation: scikit-image 0.26.0
+    Uninstalling scikit-image-0.26.0:
+      Successfully uninstalled scikit-image-0.26.0
+  Attempting uninstall: rocm
+    Found existing installation: rocm 7.2.0.dev0
+    Uninstalling rocm-7.2.0.dev0:
+      Successfully uninstalled rocm-7.2.0.dev0
+  Attempting uninstall: torch
+    Found existing installation: torch 2.12.1
+    Uninstalling torch-2.12.1:
+      Successfully uninstalled torch-2.12.1
+  Attempting uninstall: timm
+    Found existing installation: timm 1.0.25
+    Uninstalling timm-1.0.25:
+      Successfully uninstalled timm-1.0.25
+
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+colour-science 0.4.7 requires numpy<3,>=2.0.0, but you have numpy 1.26.4 which is incompatible.
+opencv-contrib-python 4.13.0.92 requires numpy>=2; python_version >= "3.9", but you have numpy 1.26.4 which is incompatible.
+opencv-python-headless 4.13.0.92 requires numpy>=2; python_version >= "3.9", but you have numpy 1.26.4 which is incompatible.
+open-clip-torch 3.3.0 requires timm>=1.0.17, but you have timm 1.0.15 which is incompatible.
+rembg 2.0.72 requires numpy<3.0.0,>=2.3.0, but you have numpy 1.26.4 which is incompatible.
+rembg 2.0.72 requires scikit-image<0.27.0,>=0.26.0, but you have scikit-image 0.23.2 which is incompatible.
+Successfully installed addict-2.4.0 numpy-1.26.4 opencv-python-4.9.0.80 rocm-7.2.1 rocm-sdk-core-7.2.1 rocm-sdk-devel-7.2.1 rocm-sdk-libraries-custom-7.2.1 scikit-image-0.23.2 timm-1.0.15 torch-2.9.1+rocm7.2.1 torchvision-0.24.1+rocm7.2.1
+
+NAFNet plugin dependencies are installed.
+Run Smoke in PicAiPic before using this profile.
+Setup command completed successfully.
+Run Verify or Smoke to validate this profile.

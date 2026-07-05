@@ -1,0 +1,84 @@
+
+=== 2026-07-01T11:23:12.347063900+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+The syntax of the command is incorrect.
+
+=== 2026-07-01T11:24:40.113429900+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+The syntax of the command is incorrect.
+
+=== 2026-07-01T11:25:10.017645300+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+The syntax of the command is incorrect.
+
+=== 2026-07-01T12:34:03.566910600+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+The syntax of the command is incorrect.
+
+=== 2026-07-01T12:37:29.605463500+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+The syntax of the command is incorrect.
+
+=== 2026-07-01T12:56:52.375723+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+Using Python: .venv-rocm\Scripts\python.exe
+Using SA-LUT source: 
+picai-salut-color listening on 127.0.0.1:8011
+python: D:\ailab\PicAiPic\plugins\picai-salut-color\.venv-rocm\Scripts\python.exe
+salut backend: D:\ailab\PicAiPic\plugins\picai-salut-color\backend
+
+=== 2026-07-01T13:00:11.387805700+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+Using Python: D:\ailab\20260610133133\backend\venv\Scripts\python.exe
+Using SA-LUT source: D:\ailab\20260610133133\backend
+picai-salut-color listening on 127.0.0.1:8011
+python: D:\ailab\20260610133133\backend\venv\Scripts\python.exe
+salut backend: D:\ailab\20260610133133\backend
+
+=== 2026-07-01T13:08:39.288622400+00:00 start picai-salut-color ===
+command: D:\ailab\PicAiPic\plugins\picai-salut-color\start.bat
+root: D:\ailab\PicAiPic\plugins\picai-salut-color
+baseUrl: http://127.0.0.1:8011
+port: 8011
+signature: windows-amd-rocm:rocm:color-transfer:e278612843f03f06b3165f5a74190e63d61b4e7b5be4599eab585ec4097addc6
+
+Using Python: D:\ailab\20260610133133\backend\venv\Scripts\python.exe
+Using SA-LUT source: D:\ailab\20260610133133\backend
+picai-salut-color listening on 127.0.0.1:8011
+python: D:\ailab\20260610133133\backend\venv\Scripts\python.exe
+salut backend: D:\ailab\20260610133133\backend

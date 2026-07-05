@@ -1,0 +1,41 @@
+# IDE / editor
+.vscode/
+.continue/
+
+# Rust build output
+.cargo/
+target/
+
+# Frontend dependencies
+src-vite/node_modules/
+
+# Build artifacts (signed plugin zips, staging, etc.)
+dist/
+
+# Third-party C libraries (managed as git submodules — do not commit their
+# source into the main repo; re-add via `git submodule update --init`)
+src-tauri/third_party/
+
+# Skills cache
+skills/
+
+# OS
+.DS_Store
+
+# Secrets — NEVER commit
+.env
+picaipic-release-key.txt
+*-sign-key.txt
+*private-key*.txt
+
+# Local scripts / personal tooling
+dev.sh
+build.sh
+set_version.py
+publish_release.sh
+release-downloads.sh
+
+# Temporary debugging artifacts
+tmp_*
+tmp_*/
+nul

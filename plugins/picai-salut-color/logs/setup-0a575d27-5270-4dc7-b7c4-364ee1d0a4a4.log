@@ -1,0 +1,46 @@
+Created setup job record.
+Plugin root: D:\ailab\PicAiPic\plugins\picai-salut-color
+Profile: windows-amd-rocm
+Backend: rocm
+Profile environment directory declared: D:\ailab\PicAiPic\plugins\picai-salut-color\.venv-rocm
+Requirements file is present: D:\ailab\PicAiPic\plugins\picai-salut-color\backend/requirements-rocm.txt
+Wrote setup log: D:\ailab\PicAiPic\plugins\picai-salut-color\logs\setup-0a575d27-5270-4dc7-b7c4-364ee1d0a4a4.log
+Executing setup command: install.bat
+Injected setup environment:
+PICAIPIC_PLUGIN_ID=picai-salut-color
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=color-transfer
+PICAIPIC_PLUGIN_ID=picai-salut-color
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=color-transfer
+PICAIPIC_PLUGIN_ROOT=D:\ailab\PicAiPic\plugins\picai-salut-color
+PICAIPIC_PLUGIN_ENV_DIR=.venv-rocm
+PICAIPIC_PLUGIN_ENV_PATH=D:\ailab\PicAiPic\plugins\picai-salut-color\.venv-rocm
+PICAIPIC_PLUGIN_REQUIREMENTS=backend/requirements-rocm.txt
+PICAIPIC_PLUGIN_REQUIREMENTS_PATH=D:\ailab\PicAiPic\plugins\picai-salut-color\backend/requirements-rocm.txt
+PicAiPic plugin setup
+  profile: windows-amd-rocm
+  backend: rocm
+  env: .venv-rocm
+  requirements: backend/requirements-rocm.txt
+
+Creating virtual environment: .venv-rocm
+Requirement already satisfied: pip in d:\ailab\picaipic\plugins\picai-salut-color\.venv-rocm\lib\site-packages (25.0.1)
+Collecting pip
+  Using cached pip-26.1.2-py3-none-any.whl.metadata (4.6 kB)
+Using cached pip-26.1.2-py3-none-any.whl (1.8 MB)
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 25.0.1
+    Uninstalling pip-25.0.1:
+      Successfully uninstalled pip-25.0.1
+Successfully installed pip-26.1.2
+
+Basic plugin server dependencies are installed.
+Profile setup finished. Run Smoke in PicAiPic before using this profile.
+Use .local.env for local development overrides such as SALUT_SOURCE_DIR,
+SALUT_MODEL_DIR, or PICAIPIC_SALUT_PYTHON.
+Setup command completed successfully.
+Run Verify or Smoke to validate this profile.

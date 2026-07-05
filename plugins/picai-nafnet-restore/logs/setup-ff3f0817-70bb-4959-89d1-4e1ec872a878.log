@@ -1,0 +1,33 @@
+Created setup job record.
+Plugin root: D:\ailab\PicAiPic\plugins\picai-nafnet-restore
+Profile: windows-amd-rocm
+Backend: rocm
+No envDir declared for this profile.
+Requirements file is present: D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend/requirements-rocm.txt
+Wrote setup log: D:\ailab\PicAiPic\plugins\picai-nafnet-restore\logs\setup-ff3f0817-70bb-4959-89d1-4e1ec872a878.log
+Executing setup command: install.bat
+Injected setup environment:
+PICAIPIC_PLUGIN_ID=picai-nafnet-restore
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=denoise
+PICAIPIC_PLUGIN_ID=picai-nafnet-restore
+PICAIPIC_PLUGIN_PROFILE_ID=windows-amd-rocm
+PICAIPIC_PLUGIN_BACKEND=rocm
+PICAIPIC_PLUGIN_CAPABILITY=denoise
+PICAIPIC_PLUGIN_ROOT=D:\ailab\PicAiPic\plugins\picai-nafnet-restore
+PICAIPIC_PLUGIN_REQUIREMENTS=backend/requirements-rocm.txt
+PICAIPIC_PLUGIN_REQUIREMENTS_PATH=D:\ailab\PicAiPic\plugins\picai-nafnet-restore\backend/requirements-rocm.txt
+PicAiPic NAFNet setup
+  profile: windows-amd-rocm
+  backend: rocm
+  env: .venv
+  requirements: backend/requirements-rocm.txt
+
+External runtime binding selected.
+  python: D:\ailab\20260610133133\backend\venv\Scripts\python.exe
+  root: D:\ailab\20260610133133\backend
+pip 26.1.2 from D:\ailab\20260610133133\backend\venv\Lib\site-packages\pip (python 3.12)
+External runtime is present. Run Smoke in PicAiPic before using this profile.
+Setup command completed successfully.
+Run Verify or Smoke to validate this profile.

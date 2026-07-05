@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "id": "picai-salut-color",
+  "name": "SA-LUT Color",
+  "version": "0.1.0",
+  "publisher": "local",
+  "homepage": "https://github.com/Ry3nG/SA-LUT",
+  "license": "CC-BY-NC-4.0",
+  "platforms": ["windows-x64", "all"],
+  "compatibility": {
+    "minPicAiPicVersion": "0.2.4",
+    "pluginApi": "^1.0.0"
+  },
+  "permissions": {
+    "readSelectedFiles": true,
+    "writeOutputDir": true,
+    "writeSourceFiles": false,
+    "network": {
+      "runtime": false,
+      "setupDownloads": true,
+      "uploadSelectedFiles": false,
+      "uploadOutputs": false,
+      "allowedDomains": ["pypi.org", "files.pythonhosted.org", "download.pytorch.org", "repo.radeon.com"]
+    },
+    "launchChildProcesses": true
+  },
+  "runtimes": ["python", "local-http", "torch"],
+  "runtime": {
+    "kind": "python-pytorch",
+    "cudaApiCompatible": true,
+    "notes": "SA-LUT uses PyTorch CUDA device APIs. ROCm PyTorch exposes AMD GPUs through torch.cuda, so ROCm runs may still use device='cuda' internally."
+  },
+  "hardware": {
+    "cpu": true,
+    "cuda": true,
+    "rocm": true,
+    "directml": true,
+    "minVramMb": 4096,
+    "recommendedVramMb": 8192
+  },
+  "entry": {
+    "kind": "local-http",
+    "baseUrl": "http://127.0.0.1:8011",
+    "defaultPort": 8011,
+    "startCommand": "start.bat",
+    "stopCommand": "stop.bat",
+    "health": {
+      "method": "GET",
+      "path": "/health",
+      "readyField": "ready"
+    },
+    "status": {
+      "method": "GET",
+      "path": "/status"
+    }
+  },
+  "install": {
+    "kind": "script",
+    "command": "install.bat",
+    "estimatedDiskMb": 12000,
+    "requiresAdmin": false
+  },
+  "installProfiles": [
+    {
+      "id": "windows-nvidia-cuda",
+      "backend": "cuda",
+      "label": "NVIDIA CUDA",
+      "supportLevel": "official",
+      "envDir": ".venv-cuda",
+      "requirements": "backend/requirements-cuda.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-cuda121-torch231",
+        "label": "Shared CUDA runtime",
+        "requirements": "backend/requirements-cuda.txt"
+      }
+    },
+    {
+      "id": "windows-amd-rocm",
+      "backend": "rocm",
+      "label": "AMD ROCm",
+      "supportLevel": "derived",
+      "derivedFrom": "cuda-api",
+      "envDir": ".venv-rocm",
+      "requirements": "backend/requirements-rocm.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-rocm72-torch291",
+        "label": "Shared ROCm runtime",
+        "requirements": "backend/requirements-rocm.txt",
+        "notes": "Creates or reuses the shared ROCm PyTorch runtime. Local development may override Python and model paths through .local.env."
+      },
+      "runtimeBindings": [
+        {
+          "scope": "shared",
+          "kind": "python",
+          "id": "python312-rocm72-torch291",
+          "label": "Shared ROCm runtime",
+          "requirements": "backend/requirements-rocm.txt",
+          "notes": "Shared runtime used by packaged installs that need Python 3.12, ROCm 7.2, and torch 2.9.1."
+        }
+      ],
+      "notes": "ROCm PyTorch is CUDA API compatible for this plugin layer; smoke test is required before marking it usable."
+    },
+    {
+      "id": "windows-directml",
+      "backend": "directml",
+      "label": "DirectML",
+      "supportLevel": "experimental",
+      "envDir": ".venv-directml",
+      "requirements": "backend/requirements-directml.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-directml",
+        "label": "Shared DirectML runtime",
+        "requirements": "backend/requirements-directml.txt"
+      }
+    },
+    {
+      "id": "windows-cpu",
+      "backend": "cpu",
+      "label": "CPU",
+      "supportLevel": "fallback",
+      "envDir": ".venv-cpu",
+      "requirements": "backend/requirements-cpu.txt",
+      "runtimeBinding": {
+        "scope": "shared",
+        "kind": "python",
+        "id": "python312-cpu-torch231",
+        "label": "Shared CPU runtime",
+        "requirements": "backend/requirements-cpu.txt"
+      }
+    }
+  ],
+  "smokeTest": {
+    "command": "python backend/smoke_test.py",
+    "capability": "color-transfer",
+    "timeoutMs": 120000
+  },
+  "models": [
+    {
+      "id": "salut-main",
+      "name": "SA-LUT main checkpoint",
+      "required": true,
+      "path": "models/salut/epoch=100-step=4127466.ckpt.state.pt",
+      "purpose": "color-transfer",
+      "download": {
+        "kind": "local",
+        "url": "models/salut"
+      }
+    },
+    {
+      "id": "vgg-normalised",
+      "name": "VGG normalised encoder",
+      "required": true,
+      "path": "models/salut/vgg_normalised.pth",
+      "purpose": "feature-extraction"
+    }
+  ],
+  "contributes": {
+    "menus": [
+      {
+        "id": "picai-salut-color.image.color-transfer",
+        "label": "SA-LUT 调色",
+        "capability": "color-transfer",
+        "contexts": ["image.selection.single"],
+        "placements": ["image.contextMenu", "image.toolbar"],
+        "icon": "palette",
+        "order": 100
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "color-transfer",
+      "kind": "image.color.transfer",
+      "name": "Color transfer",
+      "version": "1.0",
+      "inputs": [
+        { "id": "source", "kind": "image", "required": true },
+        { "id": "style", "kind": "image", "required": true }
+      ],
+      "outputs": [
+        { "id": "result", "kind": "image", "required": true }
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "enum": ["auto", "cpu", "cuda", "rocm", "directml"],
+            "default": "auto",
+            "description": "Only affects this run. It does not install CUDA, ROCm, DirectML, or Python dependencies."
+          },
+          "outputFormat": {
+            "type": "string",
+            "enum": ["png", "jpg"],
+            "default": "png"
+          },
+          "analysisSize": {
+            "type": "integer",
+            "minimum": 128,
+            "maximum": 2048,
+            "default": 1024
+          }
+        }
+      },
+      "invoke": {
+        "method": "POST",
+        "path": "/invoke/color-transfer",
+        "contentType": "application/json"
+      }
+    },
+    {
+      "id": "export-lut",
+      "kind": "image.color.lut.export",
+      "name": "Export LUT",
+      "version": "0.1",
+      "inputs": [
+        { "id": "style", "kind": "image", "required": true }
+      ],
+      "outputs": [
+        { "id": "lut", "kind": "lut", "required": true }
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "invoke": {
+        "method": "POST",
+        "path": "/invoke/export-lut",
+        "contentType": "application/json"
+      }
+    }
+  ]
+}
