@@ -27,6 +27,10 @@ skills/
 picaipic-release-key.txt
 *-sign-key.txt
 *private-key*.txt
+picaipic-updater-key.key
+picaipic-updater-key.key.pub
+*.updater-key.key
+*.updater-key.key.pub
 
 # Local scripts / personal tooling
 dev.sh

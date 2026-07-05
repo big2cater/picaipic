@@ -88,32 +88,32 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         }
         "help_homepage" => {
             let _ = opener::open(
-                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://julyx10.github.io/lap"),
+                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://big2cater.github.io/picaipic"),
             );
         }
         "help_release_notes" => {
             let _ = opener::open(format!(
                 "{}/guide/release-notes/v{}.html",
-                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://julyx10.github.io/lap"),
+                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://big2cater.github.io/picaipic"),
                 env!("CARGO_PKG_VERSION")
             ));
         }
         "help_readme" => {
             let _ = opener::open(format!(
                 "{}/blob/main/README.md",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/big2cater/picaipic")
             ));
         }
         "help_privacy" => {
             let _ = opener::open(format!(
                 "{}/blob/main/PRIVACY.md",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/big2cater/picaipic")
             ));
         }
         "help_report_issue" => {
             let _ = opener::open(format!(
                 "{}/issues",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/big2cater/picaipic")
             ));
         }
         _ => {}

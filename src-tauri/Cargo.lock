@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "Lap"
+name = "PicAiPic"
 version = "0.2.4"
 dependencies = [
  "arboard",

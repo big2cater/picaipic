@@ -1,11 +1,11 @@
 [package]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-name = "Lap"
+name = "PicAiPic"
 version = "0.2.4"
 description = "An offline-first photo manager for large local libraries."
-homepage = "https://julyx10.github.io/lap"
-repository = "https://github.com/julyx10/lap"
-authors = ["julyx10 <tiangle@gmail.com>"]
+homepage = "https://big2cater.github.io/picaipic"
+repository = "https://github.com/big2cater/picaipic"
+authors = ["big2cater", "julyx10 <tiangle@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
 build = "build.rs"
