@@ -14,6 +14,7 @@ export default defineConfig(({ mode }) => ({
     svgLoader()
   ],
   server: {
+    host: '127.0.0.1',
     port: 3580
   },
   resolve: {
