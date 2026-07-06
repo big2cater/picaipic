@@ -1,6 +1,6 @@
 # Scripts
 
-Utility scripts for the Lap project.
+Utility scripts for the PicAiPic project.
 
 ## 1. download_models
 
@@ -101,9 +101,9 @@ Useful options:
 
 Default outputs:
 
-- `src-tauri\target\release\Lap.exe`
-- `src-tauri\target\release\bundle\nsis\Lap_<version>_x64-setup.exe`
-- `src-tauri\target\release\bundle\msi\Lap_<version>_x64_en-US.msi`
+- `src-tauri\target\release\PicAiPic.exe`
+- `src-tauri\target\release\bundle\nsis\PicAiPic_<version>_x64-setup.exe`
+- `src-tauri\target\release\bundle\msi\PicAiPic_<version>_x64_en-US.msi`
 
 ## 5. check_plugin_host
 

@@ -3,7 +3,7 @@
 Updated: 2026-07-04
 
 This document records the current implementation status for turning the existing
-Lap codebase into PicAiPic: a Windows x64 local album app with lightweight
+PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight
 built-in functions and independently registered AI plugins.
 
 For detailed plugin runtime status, use:

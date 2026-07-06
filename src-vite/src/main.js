@@ -12,13 +12,6 @@ import '@/assets/app.css'
 // I18n
 import en from '@/locales/en.json'
 import zh from '@/locales/zh.json'
-import es from '@/locales/es.json'
-import fr from '@/locales/fr.json'
-import de from '@/locales/de.json'
-import ja from '@/locales/ja.json'
-import ko from '@/locales/ko.json'
-import ru from '@/locales/ru.json'
-import pt from '@/locales/pt.json'
 
 // Create the app instance
 const app = createApp(App)
@@ -37,13 +30,6 @@ const i18n = createI18n({
   messages: {
     en,
     zh,
-    es,
-    fr,
-    de,
-    ja,
-    ko,
-    ru,
-    pt
   },
 })
 

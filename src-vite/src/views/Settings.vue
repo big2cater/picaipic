@@ -1919,14 +1919,7 @@ const onRestoreDone = () => {
 
 const languages = [
   { label: 'English', value: 'en' },
-  { label: 'Deutsch', value: 'de' },
-  { label: 'Español', value: 'es' },
-  { label: 'Français', value: 'fr' },
-  { label: 'Português', value: 'pt' },
-  { label: 'Русский', value: 'ru' },
   { label: '中文', value: 'zh' },
-  { label: '日本語', value: 'ja' },
-  { label: '한국어', value: 'ko' },
 ];
 
 const appearanceOptions = computed(() => {

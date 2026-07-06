@@ -236,8 +236,8 @@ jobs:
           fi
 
           # merge_entry <platform_key> <msi_glob>
-          # Tauri's MSI filename embeds the architecture: "Lap_<version>_x64_en-US.msi"
-          # or "Lap_<version>_arm64_en-US.msi", so we can separate architectures by glob.
+          # Tauri's MSI filename embeds the architecture: "PicAiPic_<version>_x64_en-US.msi"
+          # or "PicAiPic_<version>_arm64_en-US.msi", so we can separate architectures by glob.
           merge_entry() {
             local key="$1"
             local glob="$2"

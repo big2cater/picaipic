@@ -2,26 +2,26 @@
 layout: home
 
 hero:
-  name: "Lap"
+  name: "PicAiPic"
   text: "Local-first, AI-powered Photo manager."
   tagline: "Built for family albums, photographers, and large local libraries."
   image:
     src: /screenshots/lap-home-0.1.10_1.png
-    alt: Lap local photo library manager screenshot
+    alt: PicAiPic local photo library manager screenshot
   actions:
     - theme: brand
       text: Download
-      link: https://github.com/julyx10/lap/releases/latest
+      link: https://github.com/big2cater/picaipic/releases/latest
     - theme: alt
       text: What's New in v0.2.4
       link: /guide/release-notes/v0.2.4
     - theme: alt
       text: View on GitHub
-      link: https://github.com/julyx10/lap
+      link: https://github.com/big2cater/picaipic
 
 features:
   - title: No Cloud Required
-    details: Keep your photos on your own disk. Lap is a local-first photo manager with no forced cloud upload.
+    details: Keep your photos on your own disk. PicAiPic is a local-first photo manager with no forced cloud upload.
     icon: ☁️
   - title: Private by Default
     details: Browsing, indexing, and search run locally on your device so your family albums stay under your control.

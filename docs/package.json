@@ -1,7 +1,7 @@
 {
-    "name": "lap-website",
+    "name": "picaipic-website",
     "version": "1.0.0",
-    "description": "Website for Lap app",
+    "description": "Website for PicAiPic app",
     "scripts": {
         "dev": "vitepress dev",
         "build": "vitepress build",

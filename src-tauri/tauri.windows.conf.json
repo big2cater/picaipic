@@ -3,7 +3,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Lap",
+        "title": "PicAiPic",
         "minWidth": 800,
         "minHeight": 600,
         "decorations": false,

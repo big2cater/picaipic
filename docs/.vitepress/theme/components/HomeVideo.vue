@@ -2,11 +2,11 @@
   <section class="home-video">
     <div class="home-video-inner">
       <h2>Product Demo</h2>
-      <p>Watch Lap in action.</p>
+      <p>Watch PicAiPic in action.</p>
       <div class="video-frame">
         <iframe
           src="https://www.youtube-nocookie.com/embed/RbKqNKhbVUs"
-          title="Lap demo video"
+          title="PicAiPic demo video"
           loading="lazy"
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           allowfullscreen

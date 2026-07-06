@@ -1,6 +1,6 @@
-# Contributing to Lap
+# Contributing to PicAiPic
 
-Thank you for your interest in contributing to **Lap**!
+Thank you for your interest in contributing to **PicAiPic**!
 We welcome all kinds of contributions — bug reports, feature ideas, and code.
 
 This document helps you get started and ensures contributions are efficient and aligned with the project.
@@ -9,7 +9,7 @@ This document helps you get started and ensures contributions are efficient and 
 
 ## Project Philosophy
 
-Lap follows a few core principles:
+PicAiPic follows a few core principles:
 
 - **Consistency** – predictable and coherent UX
 - **Simplicity** – avoid unnecessary complexity
@@ -32,7 +32,7 @@ Before opening an issue:
 Please include:
 
 - OS and version (macOS / Windows / Linux)
-- Lap version
+- PicAiPic version
 - Steps to reproduce
 - Expected vs actual behavior
 - Sample files (if relevant)
@@ -99,7 +99,7 @@ Please include:
 
 ## Performance & Stability
 
-This is critical for Lap:
+This is critical for PicAiPic:
 
 - Avoid performance regressions
 - Test with large libraries if possible
@@ -131,4 +131,4 @@ Active contributors may be invited to become long-term collaborators.
 
 ---
 
-Thanks for helping make Lap better ❤️
+Thanks for helping make PicAiPic better ❤️

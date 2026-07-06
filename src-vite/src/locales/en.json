@@ -43,10 +43,10 @@
     }
   },
   "welcome": {
-    "title": "Welcome to Lap",
+    "title": "Welcome to PicAiPic",
     "description": "Your local photo library. Fast, searchable, and always under your control.",
     "add_album_title": "Start by adding an album",
-    "add_album_description": "Select a folder and let Lap organize your photos and videos.",
+    "add_album_description": "Select a folder and let PicAiPic organize your photos and videos.",
     "search_title": "Search by memory",
     "search_description": "Search with natural language, discover similar images, and find what you're looking for instantly.",
     "drag_title": "Drag to import",
@@ -80,7 +80,7 @@
         "skip_once": "Skip this file and continue",
         "file_label": "Last scanned file",
         "message": "The previous scan did not close normally.",
-        "message_with_file": "The previous scanning task did not exit cleanly.\n\nLast scanned file:\n{file}\n\nIf you continue, Lap will skip this file once and resume scanning."
+        "message_with_file": "The previous scanning task did not exit cleanly.\n\nLast scanned file:\n{file}\n\nIf you continue, PicAiPic will skip this file once and resume scanning."
       }
     }
   },
@@ -851,7 +851,7 @@
       "network": "Network error while loading video",
       "decode": "Video decoding error",
       "format": "Unsupported video format or the file is corrupted.",
-      "external_player_recommended": "This video needs compatibility transcoding before it can play here. For long videos, Lap recommends using an external player instead of waiting for background processing.",
+      "external_player_recommended": "This video needs compatibility transcoding before it can play here. For long videos, PicAiPic recommends using an external player instead of waiting for background processing.",
       "open_in_external_app": "Open in external player",
       "open_in_external_app_named": "Open video in {app}...",
       "use_external": "To open unsupported formats, set up an external player in Settings.",
@@ -1063,7 +1063,7 @@
       "multilingual_model_download_message": "The multilingual image search model is not installed. Download it to enable search in 50+ languages.",
       "download": "Download",
       "downloading_multilingual_model": "Downloading multilingual model",
-      "multilingual_model_download_success": "Multilingual search model is ready. Restart Lap to use it.",
+      "multilingual_model_download_success": "Multilingual search model is ready. Restart PicAiPic to use it.",
       "multilingual_model_download_failed": "Failed to download multilingual search model",
       "find_similar": "Find similar images",
       "similarity": "Image similarity",

@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Capabilities for Lap photo management app",
+  "description": "Capabilities for PicAiPic photo management app",
   "local": true,
   "windows": [
     "main",

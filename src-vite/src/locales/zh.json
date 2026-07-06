@@ -43,10 +43,10 @@
     }
   },
   "welcome": {
-    "title": "欢迎使用 Lap",
+    "title": "欢迎使用 PicAiPic",
     "description": "您的本地照片库。快速、可搜索，始终由您掌控。",
     "add_album_title": "从添加相册开始",
-    "add_album_description": "选择一个文件夹，让 Lap 为您整理照片和视频。",
+    "add_album_description": "选择一个文件夹，让 PicAiPic 为您整理照片和视频。",
     "search_title": "按记忆搜索",
     "search_description": "用自然语言搜索，发现相似图片，即刻找到您想要的内容。",
     "drag_title": "拖拽导入",
@@ -80,7 +80,7 @@
         "skip_once": "跳过这个文件并继续",
         "file_label": "最后扫描的文件",
         "message": "上一次扫描没有正常退出。",
-        "message_with_file": "上一次扫描没有正常退出。\n\n最后扫描的文件：\n{file}\n\n如果继续，Lap 将跳过该文件一次并恢复扫描。"
+        "message_with_file": "上一次扫描没有正常退出。\n\n最后扫描的文件：\n{file}\n\n如果继续，PicAiPic 将跳过该文件一次并恢复扫描。"
       }
     }
   },
@@ -851,7 +851,7 @@
       "network": "网络错误导致视频下载失败",
       "decode": "视频解码错误",
       "format": "视频格式暂不支持，或者文件已损坏。",
-      "external_player_recommended": "该视频需要先做兼容转码后才能在这里播放。对于长视频，Lap 更建议直接使用外部播放器，而不是等待后台处理。",
+      "external_player_recommended": "该视频需要先做兼容转码后才能在这里播放。对于长视频，PicAiPic 更建议直接使用外部播放器，而不是等待后台处理。",
       "open_in_external_app": "使用外部播放器打开",
       "open_in_external_app_named": "在 {app} 中打开...",
       "use_external": "若要打开不支持的格式，请在设置中配置外部播放器。",
@@ -1063,7 +1063,7 @@
       "multilingual_model_download_message": "多语言图片搜索模型尚未安装。下载后可支持 50+ 语言搜索。",
       "download": "下载",
       "downloading_multilingual_model": "正在下载多语言模型",
-      "multilingual_model_download_success": "多语言搜索模型已就绪。重启 Lap 后生效。",
+      "multilingual_model_download_success": "多语言搜索模型已就绪。重启 PicAiPic 后生效。",
       "multilingual_model_download_failed": "多语言搜索模型下载失败",
       "find_similar": "查找相似图片",
       "similarity": "图片相似度",
