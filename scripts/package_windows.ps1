@@ -213,8 +213,8 @@ function Remove-ReleaseArtifacts {
 
     $releaseRoot = $resolvedReleaseDir.Path.TrimEnd("\")
     $targets = @(
-        (Join-Path $releaseRoot "Lap.exe"),
-        (Join-Path $releaseRoot "Lap.pdb"),
+        (Join-Path $releaseRoot "PicAiPic.exe"),
+        (Join-Path $releaseRoot "PicAiPic.pdb"),
         (Join-Path $releaseRoot "bundle")
     )
 
@@ -238,7 +238,7 @@ function Stop-RunningReleaseExe {
 
     $resolvedExePath = [System.IO.Path]::GetFullPath($ExePath)
     $running = @(
-        Get-Process -Name "Lap" -ErrorAction SilentlyContinue |
+        Get-Process -Name "PicAiPic" -ErrorAction SilentlyContinue |
             Where-Object {
                 try {
                     $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -eq $resolvedExePath)
@@ -280,13 +280,15 @@ function New-LocalTauriConfig {
         [string]$OutputPath
     )
 
+    # Local config overrides only the build commands. We intentionally do NOT
+    # override bundle.createUpdaterArtifacts here — it stays true (from
+    # tauri.conf.json) so the build produces signed updater artifacts
+    # (.sig + latest.json). The signing key is read from the
+    # TAURI_SIGNING_PRIVATE_KEY env var; if unset, the build fails fast.
     $config = [ordered]@{
         build = [ordered]@{
             beforeBuildCommand = "pnpm --dir src-vite build"
             beforeDevCommand = "pnpm --dir src-vite dev"
-        }
-        bundle = [ordered]@{
-            createUpdaterArtifacts = $false
         }
     }
 
@@ -305,7 +307,7 @@ function Get-BuildArtifacts {
     )
 
     $paths = @()
-    $exe = Join-Path $ReleaseDir "Lap.exe"
+    $exe = Join-Path $ReleaseDir "PicAiPic.exe"
     if (Test-Path $exe) {
         $paths += Get-Item $exe
     }
@@ -325,7 +327,7 @@ function Show-Artifacts {
     param([object[]]$Artifacts)
 
     if (-not $Artifacts -or $Artifacts.Count -eq 0) {
-        Write-Warn "No Lap.exe, NSIS installer, or MSI installer was found."
+        Write-Warn "No PicAiPic.exe, NSIS installer, or MSI installer was found."
         return
     }
 
@@ -354,7 +356,21 @@ $LocalConfigPath = Join-Path $BuildScratchDir "tauri.local.conf.json"
 $TargetTriple = Get-TargetTriple $Arch
 $FfmpegArch = Get-FfmpegArch $Arch
 
-Write-Host "Lap Windows package script" -ForegroundColor White
+# Load the updater signing key if not already set in the environment.
+# The key file is gitignored and lives at the repo root; CI should set
+# TAURI_SIGNING_PRIVATE_KEY directly instead.
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    $updaterKeyFile = Join-Path $RootDir "picaipic-updater-key.key"
+    if (Test-Path $updaterKeyFile) {
+        $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content -LiteralPath $updaterKeyFile -Raw).Trim()
+        Write-Ok "Loaded updater signing key from $updaterKeyFile"
+    }
+    else {
+        Write-Warn "No updater signing key found. Set TAURI_SIGNING_PRIVATE_KEY or place picaipic-updater-key.key at the repo root. Updater artifacts will not be signed."
+    }
+}
+
+Write-Host "PicAiPic Windows package script" -ForegroundColor White
 Write-Host "Project: $RootDir"
 
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
@@ -426,7 +442,7 @@ else {
     Write-Ok "Frontend dependencies already installed."
 }
 
-Stop-RunningReleaseExe -ExePath (Join-Path $ReleaseDir "Lap.exe")
+Stop-RunningReleaseExe -ExePath (Join-Path $ReleaseDir "PicAiPic.exe")
 
 if ($Clean) {
     Write-Step "Cleaning old release artifacts"
@@ -437,7 +453,12 @@ New-LocalTauriConfig -OutputPath $LocalConfigPath
 
 $buildArgs = @()
 $buildArgs += $TauriRunner.PrefixArgs
-$buildArgs += @("build", "--ci", "--no-sign", "--config", $LocalConfigPath)
+# Note: do NOT pass --no-sign here. That flag skips BOTH Windows code
+# signing AND updater signing. We have no Authenticode certificate, but
+# Tauri handles that gracefully (it only signs if signtool is configured).
+# Removing --no-sign lets the updater artifacts (.sig + latest.json) be
+# produced, signed with TAURI_SIGNING_PRIVATE_KEY.
+$buildArgs += @("build", "--ci", "--config", $LocalConfigPath)
 
 if ($VerboseBuild) {
     $buildArgs += "--verbose"
@@ -456,7 +477,7 @@ elseif (-not ($Bundle -contains "all")) {
 
 $buildStartTime = Get-Date
 Invoke-Native `
-    -Name "Build Lap release package" `
+    -Name "Build PicAiPic release package" `
     -FilePath $TauriRunner.File `
     -Arguments $buildArgs `
     -WorkingDirectory $TauriDir
@@ -475,5 +496,5 @@ if ($OpenOutput) {
 }
 
 Write-Step "Done"
-Write-Host "Main EXE: $(Join-Path $ReleaseDir "Lap.exe")"
+Write-Host "Main EXE: $(Join-Path $ReleaseDir "PicAiPic.exe")"
 Write-Host "Installers: $(Join-Path $ReleaseDir "bundle")"
