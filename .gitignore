@@ -15,10 +15,6 @@ dist/
 # Runtime plugin data (created at dev time by the running app)
 src-tauri/picaipic-local/
 
-# Third-party C libraries (managed as git submodules — do not commit their
-# source into the main repo; re-add via `git submodule update --init`)
-src-tauri/third_party/
-
 # Skills cache
 skills/
 
