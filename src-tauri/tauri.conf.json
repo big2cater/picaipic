@@ -1,6 +1,6 @@
 {
   "productName": "PicAiPic",
-  "version": "0.2.4",
+  "version": "1.0.0",
   "identifier": "com.big2cater.picaipic",
   "build": {
     "beforeBuildCommand": "pnpm --dir D:\\ailab\\PicAiPic\\src-vite build",
@@ -67,7 +67,7 @@
       "endpoints": [
         "https://github.com/big2cater/picaipic/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5MUFDNDVCNUIwMzQyM0QKUldROVFnTmJXOFFhK1JCdTNETWJYSGQ0YWkvTTY2ZWdLYUI1d3NoOFBsb050azc4eGtVNkxPSzgK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFNDhEMkU0QzJBMTAxNEMKUldSTUFhSEM1TkpJWHRyclJJZzhIc3VLbHUxUlo3a1F0RjdWaDh0RjBnQnJGWWZpQlpML2hJcmoK"
     }
   }
 }
