@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "identifier": "com.big2cater.picaipic",
   "build": {
-    "beforeBuildCommand": "pnpm --dir D:\\ailab\\PicAiPic\\src-vite build",
-    "beforeDevCommand": "pnpm --dir D:\\ailab\\PicAiPic\\src-vite dev",
+    "beforeBuildCommand": "pnpm --dir ../src-vite build",
+    "beforeDevCommand": "pnpm --dir ../src-vite dev",
     "devUrl": "http://localhost:3580",
     "frontendDist": "../src-vite/dist"
   },

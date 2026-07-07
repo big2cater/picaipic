@@ -121,14 +121,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: .\scripts\download_models.ps1
 
-      - name: Force app frontend build command (Windows CI only)
-        shell: pwsh
-        run: |
-          $path = "src-tauri/tauri.conf.json"
-          $json = Get-Content $path -Raw | ConvertFrom-Json
-          $json.build.beforeBuildCommand = "pnpm --dir ../src-vite build || pnpm --dir src-vite build"
-          $json | ConvertTo-Json -Depth 100 | Set-Content -Path $path -Encoding utf8
-
       - name: Setup MSVC build environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
