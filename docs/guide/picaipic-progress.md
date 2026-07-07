@@ -1,6 +1,6 @@
 # PicAiPic Progress
 
-Updated: 2026-07-04
+Updated: 2026-07-07
 
 This document records the current implementation status for turning the existing
 PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight
@@ -291,33 +291,62 @@ python -m py_compile plugins\picai-nafnet-restore\backend\main.py plugins\picai-
 python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 2
 ```
 
+## 2026-07-07 Project rename, signing hardening, release build
+
+- **Signature canonicalization fix**: the Ed25519 package signature was
+  fragile — Python signed with unsorted JSON keys, Rust verified with
+  struct field order. Both sides now use lexicographic key ordering
+  (Python `sort_keys=True`, Rust `serde_json::Value` with BTreeMap), so
+  the signature is field-order independent. Also fixed `Option::None`
+  serialization mismatch (`skip_serializing_if` on `signature` and
+  `created_at` fields). Unit tests cover cross-language consistency,
+  key-order independence, and tamper rejection. See `t_plugin.rs` tests.
+- **Project identity renamed from Lap to PicAiPic**: `productName`,
+  `identifier` (`com.julyx10.lap` → `com.big2cater.picaipic`), Cargo.toml,
+  window title, fallback URLs, and all user-facing docs updated. This
+  changes the app data directory (`%LOCALAPPDATA%\com.big2cater.picaipic`),
+  so prior Lap-era local data is not visible to the new identity.
+- **Updater signing key rotated**: the old updater pubkey in
+  `tauri.conf.json` belonged to upstream julyx10; the matching private key
+  was never available to this fork. Generated a new minisign keypair;
+  public key is in `tauri.conf.json`, private key is gitignored locally.
+  Updater endpoint moved from `julyx10/lap` to `big2cater/picaipic`.
+- **macOS support removed**: AI plugins are incompatible with macOS
+  (sandbox uses Windows deny-ACL; no macOS Seatbelt). Deleted
+  `tauri.macos.conf.json`, `infoplist/`, homebrew workflow, and macOS
+  matrix entries from release/pr-build workflows. Rust `cfg(macos)`
+  branches kept intact (harmless, preserves structure). Platform scope is
+  now Windows + Linux only.
+- **Languages trimmed to en + zh**: dropped 7 locales (de/es/fr/ja/ko/pt/ru)
+  and their i18n READMEs. Frontend bundle reduced ~40%.
+- **Release build verified**: `package_windows.ps1` produces
+  `PicAiPic.exe`, NSIS installer, and `.sig` updater signature. The
+  script auto-loads the updater key from `picaipic-updater-key.key`.
+- **End-to-end trust flow validated**: installing a signed plugin zip
+  triggers the `TRUST_REQUIRED` consent dialog, user confirms, publisher
+  is written to `plugin-registry.json`, and install completes. Verified
+  with the real salut-color plugin package.
+- **Two plugin packages signed**: both `picai-salut-color` and
+  `picai-nafnet-restore` zips are signed with the release key
+  (publisher `local`, pubkey `e7Ccs...pe8=`).
+- **Dev server IPv4 fix**: Vite v8 binds IPv6 by default; Tauri devUrl
+  resolves to IPv4. Set `server.host = '127.0.0.1'` in `vite.config.js`.
+
 ## Next Work
 
-- `picai-nafnet-restore` is already wired as the second plugin; both SA-LUT
-  and NAFNet have passed discovery, runtime Probe, Setup, Smoke, and real
-  image invoke/adopt/discard from the host UI. Keep Smoke as the final
-  verification gate for every runtime profile.
-- Runtime conflict detection is implemented (2026-07-03): the host compares
-  probe-reported package versions against the plugin's requirements specifiers
-  and hard-blocks capability invocation on `version_mismatch`/`missing`
-  conflicts, advising a switch to a plugin-private runtime. Auto-switching the
-  profile is still future work.
-- Uninstall mode is implemented (2026-07-03): users choose between "code only"
-  (delete the plugin code package) and "code + data & runtimes" (also remove
-  plugin-data, plugin-cache, plugin-outputs, and plugin-private runtimes).
-  Shared runtimes are never deleted.
-- Security hardening A+B+C is landed (2026-07-04): startup bearer-token auth
-  (A), Ed25519 package signing with a user-managed trust store (B), and v1
-  process sandboxing (C). The sandbox applies a non-recursive deny-write ACE
-  via `icacls` on sensitive user directories before spawning the plugin
-  process, copies external input files into a staged readable area before
-  invoke, and preserves full GPU/CPU access (spike-confirmed). ACLs are
-  revoked on stop/crash/shutdown. Network blocking, macOS Seatbelt, and
-  Linux seccomp are future work. See `docs/ai-plugin-security-hardening.md`.
-- Next priority: end-to-end validation of the sandboxed plugin lifecycle with
-  SA-LUT/NAFNet (GPU usable under deny-ACL, write confinement effective, ACL
-  revocation leaves no residue), then model import / external model directory
-  binding, so users with model files already on disk do not need to hand-edit
-  `.local.env`.
-- Avoid concrete `export-lut` business logic until runtime binding confidence
-  is stable across both SA-LUT and NAFNet.
+- Write a `latest.json` generation script and create the first GitHub
+  release (v0.2.4) with the NSIS installer + `.sig` + `latest.json`, so
+  the in-app auto-updater has a real endpoint to check.
+- Migrate AI model / ffmpeg binary downloads from `julyx10/lap-binaries`
+  to a `big2cater/picaipic-binaries` release, so the fork does not depend
+  on the upstream binary repo.
+- Design plugin signing key rotation (security-hardening open question 3):
+  if an author's private key is compromised, there is currently no
+  revocation/rotation path in the trust store.
+- Migrate prior Lap-era local data (`com.julyx10.lap.debug` directory)
+  to the new `com.big2cater.picaipic.debug` path, so existing dev-time
+  plugin installs and config carry over.
+- Model import / external model directory binding support, so users with
+  model files already on disk do not need to hand-edit `.local.env`.
+- Avoid concrete `export-lut` business logic until runtime binding
+  confidence is stable across both SA-LUT and NAFNet.

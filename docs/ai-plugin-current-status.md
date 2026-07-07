@@ -1,6 +1,103 @@
 ﻿# PicAiPic AI Plugin Host - Current Status
 
-Date: 2026-07-04
+Date: 2026-07-07
+
+## 2026-07-07 Signature hardening, project rename, release build, trust flow validation
+
+### Signature canonicalization fix (critical)
+
+The Ed25519 package signature was fragile: Python signed with unsorted JSON
+keys, Rust verified with struct field declaration order. Both happened to
+match only because PowerShell's `[ordered]@{}` output order coincidentally
+aligned with the Rust struct field order. Any field reorder would have
+silently broken all signatures.
+
+- Python `sign_plugin.py`: `json.dumps` now uses `sort_keys=True`.
+- Rust `t_plugin.rs`: `verify_package_signature` serializes via
+  `serde_json::Value` (default `Map` is `BTreeMap` → lexicographic key
+  order) instead of `serde_json::to_vec(&struct)`.
+- `AiPluginPackageManifest`: `signature` and `created_at` fields gained
+  `skip_serializing_if = "Option::is_none"` so `None` omits the key
+  (matching Python's `data.pop("signature")`), not `"signature":null`.
+- Fixed `sign_plugin.py generate-key` bug: `PublicFormat.Raw` was passed
+  where `PrivateFormat.Raw` was needed — the command could not run at all.
+
+Tests added (`t_plugin::tests`):
+- `signed_package_from_python_verifies` — cross-language byte-level check
+- `canonical_serialization_sorts_keys` — regression guard
+- `tampered_signature_is_rejected` — flipped bit must fail
+- `real_signed_zips_verify` (`#[ignore]`) — reads real dist zips
+
+### Project renamed Lap → PicAiPic
+
+- `productName`, `identifier` (`com.julyx10.lap` → `com.big2cater.picaipic`),
+  Cargo.toml, index.html title, SettingsAbout.vue, t_menu.rs / t_config.rs
+  fallbacks all updated. App data dir is now
+  `%LOCALAPPDATA%\com.big2cater.picaipic`.
+- All user-facing docs (release notes, CONTRIBUTING, PRIVACY, getting-started,
+  introduction, vitepress theme) and .github issue templates updated.
+- Historical regression docs (dated 2026-06-30 etc.) kept as-is.
+
+### Updater signing key rotated
+
+The old updater pubkey in `tauri.conf.json` belonged to upstream julyx10;
+the matching private key was never available to this fork, so signed
+updates were impossible.
+
+- Generated a new minisign keypair. Public key written to
+  `tauri.conf.json` `plugins.updater.pubkey`; private key kept locally as
+  `picaipic-updater-key.key` (gitignored).
+- Updater endpoint moved from `julyx10/lap` to `big2cater/picaipic`.
+- `package_windows.ps1` auto-loads the key from the repo root if
+  `TAURI_SIGNING_PRIVATE_KEY` is not set in the environment.
+- Removed `--no-sign` from build args (it skipped updater signing too).
+- Removed `createUpdaterArtifacts = $false` override in `New-LocalTauriConfig`.
+
+Verified: release build produces `PicAiPic.exe` (43.85 MB), NSIS installer
+(183.77 MB), and `.sig` (420 bytes, minisign format).
+
+### macOS support removed
+
+AI plugins are incompatible with macOS (sandbox uses Windows deny-ACL; no
+macOS Seatbelt). Removed:
+
+- `src-tauri/tauri.macos.conf.json`
+- `src-tauri/infoplist/` (11 `.lproj` dirs)
+- `.github/workflows/release-homebrew.yml`
+- macOS matrix entries and steps from `release.yml` and `pr-build.yml`
+- macOS install sections from README, getting-started, introduction
+
+Kept: Rust `#[cfg(target_os = "macos")]` branches (harmless, preserves
+cross-compile structure). Platform scope is now Windows + Linux.
+
+### Languages trimmed: 9 → 2
+
+Dropped 7 locales (de/es/fr/ja/ko/pt/ru) and their i18n READMEs. Only `en`
+and `zh` remain in `main.js`, `Settings.vue` language picker, and `i18n/`.
+Frontend `index.js` bundle: 635 KB → 378 KB (−40%).
+
+### End-to-end trust flow validated
+
+Installed a signed `picai-salut-color` zip in dev mode:
+1. `install_ai_plugin_package` → `verify_package_signature` → `NeedsTrust`
+2. Frontend parsed `TRUST_REQUIRED:local:e7Ccs...:picai-salut-color`
+3. Consent dialog showed publisher `local` + public key fingerprint
+4. User clicked "Trust publisher" → `trust_publisher` wrote to
+   `plugin-registry.json` `trustedPublishers.local`
+5. Retry install → `Verified` → unpack + register → success
+
+`plugin-registry.json` confirmed: `publicKey` matches the release signing
+key exactly. Dev-mode bypass (`PICAIPIC_ALLOW_UNSIGNED_PLUGINS`) was **not**
+set — the real signature verification path was exercised.
+
+### Two plugin packages signed
+
+Both `picai-salut-color-0.1.0.zip` and `picai-nafnet-restore-0.1.0.zip`
+are signed with the release key (publisher `local`, pubkey
+`e7CcsIlYh0E2PiX5htlprQoVVT7ljZIiS/455iNIpe8=`). Both verify on the Rust
+side (`real_signed_zips_verify` test).
+
+---
 
 ## 2026-07-04 Approach C sandbox — deny-ACL write confinement + input staging
 
