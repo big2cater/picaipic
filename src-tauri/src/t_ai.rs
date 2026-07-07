@@ -34,11 +34,11 @@ pub struct AiEngine {
 
 const AI_INTRA_THREADS: usize = 2;
 const MULTILINGUAL_TEXT_MODEL_URL: &str =
-    "https://github.com/julyx10/lap-binaries/releases/download/models/text_model.onnx";
+    "https://github.com/big2cater/picaipic-binaries/releases/download/models/text_model.onnx";
 const MULTILINGUAL_TOKENIZER_URL: &str =
-    "https://github.com/julyx10/lap-binaries/releases/download/models/tokenizer.json";
+    "https://github.com/big2cater/picaipic-binaries/releases/download/models/tokenizer.json";
 const MULTILINGUAL_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/julyx10/lap-binaries/releases/tags/models";
+    "https://api.github.com/repos/big2cater/picaipic-binaries/releases/tags/models";
 static MULTILINGUAL_MODEL_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

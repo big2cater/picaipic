@@ -36,7 +36,7 @@ switch ($Arch) {
     }
 }
 
-$ReleaseBase = "https://github.com/julyx10/lap-binaries/releases/download/ffmpeg-8.1"
+$ReleaseBase = "https://github.com/big2cater/picaipic-binaries/releases/download/ffmpeg-8.1"
 
 $Downloads = @(
     "ffmpeg-$TripleSuffix.exe",
@@ -58,7 +58,7 @@ foreach ($Filename in $Downloads) {
         Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
     }
     catch {
-        Write-Error "Failed to download $Url. If this is an arm64 build and the binary has not been published yet, upload ffmpeg-aarch64-pc-windows-msvc.exe and ffprobe-aarch64-pc-windows-msvc.exe to the julyx10/lap-binaries release tag 'ffmpeg-8.1', or temporarily use the x64 binaries via Windows 11 ARM64 emulation."
+        Write-Error "Failed to download $Url. If this is an arm64 build and the binary has not been published yet, upload ffmpeg-aarch64-pc-windows-msvc.exe and ffprobe-aarch64-pc-windows-msvc.exe to the big2cater/picaipic-binaries release tag 'ffmpeg-8.1', or temporarily use the x64 binaries via Windows 11 ARM64 emulation."
         throw
     }
     Write-Host "# $Filename downloaded."

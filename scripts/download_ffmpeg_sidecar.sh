@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_DIR="$ROOT_DIR/src-tauri/resources/ffmpeg"
 mkdir -p "$TARGET_DIR"
 
-RELEASE_BASE="https://github.com/julyx10/lap-binaries/releases/download/ffmpeg-8.1"
+RELEASE_BASE="https://github.com/big2cater/picaipic-binaries/releases/download/ffmpeg-8.1"
 
 # Support overriding OS and ARCH for cross-compilation or CI
 OS_TYPE="${1:-$(uname -s)}"
