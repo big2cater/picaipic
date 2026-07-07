@@ -87,28 +87,36 @@ impl Drop for SandboxHandle {
         // Best-effort revoke. icacls /remove:d is idempotent: removing an ACE
         // that does not exist is a no-op, so a leftover from a crashed prior
         // run is cleaned up safely on the next apply.
-        let rt = match tokio::runtime::Handle::try_current() {
-            Ok(rt) => rt,
-            Err(_) => {
-                // No tokio runtime available (e.g. dropping during shutdown).
-                // Fall back to a blocking std thread so we still attempt cleanup.
-                let paths = std::mem::take(&mut self.denied_paths);
-                let user = self.user.clone();
-                std::thread::spawn(move || {
-                    for p in &paths {
-                        let _ = run_icacls_blocking(p, &user, IcaclsOp::RemoveDeny);
-                    }
-                });
-                return;
-            }
-        };
-        let paths = std::mem::take(&mut self.denied_paths);
-        let user = self.user.clone();
-        rt.spawn(async move {
-            for p in &paths {
-                let _ = run_icacls_async(p, &user, IcaclsOp::RemoveDeny).await;
-            }
-        });
+        //
+        // The icacls helpers are Windows-only; on other platforms
+        // `denied_paths` is always empty (see `SandboxHandle::inactive`),
+        // so this body is unreachable there and gated to keep the compiler
+        // happy without resolving Windows-only symbols.
+        #[cfg(target_os = "windows")]
+        {
+            let rt = match tokio::runtime::Handle::try_current() {
+                Ok(rt) => rt,
+                Err(_) => {
+                    // No tokio runtime available (e.g. dropping during shutdown).
+                    // Fall back to a blocking std thread so we still attempt cleanup.
+                    let paths = std::mem::take(&mut self.denied_paths);
+                    let user = self.user.clone();
+                    std::thread::spawn(move || {
+                        for p in &paths {
+                            let _ = run_icacls_blocking(p, &user, IcaclsOp::RemoveDeny);
+                        }
+                    });
+                    return;
+                }
+            };
+            let paths = std::mem::take(&mut self.denied_paths);
+            let user = self.user.clone();
+            rt.spawn(async move {
+                for p in &paths {
+                    let _ = run_icacls_async(p, &user, IcaclsOp::RemoveDeny).await;
+                }
+            });
+        }
     }
 }
 
@@ -126,15 +134,21 @@ pub fn apply_plugin_sandbox(
     plugin_id: &str,
     writable_dirs: &[PathBuf],
 ) -> Result<SandboxHandle, String> {
-    if !cfg!(target_os = "windows") {
-        return Ok(SandboxHandle::inactive(plugin_id));
-    }
-    if sandbox_disabled() {
+    // Non-Windows: sandbox is a no-op; return an inactive handle.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = writable_dirs;
         return Ok(SandboxHandle::inactive(plugin_id));
     }
 
+    // Windows path below. `sandbox_disabled()` short-circuits to an inactive
+    // handle so dev mode (`PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`) skips ACL work.
     #[cfg(target_os = "windows")]
     {
+        if sandbox_disabled() {
+            return Ok(SandboxHandle::inactive(plugin_id));
+        }
+
         let user = current_username()
             .ok_or_else(|| "Cannot determine current user for sandbox ACL".to_string())?;
         let targets = sensitive_write_targets(&user);
