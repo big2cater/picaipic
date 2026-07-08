@@ -1,6 +1,22 @@
 ﻿# PicAiPic AI Plugin Host - Current Status
 
-Date: 2026-07-07
+Date: 2026-07-08
+
+## 2026-07-08 First release pipeline + binary repo migration
+
+- **First release `v1.0.0` (Draft) built end-to-end**: `release.yml` (Linux
+  x86_64/aarch64) + `release-windows.yml` (Windows x64/arm64) both green.
+  `latest.json` carries all four platforms with valid minisign signatures.
+  Three cross-platform build blockers fixed: `beforeBuildCommand` hardcoded
+  a Windows path, `third_party/` submodules were blocked by `.gitignore`
+  so gitlinks never landed in commits, and `t_sandbox.rs` icacls calls
+  lacked `#[cfg(target_os = "windows")]` guards. The release stays as Draft
+  until feature completeness — see `docs/guide/picaipic-progress.md`.
+- **Binary downloads migrated** from `julyx10/lap-binaries` to
+  `big2cater/picaipic-binaries` (public). Ten assets re-uploaded under
+  `ffmpeg-8.1` and `models` tags. `t_ai.rs` and
+  `download_ffmpeg_sidecar.{ps1,sh}` now point at the new repo. The fork
+  no longer depends on the upstream binary repository.
 
 ## 2026-07-07 Signature hardening, project rename, release build, trust flow validation
 

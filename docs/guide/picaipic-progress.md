@@ -334,12 +334,27 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
 
 ## Next Work
 
-- Write a `latest.json` generation script and create the first GitHub
+- ~~Write a `latest.json` generation script and create the first GitHub
   release (v0.2.4) with the NSIS installer + `.sig` + `latest.json`, so
-  the in-app auto-updater has a real endpoint to check.
-- Migrate AI model / ffmpeg binary downloads from `julyx10/lap-binaries`
+  the in-app auto-updater has a real endpoint to check.~~ **Completed
+  (2026-07-08):** first release `v1.0.0` (Draft) built end-to-end via
+  `release.yml` + `release-windows.yml`. `latest.json` carries all four
+  platforms (linux-x86_64, linux-aarch64, windows-x86_64, windows-aarch64)
+  with valid signatures. Three CI build blockers were fixed along the way:
+  `beforeBuildCommand` hardcoded a Windows absolute path (broke Linux CI),
+  `third_party/` submodules were blocked by `.gitignore` so gitlinks never
+  landed in commits (broke Rust `build.rs`), and `t_sandbox.rs` icacls
+  calls lacked `#[cfg(target_os = "windows")]` guards (broke Linux
+  compilation). The release stays as Draft until feature completeness.
+- ~~Migrate AI model / ffmpeg binary downloads from `julyx10/lap-binaries`
   to a `big2cater/picaipic-binaries` release, so the fork does not depend
-  on the upstream binary repo.
+  on the upstream binary repo.~~ **Completed (2026-07-08):** ten binaries
+  (8 ffmpeg/ffprobe sidecars for Windows x64/arm64 + Linux x86_64/aarch64,
+  plus `text_model.onnx` and `tokenizer.json`) re-uploaded to
+  `big2cater/picaipic-binaries` under `ffmpeg-8.1` and `models` release
+  tags. `t_ai.rs` and `download_ffmpeg_sidecar.{ps1,sh}` now point at the
+  new repo. The `picaipic-binaries` repo was set to public so anonymous
+  release-asset downloads work at runtime.
 - Design plugin signing key rotation (security-hardening open question 3):
   if an author's private key is compromised, there is currently no
   revocation/rotation path in the trust store.
