@@ -73,7 +73,6 @@ export const usePluginStore = defineStore('pluginStore', {
 
     getMenuItems(context, placement) {
       return this.validPlugins
-        .filter((plugin) => this.runningPluginIds.has(plugin.id))
         .flatMap((plugin) => {
           const menus = plugin?.contributes?.menus || [];
           return menus

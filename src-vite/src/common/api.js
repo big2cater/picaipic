@@ -1747,6 +1747,46 @@ export async function getAiPluginTask(pluginId, taskId) {
   }
 }
 
+export async function setAiPluginModelDirBinding(pluginId, profileId, bindingId, dirPath) {
+  try {
+    return await invoke('set_ai_plugin_model_dir_binding', {
+      pluginId,
+      profileId,
+      bindingId,
+      dirPath,
+    });
+  } catch (error) {
+    console.error('setAiPluginModelDirBinding error:', error);
+    throw error;
+  }
+}
+
+export async function clearAiPluginModelDirBinding(pluginId, profileId, bindingId) {
+  try {
+    return await invoke('clear_ai_plugin_model_dir_binding', {
+      pluginId,
+      profileId,
+      bindingId,
+    });
+  } catch (error) {
+    console.error('clearAiPluginModelDirBinding error:', error);
+    throw error;
+  }
+}
+
+export async function checkAiPluginModelBindings(pluginId, bindingId, dirPath) {
+  try {
+    return await invoke('check_ai_plugin_model_bindings', {
+      pluginId,
+      bindingId,
+      dirPath,
+    });
+  } catch (error) {
+    console.error('checkAiPluginModelBindings error:', error);
+    throw error;
+  }
+}
+
 // indexing
 
 // index album

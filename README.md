@@ -97,7 +97,7 @@ The current frontend/backend work is centered on the AI plugin host pipeline and
 - validate the plugin lifecycle in the release executable (Start / Restart / Smoke)
 - runtime-conflict detection is implemented: the host blocks capability calls when a shared runtime's installed packages drift from the plugin's pinned requirements, and advises switching to a plugin-private runtime; one-click auto-switch is still future work
 - plugin uninstall now offers a choice between "code only" and "code + data & runtimes" (shared runtimes are always kept)
-- security hardening A+B+C are landed: startup bearer-token auth (A), Ed25519 package signing with a user-managed trust store (B), and v1 process sandboxing — deny-ACL write confinement on sensitive user directories plus input-file staging, with GPU access preserved (C); network blocking and Linux sandboxing are future work
+- security hardening A+B+C are landed: startup bearer-token auth (A), Ed25519 package signing with a user-managed trust store (B), and v1 plugin confinement via input-file staging (C); the experimental Windows deny-ACL write confinement path is now explicit opt-in because it changes real user-directory ACLs; network blocking and Linux sandboxing are future work
 - add model import and external model directory binding support
 
 ## Build from Source

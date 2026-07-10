@@ -1,10 +1,11 @@
 # PicAiPic AI Plugin Security Hardening - Design Doc
 
-Date: 2026-07-03 (updated 2026-07-04)
+Date: 2026-07-03 (updated 2026-07-10)
 
-Status: **A + B implemented. C partially implemented (v1: deny-ACL write
-confinement + input staging on Windows; network blocking + cross-platform
-= future).** See "Implementation status (2026-07-04)" below.
+Status: **A + B implemented. C partially implemented (v1: input staging by
+default on Windows; experimental deny-ACL write confinement is explicit
+opt-in; network blocking + cross-platform sandboxing = future).** See
+"Implementation status (2026-07-10)" below.
 
 This document records the current security posture of the PicAiPic AI plugin
 host and proposes three hardening approaches. The goal is to decide which
@@ -342,12 +343,15 @@ PyInstaller) was considered and rejected:
 ## Open questions
 
 1. ~~For approach C, what is the exact Windows mechanism that denies
-   filesystem/network while preserving GPU device access?~~ **RESOLVED
-   (2026-07-04)**: deny-ACL via `icacls /deny <user>:(W) /L` on sensitive
-   directories. The `sandbox_gpu_spike.py` confirmed this does **not**
-   break ROCm/CUDA driver initialization — sandboxed processes can still
-   run GPU inference. Restricted tokens were ruled out (risk of dropping
-   GPU). v1 does not block network; that remains future work.
+   filesystem/network while preserving GPU device access?~~ **UPDATED
+   (2026-07-10)**: the practical v1 default is input staging, not global
+   directory ACL mutation. The deny-ACL path (`icacls /deny <user>:(W) /L`)
+   remains available behind `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` for
+   explicit testing, and the spike confirmed it does **not** break ROCm/CUDA
+   driver initialization. It is not default because it changes real user
+   directory ACLs while a plugin is running and can interfere with host UI
+   file/directory access prompts. v1 does not block network; that remains
+   future work.
 2. ~~For approach C, how does the host inject "authorized read" file paths
    into the sandbox at runtime?~~ **RESOLVED (2026-07-04)**: option (c) —
    pre-copy input files into `plugin-cache/<id>/tasks/<taskId>/inputs/`
@@ -369,25 +373,27 @@ PyInstaller) was considered and rejected:
    `USERPROFILE`, etc.) from plugin processes in approach C, or construct a
    minimal env from scratch (which would break venv activation)? **v1
    decision: leave env inherited** — stripping `PATH`/`USERPROFILE` breaks
-   venv activation and runtime probing. The deny-ACL confines the
-   filesystem surface; env sanitization is deferred.
+   venv activation and runtime probing. Input staging confines normal task
+   source-file access; env sanitization is deferred.
 
-## Implementation status (2026-07-04)
+## Implementation status (2026-07-10)
 
 - **A (startup token)**: implemented — `PICAIPIC_PLUGIN_AUTH_TOKEN` bearer
   auth on all plugin endpoints except `/health`.
 - **B (package signing)**: implemented — Ed25519 signing tool
   (`scripts/sign_plugin.py`), host verification at install, user-managed
   trust store, `TRUST_REQUIRED` consent flow, developer-mode bypass.
-- **C (process sandbox)**: **v1 partial** — deny-ACL write confinement
-  (`src-tauri/src/t_sandbox.rs`) applied before spawn, revoked on
-  stop/crash/shutdown; input file staging into the plugin's readable area
-  before invoke. Network blocking, macOS Seatbelt, and Linux seccomp are
-  future work. GPU access preserved (spike-confirmed).
+- **C (process confinement)**: **v1 partial** — input file staging into the
+  plugin task directory before invoke is the default path. The prior Windows
+  deny-ACL write confinement code remains in `src-tauri/src/t_sandbox.rs`,
+  but is explicit opt-in via `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1`; default
+  startup best-effort removes stale deny ACEs from older builds. Network
+  blocking, macOS Seatbelt, and Linux seccomp are future work. GPU access is
+  preserved.
 
 The v1 contract freeze requires A + B + C validated with SA-LUT and
-NAFNet. A and B are validated; C's v1 scope (write confinement + staging)
-is implemented and pending end-to-end validation.
+NAFNet. A and B are validated; C's practical v1 scope (input staging, with
+optional deny-ACL testing) is implemented and pending end-to-end validation.
 
 ## Implementation order
 

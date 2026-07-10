@@ -364,6 +364,9 @@ async fn main() {
             t_plugin::retry_ai_plugin_task,
             t_plugin::cancel_ai_plugin_task,
             t_plugin::get_ai_plugin_task,
+            t_plugin::set_ai_plugin_model_dir_binding,
+            t_plugin::clear_ai_plugin_model_dir_binding,
+            t_plugin::check_ai_plugin_model_bindings,
             // person (face recognition)
             t_cmds::index_faces,
             t_cmds::cancel_face_index,

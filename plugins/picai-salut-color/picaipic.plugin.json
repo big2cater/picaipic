@@ -160,6 +160,19 @@
       "purpose": "feature-extraction"
     }
   ],
+  "modelBindings": [
+    {
+      "id": "salut-model-dir",
+      "label": "SA-LUT 模型目录",
+      "envVar": "SALUT_MODEL_DIR",
+      "layout": "files",
+      "expectedFiles": [
+        "vgg_normalised.pth",
+        "epoch=100-step=4127466.ckpt.state.pt"
+      ],
+      "description": "包含 vgg_normalised.pth 和 SA-LUT checkpoint 的目录"
+    }
+  ],
   "contributes": {
     "menus": [
       {

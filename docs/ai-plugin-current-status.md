@@ -74,8 +74,8 @@ Verified: release build produces `PicAiPic.exe` (43.85 MB), NSIS installer
 
 ### macOS support removed
 
-AI plugins are incompatible with macOS (sandbox uses Windows deny-ACL; no
-macOS Seatbelt). Removed:
+AI plugins are incompatible with macOS (the confinement implementation is
+Windows-oriented and there is no macOS Seatbelt integration). Removed:
 
 - `src-tauri/tauri.macos.conf.json`
 - `src-tauri/infoplist/` (11 `.lproj` dirs)
@@ -115,7 +115,43 @@ side (`real_signed_zips_verify` test).
 
 ---
 
+## 2026-07-10 sandbox policy update — input staging default, deny-ACL opt-in
+
+The Windows deny-ACL write-confinement path caused confusing host/UI behavior
+when a plugin was running: it temporarily changed ACLs on real user
+directories, so file/directory access prompts could appear even though the
+plugin workflow could continue after dismissal. That made the default security
+mechanism feel ineffective and disruptive.
+
+### What changed
+
+- **Default behavior**: plugin task inputs are still staged into
+  `plugin-cache/<id>/tasks/<taskId>/inputs/` and payload paths are rewritten.
+  Plugins read the staged copies and do not need raw access to source-image
+  locations.
+- **Deny-ACL mode is now explicit opt-in**:
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` enables the old Windows
+  `icacls /deny <user>:(W) /L` write-confinement path for targeted testing.
+- **Disable switch preserved**:
+  `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` skips both input staging and optional
+  ACL handling for plugin development/debugging.
+- **Stale ACL cleanup**: normal startup best-effort removes deny ACEs left by
+  older builds or crashed runs, then continues without re-applying them unless
+  opt-in ACL mode is enabled.
+
+### Verification
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passed.
+- `cargo check --manifest-path src-tauri/Cargo.toml` passed.
+- `cargo build --release` failed locally at MSVC/CRT link time in
+  `libort_sys`/`LibRaw` dependencies; this was not caused by the sandbox code
+  change.
+
 ## 2026-07-04 Approach C sandbox — deny-ACL write confinement + input staging
+
+Current note (2026-07-10): this section records the original implementation.
+The deny-ACL path remains in the codebase but is no longer enabled by default;
+see the 2026-07-10 update above for current behavior.
 
 This pass landed the v1 scope of Approach C (process sandboxing): the last
 of the three security-hardening approaches blocking the v1 contract freeze.

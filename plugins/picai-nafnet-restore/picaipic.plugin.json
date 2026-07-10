@@ -148,6 +148,17 @@
       "purpose": "optional NAFNet JPEG artifact removal; OpenCV fallback is available"
     }
   ],
+  "modelBindings": [
+    {
+      "id": "nafnet-source-dir",
+      "label": "NAFNet 源码与模型目录",
+      "envVar": "NAFNET_SOURCE_DIR",
+      "layout": "sourceTree",
+      "expectedGlobs": ["experiments/pretrained_models/*.pth"],
+      "expectedFiles": ["experiments/pretrained_models/NAFNet-GoPro-width64.pth"],
+      "description": "NAFNet 源码检出，需含 experiments/pretrained_models/ 和可 import 的 basicsr 包"
+    }
+  ],
   "contributes": {
     "menus": [
       {

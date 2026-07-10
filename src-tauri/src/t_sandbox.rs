@@ -1,24 +1,17 @@
-//! Plugin process sandbox — Approach C (v1: deny-ACL write confinement).
+//! Plugin process sandbox helpers.
 //!
-//! Security model: a plugin process is confined so it cannot **write** to
-//! sensitive user directories (Desktop, Documents, Pictures, Videos, plus
-//! any extra paths supplied via `PICAIPIC_SANDBOX_DENY_PATHS`). Writes to
-//! the plugin's own designated directories remain allowed.
+//! The default runtime path stages external input files into the plugin task
+//! directory before invocation. That keeps normal plugin runs from needing
+//! direct access to arbitrary source-image paths.
 //!
-//! Mechanism: the `icacls` command applies a deny-ACE (`/deny <user>:(W)`,
-//! non-recursive via `/L`) on each sensitive path before the plugin
-//! process is spawned. The `SandboxHandle` records the paths it successfully
-//! denied and revokes them (`/remove:d`) on drop — so revocation is tied to
-//! the lifetime of the `RunningPlugin` that owns the handle.
+//! The old v1 write-confinement path is still available for explicit testing:
+//! set `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` to apply a temporary Windows
+//! deny-ACE (`icacls /deny <user>:(W)`) on sensitive user directories before
+//! the plugin process is spawned. The handle revokes those ACEs on drop.
 //!
-//! Why deny-ACL and not a restricted token / Job Object: the security doc
-//! (docs/ai-plugin-security-hardening.md) notes that restricted tokens may
-//! drop GPU access. The sandbox_gpu_spike confirmed that `icacls /deny` on a
-//! directory does **not** break ROCm/CUDA driver initialization — the plugin
-//! can still run GPU work — while still blocking writes into the denied dir.
-//!
-//! v1 scope: write confinement only. Network blocking, macOS Seatbelt, and
-//! Linux seccomp are future work (see security-hardening doc).
+//! The ACL mode is opt-in because it changes ACLs on real user directories
+//! for the current Windows account, so it can surface confusing system access
+//! prompts in the host UI while a plugin is running.
 // Fields/methods are part of the sandbox's public surface used by t_plugin
 // and reserved for future diagnostics; allow dead code at module level.
 #![allow(dead_code)]
@@ -65,7 +58,12 @@ impl SandboxHandle {
     pub fn summary(&self) -> String {
         if self.denied_paths.is_empty() {
             if cfg!(target_os = "windows") {
-                "disabled (no sensitive paths or dev mode)".to_string()
+                if sandbox_disabled() {
+                    "disabled (PICAIPIC_DISABLE_PLUGIN_SANDBOX is set)".to_string()
+                } else {
+                    "deny-ACL disabled (set PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1 to enable)"
+                        .to_string()
+                }
             } else {
                 "disabled (non-windows)".to_string()
             }
@@ -120,17 +118,17 @@ impl Drop for SandboxHandle {
     }
 }
 
-/// Apply the plugin sandbox before spawning the plugin process.
+/// Apply optional Windows deny-ACL write confinement before spawning a plugin.
 ///
 /// `writable_dirs` are the host-designated directories the plugin must be
 /// able to write to (plugin-data/cache/outputs, plugin root, runtime dirs).
 /// Any sensitive path that falls inside one of these is skipped so we never
 /// deny the plugin's own working area.
 ///
-/// Returns a handle whose drop revokes the applied deny-ACEs. On non-Windows
-/// or when the sandbox is disabled (`PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`),
-/// returns an inactive handle.
-pub fn apply_plugin_sandbox(
+/// Returns a handle whose drop revokes the applied deny-ACEs. On non-Windows,
+/// when the sandbox is disabled (`PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`), or
+/// when ACL mode is not explicitly enabled, returns an inactive handle.
+pub async fn apply_plugin_sandbox(
     plugin_id: &str,
     writable_dirs: &[PathBuf],
 ) -> Result<SandboxHandle, String> {
@@ -141,8 +139,8 @@ pub fn apply_plugin_sandbox(
         return Ok(SandboxHandle::inactive(plugin_id));
     }
 
-    // Windows path below. `sandbox_disabled()` short-circuits to an inactive
-    // handle so dev mode (`PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`) skips ACL work.
+    // Windows path below. ACL write confinement is opt-in because it modifies
+    // real directory ACLs for the current user account while the plugin runs.
     #[cfg(target_os = "windows")]
     {
         if sandbox_disabled() {
@@ -152,15 +150,22 @@ pub fn apply_plugin_sandbox(
         let user = current_username()
             .ok_or_else(|| "Cannot determine current user for sandbox ACL".to_string())?;
         let targets = sensitive_write_targets(&user);
-        let mut handle = SandboxHandle::new(plugin_id, user.clone());
 
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|e| format!("Sandbox apply requires a tokio runtime: {}", e))?;
+        if !acl_sandbox_enabled() {
+            // Clean up stale deny ACEs left by older builds or crashed runs,
+            // then run without touching real user-directory ACLs.
+            for target in &targets {
+                let _ = run_icacls_async(target, &user, IcaclsOp::RemoveDeny).await;
+            }
+            return Ok(SandboxHandle::inactive(plugin_id));
+        }
+
+        let mut handle = SandboxHandle::new(plugin_id, user.clone());
 
         // Idempotent pre-clean: revoke any leftover deny-ACE from a prior
         // crashed run before re-applying. /remove:d is a no-op if absent.
         for target in &targets {
-            let _ = rt.block_on(run_icacls_async(target, &user, IcaclsOp::RemoveDeny));
+            let _ = run_icacls_async(target, &user, IcaclsOp::RemoveDeny).await;
         }
 
         for target in targets {
@@ -172,7 +177,7 @@ pub fn apply_plugin_sandbox(
             if !target.is_dir() {
                 continue;
             }
-            match rt.block_on(run_icacls_async(&target, &user, IcaclsOp::DenyWrite)) {
+            match run_icacls_async(&target, &user, IcaclsOp::DenyWrite).await {
                 Ok(()) => handle.denied_paths.push(target),
                 Err(e) => {
                     // Log but continue — a single failed deny should not block
@@ -186,7 +191,15 @@ pub fn apply_plugin_sandbox(
 }
 
 pub fn sandbox_disabled() -> bool {
-    std::env::var_os("PICAIPIC_DISABLE_PLUGIN_SANDBOX")
+    env_flag_enabled("PICAIPIC_DISABLE_PLUGIN_SANDBOX")
+}
+
+fn acl_sandbox_enabled() -> bool {
+    env_flag_enabled("PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var_os(name)
         .map(|v| {
             let s = v.to_string_lossy().to_ascii_lowercase();
             s == "1" || s == "true" || s == "yes"
@@ -194,9 +207,8 @@ pub fn sandbox_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the sandbox is in effect for this build/config. When false,
-/// input staging is skipped (no need to copy source files into the plugin's
-/// readable area — the plugin can read them directly).
+/// Whether input staging is active for this build/config. When false, staging
+/// is skipped and the plugin receives original source paths directly.
 pub fn sandbox_enabled() -> bool {
     cfg!(target_os = "windows") && !sandbox_disabled()
 }

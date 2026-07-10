@@ -1019,6 +1019,59 @@
                         <progress class="progress progress-primary w-full mt-1"></progress>
                       </div>
                       <div
+                        v-if="profileModelBindingChecks(plugin, profile).length"
+                        class="w-full mt-1 rounded-box bg-base-300/40 border border-base-content/10 px-2 py-1 text-[11px] space-y-1"
+                      >
+                        <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/30">
+                          {{ pluginText('modelDirBinding') }}
+                        </div>
+                        <div
+                          v-for="binding in profileModelBindingChecks(plugin, profile)"
+                          :key="binding.id"
+                          class="flex flex-wrap items-center gap-1"
+                        >
+                          <span
+                            class="shrink-0 px-1.5 py-0.5 rounded-box border"
+                            :class="modelBindingStatusClass(binding)"
+                            :title="binding.description || ''"
+                          >{{ binding.label || binding.id }}</span>
+                          <span
+                            v-if="binding.dir"
+                            class="min-w-0 truncate text-base-content/45"
+                            :title="binding.dir"
+                          >{{ binding.dir }}</span>
+                          <span v-else class="text-base-content/30">{{ pluginText('modelDirNotBound') }}</span>
+                          <span
+                            v-if="binding.dir"
+                            class="shrink-0"
+                            :class="binding.ok ? 'text-success/70' : 'text-error/70'"
+                          >{{ binding.ok ? pluginText('modelDirReady') : pluginText('modelDirMissingFiles') }}</span>
+                          <button
+                            v-if="binding.dir && binding.missingFiles?.length"
+                            class="shrink-0 text-error/60 hover:text-error"
+                            :title="binding.missingFiles.join('\n')"
+                          >⚠</button>
+                          <div class="flex items-center gap-1 shrink-0 ml-auto">
+                            <button
+                              class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
+                              :disabled="Boolean(aiPluginModelBindingLoading[bindingKey(plugin, profile, binding)])"
+                              @click="chooseModelDirBinding(plugin, profile, binding)"
+                            >{{ binding.dir ? pluginText('changeModelDir') : pluginText('bindModelDir') }}</button>
+                            <button
+                              v-if="binding.dir"
+                              class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
+                              @click="openPluginPath(binding.dir)"
+                            >{{ pluginText('open') }}</button>
+                            <button
+                              v-if="binding.dir"
+                              class="px-1.5 py-0.5 rounded-box border border-error/20 bg-error/10 text-error/70 hover:bg-error/20"
+                              :disabled="Boolean(aiPluginModelBindingLoading[bindingKey(plugin, profile, binding)])"
+                              @click="clearModelDirBinding(plugin, profile, binding)"
+                            >{{ pluginText('clearModelDir') }}</button>
+                          </div>
+                        </div>
+                      </div>
+                      <div
                         v-if="profile.setupJob"
                         class="w-full mt-1 rounded-box bg-base-300/40 border border-base-content/10 px-2 py-1 text-[11px] text-base-content/45"
                       >
@@ -1260,6 +1313,13 @@
                         {{ pluginText('discardTask') }}
                       </button>
                       <button
+                        v-if="isClearableAiPluginTask(task)"
+                        class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
+                        @click="discardAiPluginTask(plugin, task)"
+                      >
+                        {{ pluginText('clearTask') }}
+                      </button>
+                      <button
                         v-if="task.retryable"
                         class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
                         @click="retryAiPluginTaskFromLedger(plugin, task)"
@@ -1481,6 +1541,9 @@ import {
   cancelAiPluginTask,
   cancelAiPluginSetup,
   getAiPluginTask,
+  setAiPluginModelDirBinding,
+  clearAiPluginModelDirBinding,
+  checkAiPluginModelBindings,
   revokeAiPluginPermissions,
   listTrustedPublishers,
   trustPublisher,
@@ -1564,6 +1627,7 @@ let uninstallModeResolver: ((mode: 'code_only' | 'code_and_data' | 'cancel') => 
 const aiPluginProfileSmokeResults = ref<Record<string, AiPluginSmokeTestResult>>({});
 const aiPluginRuntimeProbeResults = ref<Record<string, AiPluginPythonRuntimeProbeResult>>({});
 const aiPluginRuntimeBindingSelection = ref<Record<string, string>>({});
+const aiPluginModelBindingLoading = ref<Record<string, boolean>>({});
 const isLoadingAiPlugins = ref(false);
 const isRefreshingAiPlugins = ref(false);
 const isLoadingAiPluginHostEnvironment = ref(false);
@@ -1650,6 +1714,22 @@ type AiPluginInstallProfile = {
   runtimeProbeState?: AiPluginRuntimeProbeState;
   runtimeProbeStates?: AiPluginRuntimeProbeState[];
   runtimeConflicts?: RuntimeConflict[];
+  modelBindingChecks?: AiPluginModelBindingSummary[];
+};
+
+type AiPluginModelBindingSummary = {
+  id: string;
+  label?: string;
+  envVar: string;
+  envVars?: string[];
+  layout: string;
+  expectedFiles: string[];
+  expectedGlobs: string[];
+  description?: string;
+  dir?: string;
+  presentFiles: string[];
+  missingFiles: string[];
+  ok: boolean;
 };
 
 type AiPluginSmokeTest = {
@@ -1719,6 +1799,7 @@ type AiPluginSummary = {
   capabilities: AiPluginCapability[];
   contributes?: AiPluginContributes;
   taskStates?: AiPluginTaskState[];
+  modelBindings?: AiPluginModelBindingSummary[];
 };
 
 type AiPluginStorage = {
@@ -2221,6 +2302,8 @@ function pluginText(key: string, params?: Record<string, string | number | null 
     restart: 'Restart plugin',
     test: 'Test',
     testInvoke: 'Test invoke',
+    capabilityRequiresInput: 'This capability needs image input. Use it from an image context menu.',
+    noProfilesForCapabilityTest: 'No runtime profile is available for this capability test.',
     hostEnvironment: 'Host AI environment',
     refreshHostEnvironment: 'Refresh host AI environment',
     hostEnvironmentUnavailable: 'Host AI environment unavailable.',
@@ -2256,6 +2339,17 @@ function pluginText(key: string, params?: Record<string, string | number | null 
     runSetupPreviewWarnings: 'Warnings:\n{warnings}\n',
     runtimeBinding: '{scope} runtime',
     runtimeBindingNone: 'runtime not declared',
+    modelDirBinding: 'Model directory',
+    modelDirBindingHint: 'Point at an existing model directory instead of editing .local.env',
+    bindModelDir: 'Bind directory',
+    changeModelDir: 'Change',
+    clearModelDir: 'Clear',
+    modelDirBound: 'Model directory bound.',
+    modelDirNotBound: 'not bound',
+    modelDirMissingFiles: 'missing files',
+    modelDirReady: 'ready',
+    modelDirBindingFailed: 'Failed to bind model directory.',
+    modelDirBindingCleared: 'Model directory binding cleared.',
     probeRuntime: 'Probe',
     probeRuntimeSuccess: 'Runtime probe completed.',
     probeRuntimeFailed: 'Runtime probe failed.',
@@ -2640,6 +2734,61 @@ async function chooseAiPluginStoreDir() {
     toast.error(error?.message || String(error));
   } finally {
     isChangingAiPluginStore.value = false;
+  }
+}
+
+function bindingKey(plugin: AiPluginSummary, profile: any, binding: any): string {
+  return `${plugin.id}:${profile.id}:${binding.id}`;
+}
+
+function profileModelBindingChecks(plugin: AiPluginSummary, profile: any): any[] {
+  return profile?.modelBindingChecks || [];
+}
+
+function modelBindingStatusClass(binding: any): string {
+  if (!binding.dir) return 'border-base-content/10 text-base-content/40';
+  return binding.ok
+    ? 'border-success/30 bg-success/10 text-success/70'
+    : 'border-error/30 bg-error/10 text-error/70';
+}
+
+async function chooseModelDirBinding(plugin: AiPluginSummary, profile: any, binding: any) {
+  const key = bindingKey(plugin, profile, binding);
+  if (aiPluginModelBindingLoading.value[key]) return;
+
+  const result = await openDialog({
+    title: pluginText('bindModelDir'),
+    multiple: false,
+    directory: true,
+  });
+
+  if (!result || Array.isArray(result)) return;
+
+  try {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: true };
+    await setAiPluginModelDirBinding(plugin.id, profile.id, binding.id, result);
+    await loadAiPluginPanel(true);
+    toast.success(pluginText('modelDirBound'));
+  } catch (error: any) {
+    toast.error(error?.message || String(error) || pluginText('modelDirBindingFailed'));
+  } finally {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: false };
+  }
+}
+
+async function clearModelDirBinding(plugin: AiPluginSummary, profile: any, binding: any) {
+  const key = bindingKey(plugin, profile, binding);
+  if (aiPluginModelBindingLoading.value[key]) return;
+
+  try {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: true };
+    await clearAiPluginModelDirBinding(plugin.id, profile.id, binding.id);
+    await loadAiPluginPanel(true);
+    toast.success(pluginText('modelDirBindingCleared'));
+  } catch (error: any) {
+    toast.error(error?.message || String(error));
+  } finally {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: false };
   }
 }
 
@@ -3329,7 +3478,7 @@ function pluginTaskOutputCount(task: AiPluginTaskState) {
 
 function formatPluginTaskDetail(task: AiPluginTaskState) {
   const details = [
-    task.message || '',
+    task.error || task.message || '',
     task.errorCode || '',
     task.retryable ? 'retryable' : '',
     task.pluginStatus?.status ? `plugin:${task.pluginStatus.status}` : '',
@@ -3352,12 +3501,20 @@ function formatPluginTaskTitle(task: AiPluginTaskState) {
   ].filter(Boolean).join(' - ');
 }
 
+function isClearableAiPluginTask(task: AiPluginTaskState) {
+  return ['failed', 'error', 'cancelled', 'canceled', 'discarded'].includes(String(task.status || '').toLowerCase());
+}
+
 function formatAiPluginSmokeTest(smokeTest: AiPluginSmokeTest) {
   const parts = [];
   if (smokeTest.command) parts.push(smokeTest.command);
   if (smokeTest.capability) parts.push(smokeTest.capability);
   if (smokeTest.timeoutMs) parts.push(`${Math.round(smokeTest.timeoutMs / 1000)}s`);
   return parts.join(' - ') || pluginText('smokeTest');
+}
+
+function capabilityRequiresInputs(capability: AiPluginCapability) {
+  return (capability.inputs || []).some((input: any) => input?.required !== false);
 }
 
 function smokeTestRunningText(plugin: AiPluginSummary) {
@@ -3966,7 +4123,7 @@ async function discardAiPluginTask(plugin: AiPluginSummary, task: AiPluginTaskSt
       taskId: task.taskId,
       deleteTaskDir: true,
     });
-    toast.success(pluginText('discardTaskSuccess'));
+    toast.success(isClearableAiPluginTask(task) ? pluginText('clearTaskSuccess') : pluginText('discardTaskSuccess'));
     await loadAiPluginPanel(false);
   } catch (error: any) {
     toast.error(error?.message || String(error));
@@ -4313,6 +4470,20 @@ async function restartAiPluginRuntime(plugin: AiPluginSummary) {
 async function testInvokeAiPluginCapability(plugin: AiPluginSummary, capability: AiPluginCapability) {
   const key = `${plugin.id}:${capability.id}`;
   if (!plugin.id || !capability.id || aiPluginInvokeLoading.value[key]) return;
+
+  if (capabilityRequiresInputs(capability)) {
+    if (plugin.smokeTest?.capability === capability.id) {
+      const profile = pluginStartProfile(plugin);
+      if (!profile) {
+        toast.error(pluginText('noProfilesForCapabilityTest'));
+        return;
+      }
+      await runAiPluginProfileSmokeTest(plugin, profile);
+      return;
+    }
+    toast.info(pluginText('capabilityRequiresInput'));
+    return;
+  }
 
   aiPluginInvokeLoading.value = {
     ...aiPluginInvokeLoading.value,

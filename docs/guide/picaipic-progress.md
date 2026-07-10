@@ -1,6 +1,6 @@
 # PicAiPic Progress
 
-Updated: 2026-07-07
+Updated: 2026-07-10
 
 This document records the current implementation status for turning the existing
 PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight
@@ -291,6 +291,46 @@ python -m py_compile plugins\picai-nafnet-restore\backend\main.py plugins\picai-
 python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 2
 ```
 
+## 2026-07-08 Plugin-level external model directory binding
+
+- **Manifest-declared `modelBindings[]`**: new top-level manifest field. Each
+  binding declares an `envVar` (e.g. `SALUT_MODEL_DIR`, `NAFNET_SOURCE_DIR`),
+  optional extra `envVars`, a `layout` (`"files"` or `"sourceTree"`), and
+  `expectedFiles`/`expectedGlobs` for validation. The host reads the manifest
+  and injects the user-selected directory as the declared env var into the
+  plugin process — no host-side hardcoded plugin-id→envVar mapping. New
+  plugins add `modelBindings[]` to their manifest with zero backend changes.
+- **`AiPluginProfileState.model_dir_bindings`**: per-profile persisted binding
+  map (key = binding id, value = directory absolute path). `#[serde(default)]`
+  keeps old registries forward-compatible. Setup/smoke flows that reconstruct
+  profile state preserve existing bindings via `persisted_model_dir_bindings`.
+- **`build_setup_environment` injection**: after the default
+  `PICAIPIC_PLUGIN_MODEL_DIR`, the host injects each binding's `envVar` (and
+  extra `envVars`) from the persisted map. Bindings without a persisted
+  directory are skipped so the plugin falls back to its default resolution.
+  This mirrors the runtime-binding precedence — `.local.env` still wins for
+  developers because `start.bat`'s `for /f` loop runs after host injection.
+- **Three Tauri commands**: `set_ai_plugin_model_dir_binding` (validate dir,
+  persist, return check result), `clear_ai_plugin_model_dir_binding`,
+  `check_ai_plugin_model_bindings` (validate without persisting). All
+  registered in `main.rs`.
+- **`list_ai_plugins` summary**: `AiPluginSummary.model_bindings` carries the
+  manifest declarations; each `PluginInstallProfileSummary.modelBindingChecks`
+  carries the live validation (present/missing files, `ok` flag) for that
+  profile's persisted bindings.
+- **Settings UI**: each profile row shows a model-binding card when the plugin
+  declares `modelBindings`. Each binding shows a status chip (ready/missing/
+  not-bound), the bound directory path, and Bind/Change/Open/Clear buttons.
+  Directory picker uses the established `openDialog({ directory: true })`
+  idiom; Open reuses `revealPath`.
+- **SA-LUT manifest** declares `salut-model-dir` (`envVar: SALUT_MODEL_DIR`,
+  `expectedFiles: [vgg_normalised.pth, epoch=100-step=4127466.ckpt.state.pt]`).
+  **NAFNet manifest** declares `nafnet-source-dir` (`envVar: NAFNET_SOURCE_DIR`,
+  `layout: sourceTree`, `expectedGlobs: [experiments/pretrained_models/*.pth]`).
+- Validation: `cargo fmt --check`, `cargo check` (zero warnings), `pnpm build`,
+  `python -m json.tool` (both manifests), `python -m py_compile` (both
+  backends) all pass.
+
 ## 2026-07-07 Project rename, signing hardening, release build
 
 - **Signature canonicalization fix**: the Ed25519 package signature was
@@ -312,7 +352,7 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   public key is in `tauri.conf.json`, private key is gitignored locally.
   Updater endpoint moved from `julyx10/lap` to `big2cater/picaipic`.
 - **macOS support removed**: AI plugins are incompatible with macOS
-  (sandbox uses Windows deny-ACL; no macOS Seatbelt). Deleted
+  (plugin confinement is Windows-oriented; no macOS Seatbelt). Deleted
   `tauri.macos.conf.json`, `infoplist/`, homebrew workflow, and macOS
   matrix entries from release/pr-build workflows. Rust `cfg(macos)`
   branches kept intact (harmless, preserves structure). Platform scope is
@@ -331,6 +371,28 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   (publisher `local`, pubkey `e7Ccs...pe8=`).
 - **Dev server IPv4 fix**: Vite v8 binds IPv6 by default; Tauri devUrl
   resolves to IPv4. Set `server.host = '127.0.0.1'` in `vite.config.js`.
+
+## 2026-07-10 Plugin sandbox policy update
+
+- **Default confinement changed to input staging only**: external image inputs
+  are copied into `plugin-cache/<id>/tasks/<taskId>/inputs/` before invoke and
+  payload `path` values are rewritten. Plugins read staged copies instead of
+  raw source-image paths.
+- **Windows deny-ACL write confinement is now opt-in**:
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` enables the old `icacls /deny
+  <user>:(W) /L` path. It is no longer default because it mutates real user
+  directory ACLs while plugins run and can trigger confusing host UI access
+  prompts.
+- **Development escape hatch preserved**:
+  `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` skips both input staging and optional
+  ACL handling.
+- **Stale ACL cleanup added**: default plugin startup best-effort removes
+  old deny ACEs left by previous builds or crashed runs, then continues
+  without re-applying them unless opt-in ACL mode is set.
+- **Verification**: `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
+  and `cargo check --manifest-path src-tauri/Cargo.toml` passed. Local
+  `cargo build --release` still fails at MSVC/CRT link time in existing
+  `libort_sys`/`LibRaw` dependencies, unrelated to the sandbox code.
 
 ## Next Work
 
@@ -362,6 +424,10 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   to the new `com.big2cater.picaipic.debug` path, so existing dev-time
   plugin installs and config carry over.
 - Model import / external model directory binding support, so users with
-  model files already on disk do not need to hand-edit `.local.env`.
+  model files already on disk do not need to hand-edit `.local.env`.~~
+  **Completed (2026-07-08):** plugin-level external model directory binding
+  landed. Manifest `modelBindings[]` declares the env var + expected files;
+  Settings UI lets users pick a directory; host injects it into the plugin
+  process and validates file presence. See the 2026-07-08 section above.
 - Avoid concrete `export-lut` business logic until runtime binding
   confidence is stable across both SA-LUT and NAFNet.

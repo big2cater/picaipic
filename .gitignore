@@ -42,3 +42,10 @@ release-downloads.sh
 tmp_*
 tmp_*/
 nul
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+
+# ZCode client local state
+.zcode/

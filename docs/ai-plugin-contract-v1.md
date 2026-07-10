@@ -187,40 +187,45 @@ manifest automatically during packaging.
 
 ### Process confinement (v1, Windows)
 
-The host **MAY** confine plugin processes so they cannot **write** to
-sensitive user directories. This is a runtime enforcement layered on top
-of the signature/trust checks above; plugins do not need to opt in and are
-not generally aware of it.
+The host confines normal plugin task input access by staging source files into
+the plugin task directory before invocation. This is a runtime enforcement
+layered on top of the signature/trust checks above; plugins do not need to opt
+in and are not generally aware of it.
 
-- **Write confinement (deny-ACL)**: before spawning a plugin process, the
-  host applies a non-recursive deny-write ACE (`icacls /deny <user>:(W) /L`)
-  on sensitive user directories — `Desktop`, `Documents`, `Pictures`,
-  `Videos` under `%USERPROFILE%`, plus any extra paths listed in the
-  `PICAIPIC_SANDBOX_DENY_PATHS` env var (semicolon-separated). The plugin
-  can still **read** these directories; only writes are blocked.
-- **Writable directories**: the plugin may write to its
-  `plugin-data/<id>`, `plugin-cache/<id>`, `plugin-outputs/<id>`, plugin
-  code directory, `plugin-runtimes/<id>`, and `shared-runtimes/<id>`.
-  These are never denied.
-- **Authorized reads via input staging**: when a task is invoked with
+- **Default confinement via input staging**: when a task is invoked with
   input files that live outside the plugin's writable area (e.g. a
   user-selected source image), the host **copies** those files into
   `plugin-cache/<id>/tasks/<taskId>/inputs/` before invoking, and rewrites
   the `path` fields in the `inputs` payload to point at the staged copies.
-  The plugin reads from the staged paths; it never needs raw access to the
+  The plugin reads from the staged paths; it does not need raw access to the
   original locations.
-- **GPU/CPU access is fully preserved**: the deny-ACL approach was
-  confirmed (via `scripts/sandbox_gpu_spike.py`) not to break ROCm/CUDA
-  driver initialization — sandboxed plugins can still run GPU inference.
+- **Optional Windows write confinement (deny-ACL)**: set
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` to enable the experimental
+  non-recursive deny-write ACE path (`icacls /deny <user>:(W) /L`) on
+  sensitive user directories — `Desktop`, `Documents`, `Pictures`, `Videos`
+  under `%USERPROFILE%`, plus any extra paths listed in the
+  `PICAIPIC_SANDBOX_DENY_PATHS` env var (semicolon-separated). This mode is
+  opt-in because it changes real directory ACLs for the current Windows user
+  while the plugin runs, which can surface confusing host/UI access prompts.
+- **Writable directories**: the plugin may write to its
+  `plugin-data/<id>`, `plugin-cache/<id>`, `plugin-outputs/<id>`, plugin
+  code directory, `plugin-runtimes/<id>`, and `shared-runtimes/<id>`.
+  These are never denied.
+- **GPU/CPU access is fully preserved**: input staging does not constrain
+  runtime/device access. The optional deny-ACL approach was also confirmed
+  (via `scripts/sandbox_gpu_spike.py`) not to break ROCm/CUDA driver
+  initialization.
 - **Disable switch**: set `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` to skip
-  sandboxing entirely (useful for plugin development/debugging).
-- **Scope of v1**: write confinement + input staging only. Network
-  blocking, macOS Seatbelt, and Linux seccomp are future work.
+  staging and optional ACL sandboxing entirely (useful for plugin
+  development/debugging).
+- **Scope of v1**: input staging by default; optional Windows deny-ACL write
+  confinement for explicit testing. Network blocking, macOS Seatbelt, and
+  Linux seccomp are future work.
 
-ACLs are revoked (`icacls /remove:d`) when the plugin process is torn down
-— on stop, restart, crash-detection, and app shutdown. Revocation is
-idempotent, so a leftover ACE from a crashed prior run is cleaned up
-safely on the next apply.
+When optional ACL mode is enabled, ACLs are revoked (`icacls /remove:d`) when
+the plugin process is torn down — on stop, restart, crash-detection, and app
+shutdown. Revocation is idempotent. Normal non-ACL plugin startup also
+best-effort removes stale deny ACEs left by older builds or crashed prior runs.
 
 ### Timeout hints
 

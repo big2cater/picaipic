@@ -171,6 +171,10 @@ pub struct AiPluginProfileState {
     pub result: Option<Value>,
     #[serde(default)]
     pub runtime_binding: Option<PluginRuntimeBinding>,
+    /// Per-profile persisted external model directory bindings.
+    /// Key = `PluginModelBinding.id`, value = user-selected directory absolute path.
+    #[serde(default)]
+    pub model_dir_bindings: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +339,8 @@ pub struct AiPluginManifest {
     pub hardware: Option<Value>,
     #[serde(default)]
     pub models: Vec<Value>,
+    #[serde(default)]
+    pub model_bindings: Vec<PluginModelBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -470,6 +476,39 @@ pub struct PluginInstallProfile {
     pub notes: Option<String>,
 }
 
+/// A user-configurable external model directory binding declared in the manifest.
+///
+/// The host persists a per-profile selected directory (see
+/// `AiPluginProfileState.model_dir_bindings`) and injects it as the declared
+/// `env_var` (and any extra `env_vars`) into the plugin process environment,
+/// replacing the need to hand-edit `.local.env`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginModelBinding {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Primary env var whose value is the bound directory absolute path.
+    #[serde(default)]
+    pub env_var: String,
+    /// Optional additional env vars that should receive the same directory path.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    /// `"files"` (directory directly holds model files) or `"sourceTree"`
+    /// (directory is a source checkout with models under subpaths).
+    #[serde(default)]
+    pub layout: String,
+    /// Relative file paths expected inside the bound directory.
+    #[serde(default)]
+    pub expected_files: Vec<String>,
+    /// Optional glob patterns (relative to the bound dir) used for validation.
+    #[serde(default)]
+    pub expected_globs: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginSmokeTest {
@@ -570,6 +609,8 @@ pub struct AiPluginSummary {
     pub capabilities: Vec<PluginCapabilitySummary>,
     pub contributes: PluginContributesSummary,
     pub task_states: Vec<AiPluginTaskState>,
+    #[serde(default)]
+    pub model_bindings: Vec<PluginModelBinding>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -647,6 +688,8 @@ pub struct PluginInstallProfileSummary {
     pub runtime_probe_states: Vec<AiPluginRuntimeProbeState>,
     #[serde(default)]
     pub runtime_conflicts: Vec<RuntimeConflict>,
+    #[serde(default)]
+    pub model_binding_checks: Vec<AiPluginModelBindingSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +815,37 @@ pub struct AiPluginModelFileSummary {
     pub path: String,
     pub exists: bool,
     pub purpose: Option<String>,
+}
+
+/// Validation result for a single model directory binding check.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginModelBindingCheck {
+    pub binding_id: String,
+    pub dir: String,
+    pub present_files: Vec<String>,
+    pub missing_files: Vec<String>,
+    pub ok: bool,
+}
+
+/// Summary of a manifest-declared model directory binding, returned by
+/// `list_ai_plugins` so the frontend can render binding status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginModelBindingSummary {
+    pub id: String,
+    pub label: Option<String>,
+    pub env_var: String,
+    pub env_vars: Vec<String>,
+    pub layout: String,
+    pub expected_files: Vec<String>,
+    pub expected_globs: Vec<String>,
+    pub description: Option<String>,
+    /// User-selected directory absolute path, if a binding is persisted.
+    pub dir: Option<String>,
+    pub present_files: Vec<String>,
+    pub missing_files: Vec<String>,
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1252,6 +1326,21 @@ fn save_profile_state(state: AiPluginProfileState) -> Result<(), String> {
         state,
     );
     save_registry(&registry)
+}
+
+/// Returns the currently persisted `model_dir_bindings` for a profile, so that
+/// setup/smoke flows re-constructing the profile state do not clobber a
+/// user-configured external model directory binding.
+fn persisted_model_dir_bindings(plugin_id: &str, profile_id: &str) -> HashMap<String, String> {
+    load_registry()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .profile_states
+                .get(&profile_state_key(plugin_id, profile_id))
+                .map(|state| state.model_dir_bindings.clone())
+        })
+        .unwrap_or_default()
 }
 
 fn save_runtime_probe_state(state: AiPluginRuntimeProbeState) -> Result<(), String> {
@@ -1969,6 +2058,7 @@ fn build_setup_environment(
     profile: &PluginInstallProfile,
     backend: &str,
     capability: &str,
+    model_bindings: &[PluginModelBinding],
 ) -> Result<HashMap<String, String>, String> {
     let mut environment = HashMap::new();
     let data_dir = plugin_data_dir(plugin_id)?;
@@ -2078,6 +2168,31 @@ fn build_setup_environment(
             "PICAIPIC_PLUGIN_REQUIREMENTS_PATH".to_string(),
             root.join(requirements).display().to_string(),
         );
+    }
+    // Inject user-configured external model directory bindings. Each manifest
+    // binding declares an env var; the host looks up the persisted user-selected
+    // directory for this profile and injects it. This replaces hand-editing
+    // `.local.env` for ordinary users. Bindings without a persisted directory
+    // are skipped so the plugin falls back to its default model resolution.
+    let bindings = persisted_model_dir_bindings(plugin_id, &profile.id);
+    for binding in model_bindings {
+        if binding.env_var.trim().is_empty() {
+            continue;
+        }
+        let Some(dir) = bindings.get(&binding.id) else {
+            continue;
+        };
+        let dir = dir.trim();
+        if dir.is_empty() {
+            continue;
+        }
+        environment.insert(binding.env_var.clone(), dir.to_string());
+        for extra in &binding.env_vars {
+            let extra = extra.trim();
+            if !extra.is_empty() {
+                environment.insert(extra.to_string(), dir.to_string());
+            }
+        }
     }
     Ok(environment)
 }
@@ -2275,6 +2390,7 @@ fn build_setup_preview(
     backend: &str,
     capability: &str,
     runtime_binding: Option<PluginRuntimeBinding>,
+    model_bindings: &[PluginModelBinding],
 ) -> AiPluginSetupPreview {
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -2386,7 +2502,14 @@ fn build_setup_preview(
         requirements,
         requirements_path,
         runtime_binding: runtime_binding.clone(),
-        environment: match build_setup_environment(root, plugin_id, profile, backend, capability) {
+        environment: match build_setup_environment(
+            root,
+            plugin_id,
+            profile,
+            backend,
+            capability,
+            model_bindings,
+        ) {
             Ok(environment) => environment,
             Err(error) => {
                 errors.push(error);
@@ -2407,6 +2530,7 @@ async fn run_setup_command(
     capability: &str,
     job: &mut AiPluginSetupJob,
     cancel_state: Option<&SetupCancellationState>,
+    model_bindings: &[PluginModelBinding],
 ) -> Result<SetupCommandOutcome, String> {
     if !is_safe_relative_command(command) {
         return Err("setup command must be a safe relative path".to_string());
@@ -2426,7 +2550,14 @@ async fn run_setup_command(
     job.log.push(format!("PICAIPIC_PLUGIN_BACKEND={}", backend));
     job.log
         .push(format!("PICAIPIC_PLUGIN_CAPABILITY={}", capability));
-    let environment = build_setup_environment(root, plugin_id, profile, backend, capability)?;
+    let environment = build_setup_environment(
+        root,
+        plugin_id,
+        profile,
+        backend,
+        capability,
+        model_bindings,
+    )?;
     for key in [
         "PICAIPIC_PLUGIN_ID",
         "PICAIPIC_PLUGIN_PROFILE_ID",
@@ -3489,6 +3620,17 @@ fn is_safe_relative_command(command: &str) -> bool {
             .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
+/// A POSIX-style env var name: starts with letter or underscore, followed by
+/// letters, digits, or underscores. Used to validate `modelBindings[].envVar`.
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn plugin_api_major_compatible(plugin_api: &str) -> bool {
     let trimmed = plugin_api.trim();
     if trimmed.is_empty() {
@@ -3753,6 +3895,46 @@ fn validate_manifest(manifest: &AiPluginManifest, root: &Path) -> PluginValidati
         }
     }
 
+    let mut model_binding_ids = HashSet::new();
+    for binding in &manifest.model_bindings {
+        if binding.id.trim().is_empty() {
+            warnings.push("Model binding is missing id".to_string());
+        } else if !model_binding_ids.insert(binding.id.clone()) {
+            warnings.push(format!("Duplicate model binding id '{}'", binding.id));
+        }
+
+        if binding.env_var.trim().is_empty() {
+            warnings.push(format!("Model binding '{}' is missing envVar", binding.id));
+        } else if !is_valid_env_var_name(&binding.env_var) {
+            warnings.push(format!(
+                "Model binding '{}' envVar '{}' is not a valid environment variable name",
+                binding.id, binding.env_var
+            ));
+        }
+
+        for extra in &binding.env_vars {
+            if extra.trim().is_empty() {
+                warnings.push(format!(
+                    "Model binding '{}' has an empty extra envVar entry",
+                    binding.id
+                ));
+            } else if !is_valid_env_var_name(extra) {
+                warnings.push(format!(
+                    "Model binding '{}' extra envVar '{}' is not a valid name",
+                    binding.id, extra
+                ));
+            }
+        }
+
+        match binding.layout.as_str() {
+            "" | "files" | "sourceTree" => {}
+            other => warnings.push(format!(
+                "Model binding '{}' uses unknown layout '{}'",
+                binding.id, other
+            )),
+        }
+    }
+
     PluginValidationReport {
         valid: errors.is_empty(),
         errors,
@@ -3956,6 +4138,8 @@ fn manifest_to_summary(
                 Some(detect_runtime_conflicts(&requirements_path, probe_result))
             })()
             .unwrap_or_default();
+            let model_binding_checks =
+                model_binding_summaries(&manifest, &profile.id).unwrap_or_default();
             PluginInstallProfileSummary {
                 id: profile.id.clone(),
                 backend: profile.backend.clone(),
@@ -3976,6 +4160,7 @@ fn manifest_to_summary(
                 runtime_probe_state,
                 runtime_probe_states,
                 runtime_conflicts,
+                model_binding_checks,
             }
         })
         .collect();
@@ -4050,6 +4235,7 @@ fn manifest_to_summary(
         capabilities,
         contributes,
         task_states: plugin_task_states,
+        model_bindings: manifest.model_bindings,
     }
 }
 
@@ -4603,6 +4789,7 @@ fn apply_task_error(
     state.status = "failed".to_string();
     state.updated_at = Utc::now().to_rfc3339();
     state.error = Some(message);
+    state.message = state.error.clone();
     state.error_code = Some(code.to_string());
     state.error_domain = domain.map(str::to_string);
     state.error_details = details;
@@ -6248,6 +6435,271 @@ pub fn validate_ai_plugin_manifest(path: String) -> Result<PluginManifestValidat
     }
 }
 
+/// Counts files under `dir` matching a relative glob pattern with `*` wildcards
+/// (e.g. `experiments/pretrained_models/*.pth`). Supports a single `*` per path
+/// segment; `**` is treated as a regular segment. Uses `walkdir` so it works on
+/// all platforms without adding a glob dependency.
+fn count_glob_matches(dir: &Path, pattern: &str) -> usize {
+    let segments: Vec<&str> = pattern
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut search_root = dir.to_path_buf();
+    let mut wildcard_segment: Option<(usize, &str)> = None;
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.contains('*') {
+            wildcard_segment = Some((index, segment));
+            break;
+        }
+        search_root = search_root.join(segment);
+    }
+    let Some((seg_index, wildcard)) = wildcard_segment else {
+        return 0;
+    };
+    let depth = segments.len() - seg_index - 1;
+    let suffix_segments = &segments[seg_index + 1..];
+    if !search_root.is_dir() {
+        return 0;
+    }
+    let mut count = 0usize;
+    for entry in walkdir::WalkDir::new(&search_root)
+        .min_depth(1)
+        .max_depth(depth + 1)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&search_root)
+            .ok()
+            .and_then(|p| p.to_str());
+        let Some(rel) = rel else { continue };
+        let rel_segments: Vec<&str> = rel.split(['/', '\\']).collect();
+        if rel_segments.len() != depth + 1 {
+            continue;
+        }
+        if !match_simple_glob(wildcard, rel_segments[0]) {
+            continue;
+        }
+        if suffix_segments
+            .iter()
+            .zip(rel_segments.iter().skip(1))
+            .all(|(pat, name)| match_simple_glob(pat, name))
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Matches a single path segment against a pattern that may contain `*`
+/// (matches any run of characters except the path separator).
+fn match_simple_glob(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return name == pattern;
+    }
+    let mut rest = name;
+    for (index, part) in parts.iter().enumerate() {
+        if index == 0 {
+            if !rest.starts_with(part) {
+                return false;
+            }
+            rest = &rest[part.len()..];
+        } else if index == parts.len() - 1 {
+            return rest.ends_with(part);
+        } else if let Some(pos) = rest.find(part) {
+            rest = &rest[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Validates a bound directory against a manifest model binding's declared
+/// expected files and globs. Returns present/missing file lists and an `ok`
+/// flag (true when no expected file is missing).
+fn check_model_binding(binding: &PluginModelBinding, dir: &Path) -> AiPluginModelBindingCheck {
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for expected in &binding.expected_files {
+        let rel = expected.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let candidate = dir.join(rel);
+        if candidate.is_file() {
+            present.push(rel.to_string());
+        } else {
+            missing.push(rel.to_string());
+        }
+    }
+    for pattern in &binding.expected_globs {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let matched = count_glob_matches(dir, pattern);
+        if matched > 0 {
+            present.push(format!(
+                "{} ({} match{})",
+                pattern,
+                matched,
+                if matched == 1 { "" } else { "es" }
+            ));
+        } else {
+            missing.push(pattern.to_string());
+        }
+    }
+    AiPluginModelBindingCheck {
+        binding_id: binding.id.clone(),
+        dir: dir.display().to_string(),
+        ok: missing.is_empty(),
+        present_files: present,
+        missing_files: missing,
+    }
+}
+
+/// Builds the binding summary list for a plugin/profile, reading the persisted
+/// directory from the registry and validating it on the fly.
+fn model_binding_summaries(
+    manifest: &AiPluginManifest,
+    profile_id: &str,
+) -> Result<Vec<AiPluginModelBindingSummary>, String> {
+    let bindings = persisted_model_dir_bindings(&manifest.id, profile_id);
+    let mut summaries = Vec::new();
+    for binding in &manifest.model_bindings {
+        let dir = bindings.get(&binding.id).cloned();
+        let (present, missing) = match dir.as_deref().map(|d| d.trim()).filter(|d| !d.is_empty()) {
+            Some(dir_str) => {
+                let check = check_model_binding(binding, Path::new(dir_str));
+                (check.present_files, check.missing_files)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        summaries.push(AiPluginModelBindingSummary {
+            id: binding.id.clone(),
+            label: binding.label.clone(),
+            env_var: binding.env_var.clone(),
+            env_vars: binding.env_vars.clone(),
+            layout: binding.layout.clone(),
+            expected_files: binding.expected_files.clone(),
+            expected_globs: binding.expected_globs.clone(),
+            description: binding.description.clone(),
+            dir,
+            present_files: present,
+            ok: missing.is_empty(),
+            missing_files: missing,
+        });
+    }
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub fn set_ai_plugin_model_dir_binding(
+    plugin_id: String,
+    profile_id: String,
+    binding_id: String,
+    dir_path: String,
+) -> Result<AiPluginModelBindingCheck, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let binding = manifest
+        .model_bindings
+        .iter()
+        .find(|b| b.id == binding_id)
+        .ok_or_else(|| {
+            format!(
+                "Model binding '{}' not found for plugin '{}'",
+                binding_id, plugin_id
+            )
+        })?;
+    let dir = Path::new(&dir_path);
+    if !dir.is_dir() {
+        return Err(format!("Directory does not exist: {}", dir_path));
+    }
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve directory: {}", e))?;
+    let mut registry = load_registry()?;
+    let key = profile_state_key(&plugin_id, &profile_id);
+    let state = registry
+        .profile_states
+        .entry(key)
+        .or_insert_with(|| AiPluginProfileState {
+            plugin_id: plugin_id.clone(),
+            profile_id: profile_id.clone(),
+            backend: String::new(),
+            capability: String::new(),
+            status: "notInstalled".to_string(),
+            verified: false,
+            updated_at: Utc::now().to_rfc3339(),
+            setup_attempted: false,
+            setup_job_id: None,
+            duration_ms: None,
+            error: None,
+            result: None,
+            runtime_binding: None,
+            model_dir_bindings: HashMap::new(),
+        });
+    state
+        .model_dir_bindings
+        .insert(binding_id.clone(), canonical.display().to_string());
+    state.updated_at = Utc::now().to_rfc3339();
+    save_registry(&registry)?;
+    Ok(check_model_binding(binding, &canonical))
+}
+
+#[tauri::command]
+pub fn clear_ai_plugin_model_dir_binding(
+    plugin_id: String,
+    profile_id: String,
+    binding_id: String,
+) -> Result<(), String> {
+    let mut registry = load_registry()?;
+    let key = profile_state_key(&plugin_id, &profile_id);
+    if let Some(state) = registry.profile_states.get_mut(&key) {
+        state.model_dir_bindings.remove(&binding_id);
+        state.updated_at = Utc::now().to_rfc3339();
+    }
+    save_registry(&registry)
+}
+
+#[tauri::command]
+pub fn check_ai_plugin_model_bindings(
+    plugin_id: String,
+    binding_id: String,
+    dir_path: String,
+) -> Result<AiPluginModelBindingCheck, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let binding = manifest
+        .model_bindings
+        .iter()
+        .find(|b| b.id == binding_id)
+        .ok_or_else(|| {
+            format!(
+                "Model binding '{}' not found for plugin '{}'",
+                binding_id, plugin_id
+            )
+        })?;
+    let dir = Path::new(&dir_path);
+    if !dir.is_dir() {
+        return Err(format!("Directory does not exist: {}", dir_path));
+    }
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve directory: {}", e))?;
+    Ok(check_model_binding(binding, &canonical))
+}
+
 #[tauri::command]
 pub fn list_ai_plugins() -> Result<Vec<AiPluginSummary>, String> {
     let mut registry = load_registry()?;
@@ -6341,6 +6793,7 @@ pub fn list_ai_plugins() -> Result<Vec<AiPluginSummary>, String> {
                 capabilities: Vec::new(),
                 contributes: PluginContributesSummary::default(),
                 task_states: Vec::new(),
+                model_bindings: Vec::new(),
             });
         }
     }
@@ -6628,7 +7081,7 @@ pub fn mark_ai_plugin_profile_setup_needed(
 
     let state = AiPluginProfileState {
         plugin_id: plugin_id.clone(),
-        profile_id: request.profile_id,
+        profile_id: request.profile_id.clone(),
         backend: request.backend,
         capability,
         status: if job.status == "failed" {
@@ -6644,6 +7097,7 @@ pub fn mark_ai_plugin_profile_setup_needed(
         error: job.error.clone(),
         result: None,
         runtime_binding,
+        model_dir_bindings: persisted_model_dir_bindings(&plugin_id, &request.profile_id),
     };
     save_profile_state(state.clone())?;
     clear_profile_runtime_probe_states(&plugin_id, &state.profile_id, &state.backend)?;
@@ -6702,6 +7156,7 @@ pub fn preview_ai_plugin_profile_setup_command(
         &request.backend,
         &capability,
         runtime_binding,
+        &manifest.model_bindings,
     ))
 }
 
@@ -6757,6 +7212,7 @@ pub async fn run_ai_plugin_profile_setup_command(
         error: None,
         result: None,
         runtime_binding: runtime_binding.clone(),
+        model_dir_bindings: persisted_model_dir_bindings(&plugin_id, &request.profile_id),
     })?;
 
     let status: String;
@@ -6771,6 +7227,7 @@ pub async fn run_ai_plugin_profile_setup_command(
             &capability,
             &mut job,
             Some(&cancel_state),
+            &manifest.model_bindings,
         )
         .await
         {
@@ -6819,7 +7276,7 @@ pub async fn run_ai_plugin_profile_setup_command(
 
     let state = AiPluginProfileState {
         plugin_id: plugin_id.clone(),
-        profile_id: request.profile_id,
+        profile_id: request.profile_id.clone(),
         backend: request.backend,
         capability,
         status,
@@ -6831,6 +7288,7 @@ pub async fn run_ai_plugin_profile_setup_command(
         error,
         result: None,
         runtime_binding,
+        model_dir_bindings: persisted_model_dir_bindings(&plugin_id, &request.profile_id),
     };
     save_profile_state(state.clone())?;
     clear_profile_runtime_probe_states(&plugin_id, &state.profile_id, &state.backend)?;
@@ -6991,6 +7449,10 @@ pub async fn smoke_test_ai_plugin(
                         error: error.clone(),
                         result: Some(value.clone()),
                         runtime_binding: runtime_binding.clone(),
+                        model_dir_bindings: persisted_model_dir_bindings(
+                            &plugin_id,
+                            &request.profile_id,
+                        ),
                     };
                     save_profile_state(state)?;
 
@@ -7255,7 +7717,7 @@ pub async fn start_ai_plugin(
         task_dir.clone(),
         root.to_path_buf(),
     ];
-    let sandbox = match t_sandbox::apply_plugin_sandbox(&plugin_id, &writable_dirs) {
+    let sandbox = match t_sandbox::apply_plugin_sandbox(&plugin_id, &writable_dirs).await {
         Ok(handle) => Some(handle),
         Err(e) => {
             // Sandbox failure is non-fatal: log and continue without confinement.
@@ -7292,8 +7754,14 @@ pub async fn start_ai_plugin(
         .env("PICAIPIC_PLUGIN_BASE_URL", &base_url)
         .env("PICAIPIC_PLUGIN_AUTH_TOKEN", &auth_token);
     if let Some((profile, backend, capability)) = start_profile.as_ref() {
-        for (key, value) in build_setup_environment(root, &plugin_id, profile, backend, capability)?
-        {
+        for (key, value) in build_setup_environment(
+            root,
+            &plugin_id,
+            profile,
+            backend,
+            capability,
+            &manifest.model_bindings,
+        )? {
             cmd.env(key, value);
         }
     }
@@ -8008,6 +8476,7 @@ pub fn discard_ai_plugin_task_outputs(
         .get(&key)
         .cloned()
         .ok_or_else(|| format!("Plugin task '{}' was not found", request.task_id))?;
+    let original_status = state.status.to_ascii_lowercase();
     state.status = "discarded".to_string();
     state.adopted = false;
     state.updated_at = Utc::now().to_rfc3339();
@@ -8030,7 +8499,14 @@ pub fn discard_ai_plugin_task_outputs(
         }
     }
 
-    registry.task_states.insert(key, state.clone());
+    if matches!(
+        original_status.as_str(),
+        "failed" | "error" | "cancelled" | "canceled" | "discarded"
+    ) {
+        registry.task_states.remove(&key);
+    } else {
+        registry.task_states.insert(key, state.clone());
+    }
     save_registry(&registry)?;
     Ok(state)
 }
@@ -8089,34 +8565,58 @@ pub async fn cancel_ai_plugin_task(
     registry.task_states.insert(key.clone(), task.clone());
     save_registry(&registry)?;
 
-    let (_manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
-    let Some(entry) = manifest.entry.as_ref() else {
-        return Err("Plugin has no entry".to_string());
+    let cancel_context = match find_plugin_manifest(&plugin_id) {
+        Ok((_manifest_path, manifest)) => {
+            if let Some(entry) = manifest.entry.as_ref() {
+                if let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(&state)).await {
+                    let token = runtime_auth_token(&state, &plugin_id)
+                        .await
+                        .unwrap_or_default();
+                    Ok((base_url, token))
+                } else {
+                    Err("Plugin has no baseUrl".to_string())
+                }
+            } else {
+                Err("Plugin has no entry".to_string())
+            }
+        }
+        Err(error) => Err(error),
     };
-    let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(&state)).await else {
-        return Err("Plugin has no baseUrl".to_string());
-    };
-    let token = runtime_auth_token(&state, &plugin_id)
-        .await
-        .unwrap_or_default();
+
     let mut registry = load_registry()?;
     let mut task = registry
         .task_states
         .get(&key)
         .cloned()
         .ok_or_else(|| format!("Plugin task '{}' was not found", task_id))?;
-    match request_plugin_task_cancel(&base_url, &task_id, &token).await {
-        Ok(()) => {
-            task.status = "cancelling".to_string();
-            task.updated_at = Utc::now().to_rfc3339();
-            task.message = Some("Cancel requested".to_string());
-            task.retryable = false;
+    match cancel_context {
+        Ok((base_url, token)) => {
+            match request_plugin_task_cancel(&base_url, &task_id, &token).await {
+                Ok(()) => {
+                    task.status = "cancelling".to_string();
+                    task.updated_at = Utc::now().to_rfc3339();
+                    task.message = Some("Cancel requested".to_string());
+                    task.retryable = false;
+                }
+                Err(error) => {
+                    task.status = "cancelled".to_string();
+                    task.updated_at = Utc::now().to_rfc3339();
+                    task.message = Some(
+                        "Cancel endpoint unavailable; task marked cancelled locally.".to_string(),
+                    );
+                    task.error = Some(error);
+                    task.error_code = Some("CANCEL_REQUEST_FAILED".to_string());
+                    task.error_domain = Some("transport".to_string());
+                    task.retryable = false;
+                }
+            }
         }
         Err(error) => {
-            task.status = "cancelling".to_string();
+            task.status = "cancelled".to_string();
             task.updated_at = Utc::now().to_rfc3339();
+            task.message = Some("Plugin unavailable; task marked cancelled locally.".to_string());
             task.error = Some(error);
-            task.error_code = Some("CANCEL_REQUEST_FAILED".to_string());
+            task.error_code = Some("CANCEL_REQUEST_UNAVAILABLE".to_string());
             task.error_domain = Some("transport".to_string());
             task.retryable = false;
         }
@@ -8291,10 +8791,7 @@ mod tests {
         manifest.signature = Some(sig);
         let publisher = Some("test-author".to_string());
         let result = verify_package_signature(&manifest, &publisher, &empty_registry());
-        assert!(
-            matches!(result, Err(_)),
-            "tampered signature should fail"
-        );
+        assert!(matches!(result, Err(_)), "tampered signature should fail");
     }
 
     /// End-to-end verification of the real signed plugin zip packages in
@@ -8313,7 +8810,10 @@ mod tests {
         for name in zips {
             let path = format!("{}/../dist/plugins/{}", repo_root, name);
             let file = std::fs::File::open(&path).unwrap_or_else(|e| {
-                panic!("could not open {}: {} (did you run package_plugin.ps1?)", path, e)
+                panic!(
+                    "could not open {}: {} (did you run package_plugin.ps1?)",
+                    path, e
+                )
             });
             let mut zip = zip::ZipArchive::new(file).expect("open zip");
             // Find the manifest entry (top-level dir / picaipic.package.json).

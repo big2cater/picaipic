@@ -144,27 +144,29 @@ when preparing a release.
   iteration.
 - [ ] Keep the private key out of the package and out of source control.
 
-### Process sandbox (transparent to plugin code)
+### Process confinement (transparent to plugin code)
 
-On Windows the host confines plugin processes at runtime. This requires no
+On Windows the host confines task input access at runtime. This requires no
 plugin-side changes, but authors should understand the constraints:
 
-- [ ] The plugin process cannot **write** to sensitive user directories
-  (`Desktop`, `Documents`, `Pictures`, `Videos` under `%USERPROFILE%`, plus
-  any extra paths the user lists in `PICAIPIC_SANDBOX_DENY_PATHS`). Writes
-  must go to the host-provided directories exposed via `PICAIPIC_OUTPUT_DIR`,
-  `PICAIPIC_TASK_TEMP_DIR`, `PICAIPIC_PLUGIN_DATA_DIR`,
-  `PICAIPIC_PLUGIN_CACHE_DIR`, and `PICAIPIC_PLUGIN_MODEL_DIR`.
 - [ ] When a task is invoked with input files that live outside the
   plugin's writable area (e.g. a user-selected source image), the host
   **copies** them into `plugin-cache/<id>/tasks/<taskId>/inputs/` and
   rewrites the `path` fields in the `inputs` payload to point at the staged
   copies. Read from the `path` values in the payload — do not assume the
   original on-disk location is reachable.
-- [ ] GPU/CPU access is fully preserved — the sandbox does not break
+- [ ] Write outputs only to the host-provided directories exposed via
+  `PICAIPIC_OUTPUT_DIR`, `PICAIPIC_TASK_TEMP_DIR`,
+  `PICAIPIC_PLUGIN_DATA_DIR`, `PICAIPIC_PLUGIN_CACHE_DIR`, and
+  `PICAIPIC_PLUGIN_MODEL_DIR`.
+- [ ] GPU/CPU access is fully preserved — input staging does not break
   ROCm/CUDA/DirectML inference.
-- [ ] The sandbox is skipped when `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` is set
-  (development escape hatch). Do not rely on this in release.
+- [ ] `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` skips input staging and any
+  optional ACL sandboxing (development escape hatch). Do not rely on this in
+  release.
+- [ ] The experimental Windows deny-ACL write-confinement path is opt-in via
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1`; plugin authors should not require
+  it for correctness.
 
 ## 9. Current reference plugins
 
