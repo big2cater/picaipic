@@ -12,6 +12,27 @@ For detailed plugin runtime status, use:
 - `docs/guide/ai-plugin-interface.md`
 - `docs/guide/ai-plugin-development-roadmap.md`
 
+## 2026-07-10 v1.0.0 stabilization pass
+
+- Completed the active Lap → PicAiPic migration in UI text, updater/repository
+  links, backup naming, dependency dialogs, help labels, CI artifact names,
+  Chinese documentation, and VitePress configuration.
+- Fixed cross-library thumbnail and preview isolation. Protocol URLs now select
+  the encoded library's validated database and cache rather than relying on
+  whichever library is current when an asynchronous request finishes.
+- Enforced plugin host compatibility ranges (`minPicAiPicVersion`, optional
+  `maxPicAiPicVersion`) alongside the v1 plugin API major gate.
+- Standardized JavaScript tooling on pnpm, removed npm lockfiles, and aligned
+  Cargo/Tauri/frontend/docs metadata at `1.0.0`.
+- Split Home's heavy panels and Content into async chunks. The Home entry
+  chunk dropped from about 527 KB to about 15 KB.
+- Added `docs/guide/release-notes/v1.0.0.md` and moved the website's current
+  release links to v1.0.0/current GitHub repository paths.
+
+Verification: frontend production build, Rust format/check, seven non-ignored
+Rust tests, `scripts/check_plugin_host.ps1`, and strict packaging for both
+reference plugins all passed.
+
 ## Product Direction
 
 PicAiPic is the main application body. The original source code's lightweight
@@ -279,9 +300,12 @@ not the default.
 Latest checks used during this work:
 
 ```text
-cargo check
-cargo fmt
-cd src-vite && npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+pnpm --dir src-vite build
+cargo test --manifest-path src-tauri/Cargo.toml -- --skip real_signed_zips_verify
+.\scripts\check_plugin_host.ps1
+.\scripts\package_plugin.ps1 -All -FailOnWarnings
 python -m json.tool plugins\picai-salut-color\picaipic.plugin.json
 python -m py_compile plugins\picai-salut-color\backend\main.py plugins\picai-salut-color\backend\salut_adapter.py
 python scripts\stress_salut_async.py --tasks 8 --duration-ms 300 --cancel-every 3
@@ -379,8 +403,8 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   payload `path` values are rewritten. Plugins read staged copies instead of
   raw source-image paths.
 - **Windows deny-ACL write confinement is now opt-in**:
-  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` enables the old `icacls /deny
-  <user>:(W) /L` path. It is no longer default because it mutates real user
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` enables the old
+  `icacls /deny <user>:(W) /L` path. It is no longer default because it mutates real user
   directory ACLs while plugins run and can trigger confusing host UI access
   prompts.
 - **Development escape hatch preserved**:
@@ -423,7 +447,7 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
 - Migrate prior Lap-era local data (`com.julyx10.lap.debug` directory)
   to the new `com.big2cater.picaipic.debug` path, so existing dev-time
   plugin installs and config carry over.
-- Model import / external model directory binding support, so users with
+- ~~Model import / external model directory binding support, so users with
   model files already on disk do not need to hand-edit `.local.env`.~~
   **Completed (2026-07-08):** plugin-level external model directory binding
   landed. Manifest `modelBindings[]` declares the env var + expected files;
@@ -431,3 +455,9 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   process and validates file presence. See the 2026-07-08 section above.
 - Avoid concrete `export-lut` business logic until runtime binding
   confidence is stable across both SA-LUT and NAFNet.
+- Add user-confirmed one-click fallback from a conflicting shared runtime to a
+  plugin-private runtime.
+- Design publisher signing-key rotation/revocation and continue release-exe
+  plugin regression after host/package changes.
+- Strengthen network confinement and Linux process isolation without breaking
+  GPU/runtime compatibility.

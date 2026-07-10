@@ -11,7 +11,7 @@
     </transition>
 
     <!-- Title Bar -->
-    <TitleBar v-if="showDesktopTitleBar" titlebar="Lap" viewName="Home" :icon="iconLogo"/>
+    <TitleBar v-if="showDesktopTitleBar" titlebar="PicAiPic" viewName="Home" :icon="iconLogo"/>
 
     <!-- Main Content -->
     <div class="flex-1 flex overflow-hidden">
@@ -162,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount, onMounted, watch, nextTick } from 'vue';
+import { ref, computed, defineAsyncComponent, onBeforeUnmount, onMounted, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -176,21 +176,22 @@ import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex } from '@/common/api';
 
 // vue components
-import Library from '@/components/Library.vue';
-import ImageSearch from '@/components/ImageSearch.vue';
-import Favorite from '@/components/Favorite.vue';
-import Tag from '@/components/Tag.vue';
-import Calendar from '@/components/Calendar.vue';
-import Location from '@/components/Location.vue';
-import Person from '@/components/Person.vue';
-import Camera from '@/components/Camera.vue';
-import MapHeatmapView from '@/components/MapHeatmapView.vue';
 import TitleBar from '@/components/TitleBar.vue';
 import TButton from '@/components/TButton.vue';
-import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
-import ManageLibraries from '@/components/ManageLibraries.vue';
 import iconLogo from '@/assets/images/icon.png';
+
+const Library = defineAsyncComponent(() => import('@/components/Library.vue'));
+const ImageSearch = defineAsyncComponent(() => import('@/components/ImageSearch.vue'));
+const Favorite = defineAsyncComponent(() => import('@/components/Favorite.vue'));
+const Tag = defineAsyncComponent(() => import('@/components/Tag.vue'));
+const Calendar = defineAsyncComponent(() => import('@/components/Calendar.vue'));
+const Location = defineAsyncComponent(() => import('@/components/Location.vue'));
+const Person = defineAsyncComponent(() => import('@/components/Person.vue'));
+const Camera = defineAsyncComponent(() => import('@/components/Camera.vue'));
+const MapHeatmapView = defineAsyncComponent(() => import('@/components/MapHeatmapView.vue'));
+const Content = defineAsyncComponent(() => import('@/components/Content.vue'));
+const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
 
 import {
   IconHeart,

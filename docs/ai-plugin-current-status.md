@@ -1,6 +1,46 @@
 ﻿# PicAiPic AI Plugin Host - Current Status
 
-Date: 2026-07-08
+Date: 2026-07-10
+
+## 2026-07-10 v1.0.0 consistency, isolation, and performance pass
+
+- **Active PicAiPic identity cleanup completed**: the main title bar, updater
+  release-note URL, backup filename, VC++ dependency dialog, help menu, map
+  fallback labels, AI download user agent, PR artifact names, Chinese README,
+  and VitePress site configuration now use PicAiPic/current repository paths.
+  Compatibility-sensitive internal `lap_*` cache/ABI identifiers and dated
+  historical reports remain unchanged deliberately.
+- **Cross-library thumbnail/preview isolation fixed**: `thumb://` and
+  `preview://` now resolve the library id encoded in the URL, open that
+  library's SQLite database through the shared connection pool, validate the
+  id against configured libraries, and write generated thumbnail data to the
+  matching database/cache. Delayed WebView requests can no longer resolve the
+  same numeric file id in a newly selected library.
+- **Host version compatibility enforced**: manifest validation now checks
+  `minPicAiPicVersion`, optional `maxPicAiPicVersion`, and `pluginApi` major.
+  Invalid version strings and incompatible hosts produce explicit validation
+  errors. A Rust regression test covers version comparison.
+- **Tooling/version metadata normalized**: Cargo, Tauri, frontend, and docs are
+  aligned at `1.0.0`; pnpm is the sole JavaScript package manager and obsolete
+  npm lockfiles were removed.
+- **Home bundle split**: sidebar panels, Content, map, and library management
+  are async components. The Home entry chunk dropped from about 527 KB to
+  about 15 KB and the Vite chunk-size warning disappeared.
+
+Verification completed:
+
+```powershell
+pnpm --dir src-vite build
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml -- --skip real_signed_zips_verify
+.\scripts\check_plugin_host.ps1
+.\scripts\package_plugin.ps1 -All -FailOnWarnings
+```
+
+All checks passed: seven non-ignored Rust tests, both plugin manifests/backends,
+frontend production build, Rust format/check, and strict packaging for SA-LUT
+and NAFNet.
 
 ## 2026-07-08 First release pipeline + binary repo migration
 
@@ -839,7 +879,13 @@ These should stay deferred unless a v1 freeze regression exposes a host boundary
 8. Decide duplicate-source UX for development directories vs installed package copies of the same plugin id.
 9. Defer a third plugin until SA-LUT and NAFNet both pass the release UI pass, package install/uninstall, strict packaging, and runtime/model setup checks.
 10. Defer SA-LUT `export-lut` implementation until after v1 host contract freeze, or mark it clearly unavailable in status/UI while it remains declared but unimplemented.
-11. Next priority: model import / external model directory binding, to lower the barrier for normal users who already have model files on disk.
+11. ~~Add model import / external model directory binding.~~ **Completed
+    2026-07-08:** manifest-declared `modelBindings[]`, Settings binding UI,
+    validation, persistence, and environment injection are implemented.
+12. Keep the host/plugin version gate covered whenever compatibility fields or
+    product versioning changes.
+13. Keep thumbnail/preview protocol database access library-scoped; add a
+    multi-library regression fixture when the database test harness expands.
 
 ## Packaging boundary
 

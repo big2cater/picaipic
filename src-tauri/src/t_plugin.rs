@@ -3652,6 +3652,39 @@ fn plugin_api_major_compatible(plugin_api: &str) -> bool {
         == Some(PLUGIN_API_MAJOR)
 }
 
+fn parse_app_version(version: &str) -> Option<Vec<u64>> {
+    let core = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    if core.is_empty() {
+        return None;
+    }
+    let parts = core
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn compare_app_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left = parse_app_version(left)?;
+    let right = parse_app_version(right)?;
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let ordering = left
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .cmp(&right.get(index).copied().unwrap_or_default());
+        if !ordering.is_eq() {
+            return Some(ordering);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
 fn validate_manifest(manifest: &AiPluginManifest, root: &Path) -> PluginValidationReport {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -3691,6 +3724,33 @@ fn validate_manifest(manifest: &AiPluginManifest, root: &Path) -> PluginValidati
     }
 
     if let Some(compatibility) = &manifest.compatibility {
+        let host_version = env!("CARGO_PKG_VERSION");
+        if let Some(min_version) = compatibility.min_pic_ai_pic_version.as_deref() {
+            match compare_app_versions(host_version, min_version) {
+                Some(std::cmp::Ordering::Less) => errors.push(format!(
+                    "Plugin requires PicAiPic {} or newer; current host is {}",
+                    min_version, host_version
+                )),
+                Some(_) => {}
+                None => errors.push(format!(
+                    "Invalid compatibility.minPicAiPicVersion '{}'",
+                    min_version
+                )),
+            }
+        }
+        if let Some(max_version) = compatibility.max_pic_ai_pic_version.as_deref() {
+            match compare_app_versions(host_version, max_version) {
+                Some(std::cmp::Ordering::Greater) => errors.push(format!(
+                    "Plugin supports PicAiPic up to {}; current host is {}",
+                    max_version, host_version
+                )),
+                Some(_) => {}
+                None => errors.push(format!(
+                    "Invalid compatibility.maxPicAiPicVersion '{}'",
+                    max_version
+                )),
+            }
+        }
         if let Some(plugin_api) = &compatibility.plugin_api {
             if !plugin_api_major_compatible(plugin_api) {
                 errors.push(format!(
@@ -8691,6 +8751,23 @@ pub async fn get_ai_plugin_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_version_comparison_handles_common_versions() {
+        assert_eq!(
+            compare_app_versions("1.0.0", "0.2.4"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_app_versions("1.0", "1.0.0"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            compare_app_versions("v1.2.0-beta.1", "1.1.9"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(compare_app_versions("not-a-version", "1.0.0"), None);
+    }
 
     /// Build a minimal manifest matching the one signed by `sign_plugin.py`
     /// in the canonical-serialization test fixture. Field assignment order in

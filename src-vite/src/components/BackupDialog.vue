@@ -123,7 +123,7 @@ const doBackup = async () => {
     // Show save dialog
     const destPath = await save({
       title: localeMsg.value.settings?.database?.backup_dialog_title || 'Backup Libraries',
-      defaultPath: `Lap-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+      defaultPath: `PicAiPic-backup-${new Date().toISOString().slice(0, 10)}.zip`,
       filters: [{ name: 'ZIP Archive', extensions: ['zip'] }],
     });
 

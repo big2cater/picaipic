@@ -178,7 +178,7 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lap-pr-windows-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
+          name: picaipic-pr-windows-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
@@ -306,7 +306,7 @@ jobs:
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lap-pr-linux-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
+          name: picaipic-pr-linux-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
@@ -324,7 +324,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: lap-pr-*
+          pattern: picaipic-pr-*
           path: release-files
           merge-multiple: true
 

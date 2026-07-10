@@ -1,8 +1,9 @@
 {
-  "name": "src-vue",
+  "name": "picaipic",
   "private": true,
-  "version": "0.2.4",
+  "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@9.0.0",
   "scripts": {
     "dev": "vite --config vite.config.js",
     "dev:clean": "vite --config vite.config.js --force",

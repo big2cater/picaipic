@@ -46,7 +46,8 @@ Recommended fields used by current UI/runtime:
 - `homepage`
 - `license`
 - `platforms[]`
-- `compatibility.minPicAiPicVersion`
+- `compatibility.minPicAiPicVersion` — when present, the host rejects the plugin if its own version is lower
+- `compatibility.maxPicAiPicVersion` — optional upper bound; the host rejects newer incompatible hosts
 - `permissions`
 - `runtimes[]`
 - `runtime`

@@ -13,7 +13,7 @@ pub fn install_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let about_item =
         MenuItemBuilder::with_id("about", format!("About {}", app.package_info().name))
             .build(app)?;
-    let home_item = MenuItemBuilder::with_id("help_homepage", "Lap Home").build(app)?;
+    let home_item = MenuItemBuilder::with_id("help_homepage", "PicAiPic Home").build(app)?;
     let release_notes_item =
         MenuItemBuilder::with_id("help_release_notes", "Release Notes").build(app)?;
     let readme_item = MenuItemBuilder::with_id("help_readme", "README").build(app)?;

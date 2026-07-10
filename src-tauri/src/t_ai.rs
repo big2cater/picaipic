@@ -397,7 +397,7 @@ async fn get_release_asset_total_size(
 ) -> Option<u64> {
     let response = client
         .get(MULTILINGUAL_RELEASE_API_URL)
-        .header(USER_AGENT, "Lap")
+        .header(USER_AGENT, "PicAiPic")
         .timeout(Duration::from_secs(20))
         .send()
         .await

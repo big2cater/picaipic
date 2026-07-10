@@ -8,6 +8,7 @@ target/
 
 # Frontend dependencies
 src-vite/node_modules/
+**/package-lock.json
 
 # Build artifacts (signed plugin zips, staging, etc.)
 dist/

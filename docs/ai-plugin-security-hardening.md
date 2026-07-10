@@ -33,17 +33,17 @@ Investigated in `src-tauri/src/t_plugin.rs` (2026-07-03). Summary:
 
 | Concern | Declared in manifest? | Enforced at runtime? |
 |---|---|---|
-| Network access (`permissions.network.*`) | Yes | **No** - no firewall, no socket interception |
-| `allowedDomains` | Yes | **No** - never matched against traffic |
-| `launchChildProcesses` | Yes | **No** - plugin can spawn freely |
-| Filesystem confinement (`writeOutputDir` etc.) | Yes | **No** for runtime I/O; only the host's own delete/extract calls are path-guarded |
-| Arbitrary file deletion by plugin | - | **Not prevented** |
+| Network access (`permissions.network.*`) | Yes | **Partially** - host setup/runtime permission gates exist, but there is no firewall or socket interception |
+| `allowedDomains` | Yes | **Setup gate only** - reviewed for host-approved setup downloads; plugin runtime traffic is not intercepted |
+| `launchChildProcesses` | Yes | **Consent/host gate only** - no OS-level prevention after a trusted plugin starts |
+| Filesystem confinement (`writeOutputDir` etc.) | Yes | **Partially** - host-owned paths are guarded and external inputs are staged; plugin runtime I/O is not a complete OS sandbox |
+| Arbitrary file deletion by plugin | - | **Reduced, not prevented** - default inputs are staged, but the plugin process still has user-level OS privileges |
 | Port binding (`defaultPort`) | Yes | Host assigns a loopback port, but **does not prevent** the plugin binding elsewhere |
 | Loopback-only base URL | Yes | **Validated** for the declared URL, but not enforced on plugin-initiated sockets |
-| Process isolation | - | **None** (only `CREATE_NO_WINDOW` cosmetic flag) |
+| Process isolation | - | **Input staging by default**; optional Windows deny-ACL test mode, no network/Linux sandbox |
 | Environment variable sandboxing | - | **None** - env vars are path hints; inherited env (`PATH`, `USERPROFILE`, ...) is not stripped |
 | Package SHA-256 integrity | `AiPluginPackageFile.sha256` | **Yes** - per-file hash check on zip install |
-| Package signature / trust | - | **None** - no signature, public key, or trust field exists |
+| Package signature / trust | Yes | **Yes** - Ed25519 package signature verification plus user-managed publisher trust; unsigned release packages are rejected |
 | Command path escape (`..` / absolute) | - | **Yes** via `is_safe_relative_command` - guards which binary runs, not what it does |
 | Zip-slip on install | - | **Yes** via `zip_entry_normalized_path` + `is_path_inside` |
 | Output-path containment | - | **Yes, post-hoc** - `validate_plugin_output_paths` rejects outputs outside task dir, but only for declared result paths |

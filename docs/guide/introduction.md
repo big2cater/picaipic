@@ -28,4 +28,4 @@ PicAiPic is currently available for Linux and Windows.
 - [Download the latest release](https://github.com/big2cater/picaipic/releases)
 - Linux: Download the `_amd64.deb` or `_arm64.deb` package and install it with your package manager.
 - Windows: Download the `_x64_en-US.msi` or `_arm64_en-US.msi` installer and complete the setup wizard.
-- [Check out what's new in v0.2.3](/guide/release-notes/v0.2.3)
+- [Check out what's new in v1.0.0](/guide/release-notes/v1.0.0)

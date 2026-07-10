@@ -2005,6 +2005,20 @@ impl AFile {
     pub fn get_file_info(file_id: i64) -> Result<Option<Self>, String> {
         let conn = open_conn()?;
 
+        Self::get_file_info_with_conn(&conn, file_id)
+    }
+
+    /// Resolve a file against a specific library database. This is required
+    /// for protocol requests that can outlive a frontend library switch.
+    pub fn get_file_info_for_library(
+        file_id: i64,
+        library_id: &str,
+    ) -> Result<Option<Self>, String> {
+        let conn = open_conn_for_library(library_id)?;
+        Self::get_file_info_with_conn(&conn, file_id)
+    }
+
+    fn get_file_info_with_conn(conn: &Connection, file_id: i64) -> Result<Option<Self>, String> {
         // Prepare the SQL query using the base query and adding the condition for file ID
         let sql = format!("{} WHERE a.id = ?1", Self::build_base_query());
 
@@ -2836,37 +2850,48 @@ pub struct AThumb {
 }
 
 impl AThumb {
-    fn should_use_original_image(file_id: i64, file_type: i64, thumbnail_size: u32) -> bool {
+    fn should_use_original_image_for_library(
+        file_id: i64,
+        file_type: i64,
+        thumbnail_size: u32,
+        library_id: &str,
+    ) -> bool {
+        AFile::get_file_info_for_library(file_id, library_id)
+            .ok()
+            .flatten()
+            .map(|file| Self::should_use_original_image_for_file(&file, file_type, thumbnail_size))
+            .unwrap_or(false)
+    }
+
+    fn should_use_original_image_for_file(
+        file: &AFile,
+        file_type: i64,
+        thumbnail_size: u32,
+    ) -> bool {
         if file_type != 1 || thumbnail_size == 0 {
             return false;
         }
 
-        AFile::get_file_info(file_id)
-            .ok()
-            .flatten()
-            .map(|file| {
-                #[cfg(target_os = "linux")]
-                if file
-                    .file_path
-                    .as_deref()
-                    .is_some_and(|path| path.to_ascii_lowercase().ends_with(".avif"))
-                {
-                    return false;
-                }
+        #[cfg(target_os = "linux")]
+        if file
+            .file_path
+            .as_deref()
+            .is_some_and(|path| path.to_ascii_lowercase().ends_with(".avif"))
+        {
+            return false;
+        }
 
-                if file
-                    .file_path
-                    .as_deref()
-                    .is_some_and(t_image::is_ffmpeg_backed_image_path)
-                {
-                    return false;
-                }
+        if file
+            .file_path
+            .as_deref()
+            .is_some_and(t_image::is_ffmpeg_backed_image_path)
+        {
+            return false;
+        }
 
-                let width = file.width.unwrap_or(0).max(0) as u32;
-                let height = file.height.unwrap_or(0).max(0) as u32;
-                width > 0 && height > 0 && width <= thumbnail_size && height <= thumbnail_size
-            })
-            .unwrap_or(false)
+        let width = file.width.unwrap_or(0).max(0) as u32;
+        let height = file.height.unwrap_or(0).max(0) as u32;
+        width > 0 && height > 0 && width <= thumbnail_size && height <= thumbnail_size
     }
 
     fn is_png_bytes(data: &[u8]) -> bool {
@@ -2955,6 +2980,15 @@ impl AThumb {
 
     fn get_file_album_id(file_id: i64) -> Result<Option<i64>, String> {
         AFile::get_file_info(file_id)
+            .map(|file| file.and_then(|f| f.album_id))
+            .map_err(|e| e.to_string())
+    }
+
+    fn get_file_album_id_for_library(
+        file_id: i64,
+        library_id: &str,
+    ) -> Result<Option<i64>, String> {
+        AFile::get_file_info_for_library(file_id, library_id)
             .map(|file| file.and_then(|f| f.album_id))
             .map_err(|e| e.to_string())
     }
@@ -3194,9 +3228,12 @@ impl AThumb {
     //     )
     // }
 
-    /// insert a thumbnail into db
-    fn insert(&self) -> Result<usize, String> {
-        let conn = open_conn()?;
+    fn insert_for_library(&self, library_id: &str) -> Result<usize, String> {
+        let conn = open_conn_for_library(library_id)?;
+        self.insert_with_conn(&conn)
+    }
+
+    fn insert_with_conn(&self, conn: &Connection) -> Result<usize, String> {
         let result = conn
             .execute(
                 "INSERT OR REPLACE INTO athumbs (file_id, error_code, thumb_data, thumb_key, thumb_mtime, thumb_size, updated_at) 
@@ -3218,7 +3255,9 @@ impl AThumb {
     fn hydrate_output_bytes_for_library(mut thumb: Self, library_id: &str) -> Result<Self, String> {
         if thumb.thumb_data.is_none() {
             if let Some(key) = thumb.thumb_key.as_ref() {
-                if let Some(album_id) = Self::get_file_album_id(thumb.file_id)? {
+                if let Some(album_id) =
+                    Self::get_file_album_id_for_library(thumb.file_id, library_id)?
+                {
                     thumb.thumb_data = Self::read_thumb_cache_bytes(library_id, album_id, key)?;
                 }
             }
@@ -3237,7 +3276,7 @@ impl AThumb {
     }
 
     pub fn fetch_for_library(file_id: i64, library_id: &str) -> Result<Option<Self>, String> {
-        let conn = open_conn()?;
+        let conn = open_conn_for_library(library_id)?;
         let result = conn
             .query_row(
                 "SELECT id, file_id, error_code, thumb_data, thumb_key, thumb_mtime, thumb_size, updated_at
@@ -3286,7 +3325,7 @@ impl AThumb {
             FROM athumbs WHERE file_id IN ({})",
             placeholders
         );
-        let conn = open_conn()?;
+        let conn = open_conn_for_library(library_id)?;
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params_from_iter(file_ids.iter()), |row| {
@@ -3441,7 +3480,12 @@ impl AThumb {
         known_duration: Option<u64>,
         seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
-        if Self::should_use_original_image(file_id, file_type, thumbnail_size) {
+        if Self::should_use_original_image_for_library(
+            file_id,
+            file_type,
+            thumbnail_size,
+            library_id,
+        ) {
             let athumb = Self {
                 id: None,
                 file_id,
@@ -3453,7 +3497,7 @@ impl AThumb {
                 updated_at: Some(Self::now_ts()),
                 thumb_data_base64: None,
             };
-            athumb.insert()?;
+            athumb.insert_for_library(library_id)?;
             return Self::fetch_for_library(file_id, library_id);
         }
 
@@ -3484,14 +3528,14 @@ impl AThumb {
         if athumb.error_code == 0 {
             if let (Some(data), Some(key)) = (athumb.thumb_data.as_ref(), athumb.thumb_key.as_ref())
             {
-                let album_id = Self::get_file_album_id(file_id)?
+                let album_id = Self::get_file_album_id_for_library(file_id, library_id)?
                     .ok_or_else(|| format!("Album not found for thumbnail file: {}", file_id))?;
                 Self::write_thumb_cache_bytes(library_id, album_id, key, data)?;
                 athumb.thumb_data = None;
             }
         }
 
-        athumb.insert()?;
+        athumb.insert_for_library(library_id)?;
         Self::fetch_for_library(file_id, library_id)
     }
 
@@ -3707,7 +3751,7 @@ impl AThumb {
         // error_code 2: image is small enough to use the original file directly
         if let Some(ref thumb) = thumb {
             if thumb.error_code == 2 {
-                if let Ok(Some(file)) = AFile::get_file_info(file_id) {
+                if let Ok(Some(file)) = AFile::get_file_info_for_library(file_id, library_id) {
                     if let Some(ref file_path) = file.file_path {
                         if let Ok(data) = std::fs::read(file_path) {
                             return Ok(Some(data));
@@ -3722,7 +3766,7 @@ impl AThumb {
                 return Ok(Some(data));
             }
 
-            let file = AFile::get_file_info(file_id)
+            let file = AFile::get_file_info_for_library(file_id, library_id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("File not found for thumbnail: {}", file_id))?;
             let file_path = file
@@ -3745,7 +3789,30 @@ impl AThumb {
             .and_then(|thumb| thumb.thumb_data));
         }
 
-        Ok(None)
+        let Some(file) = AFile::get_file_info_for_library(file_id, library_id)? else {
+            return Ok(None);
+        };
+        let file_type = file.file_type.unwrap_or(0);
+        let use_original = Self::should_use_original_image_for_file(&file, file_type, 200);
+        let Some(file_path) = file.file_path else {
+            return Ok(None);
+        };
+        if use_original {
+            return std::fs::read(&file_path)
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
+        Ok(Self::create_cache_backed_thumb_for_library(
+            file_id,
+            &file_path,
+            file_type,
+            file.e_orientation.unwrap_or(1) as i32,
+            200,
+            library_id,
+            file.duration.map(|d| d as u64),
+            None,
+        )?
+        .and_then(|thumb| thumb.thumb_data))
     }
 
     /// delete a thumbnail from db
@@ -5068,6 +5135,13 @@ fn create_conn() -> Result<(String, Connection), String> {
     Ok((path, conn))
 }
 
+fn create_conn_for_path(path: String) -> Result<(String, Connection), String> {
+    let conn = Connection::open(&path)
+        .map_err(|e| format!("Failed to open database connection: {}", e))?;
+    setup_conn(&conn)?;
+    Ok((path, conn))
+}
+
 pub(crate) fn clear_conn_pool() {
     if let Ok(mut pool) = CONN_POOL.lock() {
         pool.clear();
@@ -5087,6 +5161,23 @@ pub(crate) fn open_conn() -> Result<PooledConn, String> {
         }
     }
     Ok(PooledConn(Some(create_conn()?)))
+}
+
+pub(crate) fn open_conn_for_library(library_id: &str) -> Result<PooledConn, String> {
+    let path = t_storage::get_library_db_path(library_id).map_err(|e| {
+        format!(
+            "Failed to get database path for library '{}': {}",
+            library_id, e
+        )
+    })?;
+    if let Ok(mut pool) = CONN_POOL.lock() {
+        while let Some((pooled_path, conn)) = pool.pop() {
+            if pooled_path == path {
+                return Ok(PooledConn(Some((pooled_path, conn))));
+            }
+        }
+    }
+    Ok(PooledConn(Some(create_conn_for_path(path)?)))
 }
 
 /// create all tables if not exists

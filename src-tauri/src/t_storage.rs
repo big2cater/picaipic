@@ -76,6 +76,13 @@ pub fn get_library_db_path(library_id: &str) -> Result<String, String> {
         return Err("Database storage migration is in progress.".to_string());
     }
     let config = t_config::load_app_config()?;
+    if !config
+        .libraries
+        .iter()
+        .any(|library| library.id == library_id)
+    {
+        return Err(format!("Unknown library id: {}", library_id));
+    }
     get_library_db_path_from_config(&config, library_id)
 }
 

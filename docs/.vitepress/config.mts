@@ -1,10 +1,10 @@
 ﻿import { defineConfig } from 'vitepress'
 
-const base = '/lap/'
+const base = '/picaipic/'
 
 export default defineConfig({
     base,
-    title: "Lap",
+    title: "PicAiPic",
     description: "Local-first, AI-powered photo manager",
     head: [
         ['link', { rel: 'icon', type: 'image/png', sizes: '512x512', href: `${base}icon.png` }],
@@ -26,7 +26,7 @@ export default defineConfig({
         nav: [
             { text: 'Home', link: '/' },
             { text: 'Guide', link: '/guide/introduction' },
-            { text: 'Download', link: 'https://github.com/julyx10/lap/releases' }
+            { text: 'Download', link: 'https://github.com/big2cater/picaipic/releases' }
         ],
         sidebar: [
             {
@@ -56,6 +56,7 @@ export default defineConfig({
             {
                 text: 'Release Notes',
                 items: [
+                    { text: 'v1.0.0', link: '/guide/release-notes/v1.0.0' },
                     { text: 'v0.2.4', link: '/guide/release-notes/v0.2.4' },
                     { text: 'v0.2.3', link: '/guide/release-notes/v0.2.3' },
                     { text: 'v0.2.2', link: '/guide/release-notes/v0.2.2' },
@@ -79,11 +80,11 @@ export default defineConfig({
             }
         ],
         socialLinks: [
-            { icon: 'github', link: 'https://github.com/julyx10/lap' }
+            { icon: 'github', link: 'https://github.com/big2cater/picaipic' }
         ],
         footer: {
             message: 'Released under the GPL-3.0 License.',
-            copyright: 'Copyright © 2026 Lap Contributors'
+            copyright: 'Copyright © 2026 PicAiPic Contributors'
         }
     }
 })

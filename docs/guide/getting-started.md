@@ -30,6 +30,6 @@ When you open PicAiPic for the first time:
 2.  **Add a Library**: Point PicAiPic to a folder containing your photos.
 3.  **Let it Index**: PicAiPic will scan your files, generate thumbnails, and build local search data. This happens on your device.
 
-## Upgrading from v0.1.x
+## Upgrading to v1.0.0
 
-You can install PicAiPic v0.2.x directly over a v0.1.x installation. The local database is migrated automatically on first launch.
+The database schema is migrated automatically on first launch. The application identity changed from the former Lap identifier to `com.big2cater.picaipic`, so old Lap-era development data is not automatically imported. Back up important library databases before changing custom storage locations or removing old application-data directories.

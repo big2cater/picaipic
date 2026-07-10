@@ -24,6 +24,7 @@ Plugin buttons and menu actions should be declared through `contributes.menus[]`
 - [ ] Plugin root contains `picaipic.plugin.json`.
 - [ ] Manifest JSON parses successfully.
 - [ ] `schemaVersion`, `id`, `name`, `version`, `compatibility.pluginApi`, `entry.kind`, and `capabilities[]` are present.
+- [ ] `compatibility.minPicAiPicVersion` is the oldest host version actually tested; optional `maxPicAiPicVersion` is set only for a known upper incompatibility.
 - [ ] `entry.kind` is `local-http` for a local backend plugin.
 - [ ] `entry.startCommand` is a safe relative path inside the plugin directory.
 - [ ] `entry.stopCommand`, when present, is safe, idempotent, and returns quickly.

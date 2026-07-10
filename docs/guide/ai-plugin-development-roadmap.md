@@ -1,5 +1,14 @@
 # PicAiPic AI Plugin Development Roadmap
 
+Updated: 2026-07-10
+
+Current v1 status: local HTTP discovery/lifecycle/tasks, signed packages and
+publisher trust, shared/plugin/external runtime bindings, conflict detection,
+uninstall modes, input staging, and manifest-driven external model directory
+bindings are implemented. Remaining work is primarily release regression,
+user-confirmed private-runtime fallback, signing-key rotation/revocation, and
+stronger network/Linux isolation.
+
 This document describes how to build PicAiPic's AI plugin system and how to
 package upstream open-source AI projects as independent PicAiPic plugins.
 
@@ -323,7 +332,9 @@ be solved at once.
 4. Add a UI escape hatch to use a plugin-private runtime when a shared runtime
    is incompatible. (partially done: the host detects conflicts and advises;
    one-click auto-switch to plugin-private is still future work)
-5. Add a Settings UI for model import/external model directory binding.
+5. ~~Add a Settings UI for model import/external model directory binding.~~
+   (done 2026-07-08: manifest `modelBindings[]`, validation, persistence,
+   Settings controls, and host environment injection)
 6. ~~Add uninstall choices for code-only vs code + data + runtime.~~ (done
    2026-07-03)
 7. Keep package validation strict, but show install-time network warnings as

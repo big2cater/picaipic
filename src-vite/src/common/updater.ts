@@ -69,7 +69,7 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
   });
   const releaseNoteUrl = computed(() => {
     if (!releaseNoteVersion.value) return '';
-    return `https://github.com/julyx10/lap/releases/tag/v${releaseNoteVersion.value}`;
+    return `https://github.com/big2cater/picaipic/releases/tag/v${releaseNoteVersion.value}`;
   });
   const downloadProgressLabel = computed(() => {
     if (downloadPercent.value === null) {

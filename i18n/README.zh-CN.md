@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="PicAiPic Logo" width="120" style="border-radius: 20px">
   <h1>PicAiPic - 私人本地照片管理器</h1>
-  <h3>适用于 macOS、Windows 和 Linux 的开源桌面照片管理工具。</h3>
+  <h3>适用于 Windows 和 Linux 的开源桌面照片管理工具。</h3>
   <p>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/v/release/big2cater/picaipic" alt="GitHub release"></a>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/downloads/big2cater/picaipic/total" alt="GitHub all releases"></a>
@@ -9,7 +9,7 @@
   </p>
 </div>
 
-[English](../README.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | [Português](README.pt.md) | [Русский](README.ru.md) | 简体中文 | [日本語](README.ja.md) | [한국어](README.ko.md)
+[English](../README.md) | 简体中文
 
 PicAiPic 是一款开源、本地优先的照片管理器，旨在帮助您轻松浏览家庭相册、快速找回旧照片，并离线管理庞大的个人多媒体库。
 它是云端照片服务的隐私替代方案：无强制上传、内置本地 AI 搜索、以文件夹为中心的工作流，且完全免费使用。
@@ -24,16 +24,8 @@ PicAiPic 是一款开源、本地优先的照片管理器，旨在帮助您轻�
 
 | 平台 | 安装包 | 备注 |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | 已通过 Apple 公证 |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | 未签名 — 如果 SmartScreen 阻止下载，请点击**仍要保留** |
 | **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | 适用于 Debian 系发行版（Ubuntu、Debian、Linux Mint 等） |
-
-### 使用 Homebrew 安装 macOS 版
-
-```bash
-brew tap big2cater/picaipic
-brew install --cask picaipic
-```
 
 ## 界面预览
 
@@ -62,30 +54,24 @@ brew install --cask picaipic
 - **内置编辑**：支持裁剪、旋转、翻转、缩放和基础图像调整。
 - **广泛格式支持**：支持 60+ 种照片、RAW 和视频格式。
 
+## 当前开发状态
+
+PicAiPic 当前处于 `v1.0.0` 宿主/插件基线。近期已经完成：
+
+- 活跃界面、更新器、打包配置、文档和数据目录中的 Lap → PicAiPic 品牌迁移
+- AI 插件包签名与发布者信任、启动令牌、权限/安装流程、运行时冲突门禁和输入文件预拷贝
+- shared、plugin-private、external 三类 Python 运行时绑定，以及 manifest 驱动的外部模型目录绑定
+- 切换图库后延迟缩略图/预览请求的跨图库隔离
+- 插件最低/最高 PicAiPic 版本兼容性校验
+- 首页组件按需加载，Home 入口 chunk 从约 527 KB 降至约 15 KB
+
+下一阶段重点是 release 可执行文件的插件回归、带用户确认的 shared → plugin-private 一键回退、插件签名密钥轮换/撤销设计，以及更强的网络和 Linux 插件隔离。
+
 ## 卸载 PicAiPic
 
 PicAiPic 直接使用您现有的照片文件夹。卸载 PicAiPic 或删除其数据库和缓存文件，**不会**删除您的原始照片。
 
 常规卸载只会移除应用程序。如需彻底删除 PicAiPic，请先退出 PicAiPic，卸载应用程序，然后按照对应平台的命令删除本地数据库、缩略图缓存和配置文件。
-
-### macOS
-
-如果您通过 Homebrew 安装了 PicAiPic：
-
-```bash
-brew uninstall --cask picaipic
-```
-
-如果您手动安装了 PicAiPic，请退出 PicAiPic，并将 `Applications` 文件夹中的 `Lap.app` 移到废纸篓。
-
-删除所有 PicAiPic 数据库、缓存和配置文件：
-
-```bash
-rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
-       "$HOME/Library/Caches/com.julyx10.lap" \
-       "$HOME/Library/WebKit/com.julyx10.lap"
-rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
-```
 
 ### Windows
 
@@ -94,8 +80,8 @@ rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
 然后打开 PowerShell，删除所有 PicAiPic 数据库、缓存和配置文件：
 
 ```powershell
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com.julyx10.lap"
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com.big2cater.picaipic"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.big2cater.picaipic"
 ```
 
 ### Linux
@@ -109,9 +95,9 @@ sudo apt remove picaipic
 然后删除所有 PicAiPic 数据库、缓存和配置文件：
 
 ```bash
-rm -rf "$HOME/.local/share/com.julyx10.lap" \
-       "$HOME/.cache/com.julyx10.lap" \
-       "$HOME/.config/com.julyx10.lap"
+rm -rf "$HOME/.local/share/com.big2cater.picaipic" \
+       "$HOME/.cache/com.big2cater.picaipic" \
+       "$HOME/.config/com.big2cater.picaipic"
 ```
 
 如果您在 PicAiPic 设置中选择了自定义数据库存储目录，请在确认其中仅包含 PicAiPic 数据库文件后，单独删除该目录。
@@ -121,10 +107,6 @@ rm -rf "$HOME/.local/share/com.julyx10.lap" \
 编译要求: Node.js 20+, pnpm, Rust stable.
 
 ```bash
-# macOS 系统依赖
-xcode-select --install
-brew install nasm pkg-config autoconf automake libtool cmake
-
 # Linux 系统依赖
 # sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
 #   patchelf nasm clang pkg-config autoconf automake libtool cmake
@@ -148,7 +130,7 @@ PicAiPic 支持 60+ 种照片、RAW 和视频格式。
 | :--- | :--- |
 | 常规图片 | JPG/JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW 照片 | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
-| 视频 | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX 等。所有平台均支持 H.264 播放；在不支持原生播放时，系统会自动进行兼容性处理。macOS 原生支持 HEVC/H.265 和 VP9。 |
+| 视频 | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX 等。Windows 和 Linux 均支持 H.264 播放；在不支持原生播放时，系统会自动进行兼容性处理。 |
 
 ### Linux 视频播放备注
 

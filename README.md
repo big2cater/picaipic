@@ -92,13 +92,16 @@ If you selected a custom database storage directory in PicAiPic settings, delete
 
 ## Current Development Focus
 
-The current frontend/backend work is centered on the AI plugin host pipeline and packaged plugin experience. The most important next steps are:
+PicAiPic is now on the `v1.0.0` host/plugin baseline. Recent work completed:
 
-- validate the plugin lifecycle in the release executable (Start / Restart / Smoke)
-- runtime-conflict detection is implemented: the host blocks capability calls when a shared runtime's installed packages drift from the plugin's pinned requirements, and advises switching to a plugin-private runtime; one-click auto-switch is still future work
-- plugin uninstall now offers a choice between "code only" and "code + data & runtimes" (shared runtimes are always kept)
-- security hardening A+B+C are landed: startup bearer-token auth (A), Ed25519 package signing with a user-managed trust store (B), and v1 plugin confinement via input-file staging (C); the experimental Windows deny-ACL write confinement path is now explicit opt-in because it changes real user-directory ACLs; network blocking and Linux sandboxing are future work
-- add model import and external model directory binding support
+- the Lap → PicAiPic identity migration across the active UI, updater, packaging, documentation, and application data paths
+- signed AI plugin packages, publisher trust, bearer-token authentication, permission/setup flows, runtime conflict gates, and input-file staging
+- shared, plugin-private, and external Python runtime bindings, plus manifest-driven external model directory binding
+- correct per-library thumbnail/preview isolation when requests finish after a library switch
+- host/plugin minimum and maximum PicAiPic version enforcement
+- frontend route/component splitting; the Home entry chunk was reduced from about 527 KB to about 15 KB
+
+The highest-priority remaining work is release-executable regression testing after host/plugin changes, user-confirmed one-click fallback from conflicting shared runtimes to plugin-private runtimes, signing-key rotation/revocation design, and stronger network/Linux plugin isolation.
 
 ## Build from Source
 
