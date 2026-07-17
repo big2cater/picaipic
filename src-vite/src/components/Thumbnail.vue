@@ -115,6 +115,16 @@
         </label>
       </div>
 
+      <!-- LIVE badge for Live Photo / Motion Photo -->
+      <div
+        v-if="isLivePhoto"
+        class="pointer-events-none absolute right-0.5 z-20 px-1 py-0.5 rounded-full bg-primary/80 text-primary-content text-[10px] font-semibold tracking-wide flex items-center gap-0.5"
+        :style="selectMode ? { top: '1.5rem' } : { top: '0.25rem' }"
+      >
+        <span class="inline-block w-1 h-1 rounded-full bg-primary-content"></span>
+        LIVE
+      </div>
+
       <!-- context menu -->
       <div v-if="!selectMode" class="absolute right-0.5 top-0.5">
         <ContextMenu
@@ -215,6 +225,10 @@ let previewTimer: ReturnType<typeof setTimeout> | null = null;
 const showVideoPreview = ref(false);
 const isVideoPreviewReady = ref(false);
 const isVideoFile = computed(() => props.file?.file_type === 2);
+const isLivePhoto = computed(() => {
+  const type = props.file?.live_photo_type;
+  return type != null && type > 0;
+});
 const isGeometryGridStyle = computed(() => config.settings.grid.style === 2 || config.settings.grid.style === 3);
 const shouldScaleThumbnail = computed(() => config.settings.grid.style === 1 || isGeometryGridStyle.value);
 const thumbnailSrc = ref(props.file.thumbnail || '');

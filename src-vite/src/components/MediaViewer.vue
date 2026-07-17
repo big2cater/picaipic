@@ -275,6 +275,14 @@
     </div>
 
     <div ref="mediaAreaRef" class="flex-1 w-full min-h-0 relative" @dblclick="$emit('media-dblclick')">
+      <!-- LIVE badge for Live Photo / Motion Photo -->
+      <div
+        v-if="isLivePhoto"
+        class="absolute right-2 top-2 z-75 px-2 py-0.5 rounded-full bg-primary/80 text-primary-content text-xs font-semibold tracking-wide flex items-center gap-1 pointer-events-none"
+      >
+        <span class="inline-block w-1.5 h-1.5 rounded-full bg-primary-content animate-pulse"></span>
+        LIVE
+      </div>
       <!-- Previous Button (Overlay, media-area anchored) -->
       <button 
         v-if="!isSlideShow && showOverlayNav"
@@ -333,20 +341,44 @@
         @message-from-video-viewer="handleMessageFromImageViewer"
         @slideshow-next="emit('slideshow-next')"
       ></Video>
+
+      <!-- Live Photo: long-press to play paired video overlay -->
+      <div
+        v-if="isLivePhoto && (file?.file_type === 1 || file?.file_type === 3)"
+        class="absolute inset-0 z-60 pointer-events-auto"
+        @pointerdown="onLivePhotoPointerDown"
+        @pointerup="onLivePhotoPointerUp"
+        @pointerleave="onLivePhotoPointerUp"
+        @pointercancel="onLivePhotoPointerUp"
+      >
+        <video
+          v-show="isPlayingLivePhoto"
+          ref="livePhotoVideoRef"
+          class="w-full h-full object-contain"
+          muted
+          loop
+          playsinline
+          preload="auto"
+          @canplay="onLivePhotoCanPlay"
+          @error="onLivePhotoError"
+        />
+      </div>
     </div>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { defineAsyncComponent, ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { config, libConfig } from '@/common/config';
 import { useToast } from '@/common/toast';
 import { usePluginStore } from '@/stores/pluginStore';
-import { isWin, isMac, isLinux, getSlideShowInterval } from '@/common/utils';
+import { isWin, isMac, isLinux, getSlideShowInterval, getAssetSrc } from '@/common/utils';
 import { getShortcutLabel, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
+import { getPairedVideo, extractMotionVideo } from '@/common/api';
+import type { PairedVideoInfo } from '@/common/types';
 
 import Image from '@/components/Image.vue';
 import TButton from '@/components/TButton.vue';
@@ -762,13 +794,13 @@ const computedToolbarClass = computed(() => {
     
     if (toolbarPosition.value === 'bottom') {
        if (isHoverBottom.value || hasOpenMenu.value) {
-          if (props.file.file_type === 2) {
+          if (props.file?.file_type === 2) {
             return `${commonClasses} ${floatingClasses} bottom-8 opacity-100`;
           } else {
             return `${commonClasses} ${floatingClasses} bottom-4 opacity-100`;
           }
        } else {
-          if (props.file.file_type === 2) {
+          if (props.file?.file_type === 2) {
             return `${commonClasses} ${floatingClasses} bottom-8 opacity-0`;
           } else {
             return `${commonClasses} ${floatingClasses} bottom-4 opacity-0`;
@@ -900,6 +932,106 @@ const singleFileMenuItems = computed(() => {
     (action) => emit('item-action', { action, index: props.fileIndex }),
     pluginContextMenuItems
   ).value;
+});
+
+// --- Live Photo / Motion Photo support ---
+
+const livePhotoVideoRef = ref<HTMLVideoElement | null>(null);
+const pairedVideoInfo = ref<PairedVideoInfo | null>(null);
+const isPlayingLivePhoto = ref(false);
+let livePhotoPressTimer: ReturnType<typeof setTimeout> | null = null;
+let livePhotoVideoUrl = '';
+
+const isLivePhoto = computed(() => {
+  const type = props.file?.live_photo_type;
+  return type != null && type > 0 && (props.file?.file_type === 1 || props.file?.file_type === 3);
+});
+
+// Load paired video info when file changes
+watch(
+  () => props.file?.id,
+  async (fileId) => {
+    // Reset previous state
+    stopLivePhotoPlayback();
+    pairedVideoInfo.value = null;
+    livePhotoVideoUrl = '';
+
+    if (!fileId) return;
+    const info = await getPairedVideo(fileId);
+    if (info && props.file?.id === fileId) {
+      pairedVideoInfo.value = info;
+    }
+  },
+  { immediate: true }
+);
+
+function onLivePhotoPointerDown(_e: PointerEvent) {
+  if (!isLivePhoto.value || !pairedVideoInfo.value) return;
+  if (livePhotoPressTimer) clearTimeout(livePhotoPressTimer);
+  livePhotoPressTimer = setTimeout(() => {
+    void startLivePhotoPlayback();
+  }, 400);
+}
+
+function onLivePhotoPointerUp() {
+  if (livePhotoPressTimer) {
+    clearTimeout(livePhotoPressTimer);
+    livePhotoPressTimer = null;
+  }
+  stopLivePhotoPlayback();
+}
+
+async function startLivePhotoPlayback() {
+  if (!pairedVideoInfo.value || !props.file) return;
+  const info = pairedVideoInfo.value;
+  const fileId = props.file.id;
+  const videoEl = livePhotoVideoRef.value;
+  if (!videoEl || fileId == null) return;
+
+  try {
+    if (info.live_photo_type === 1) {
+      // Apple Live Photo: paired MOV file path
+      livePhotoVideoUrl = getAssetSrc(info.file_path);
+    } else if (info.live_photo_type === 3 || info.live_photo_type === 4) {
+      // Motion Photo (3) or HEIC-internal video (4): extract to motion_cache
+      const tempPath = await extractMotionVideo(fileId);
+      if (tempPath) {
+        livePhotoVideoUrl = getAssetSrc(tempPath);
+      }
+    }
+
+    if (!livePhotoVideoUrl) return;
+
+    videoEl.src = livePhotoVideoUrl;
+    videoEl.muted = true;
+    isPlayingLivePhoto.value = true;
+    await videoEl.play();
+  } catch {
+    stopLivePhotoPlayback();
+  }
+}
+
+function stopLivePhotoPlayback() {
+  const videoEl = livePhotoVideoRef.value;
+  if (videoEl) {
+    videoEl.pause();
+    videoEl.removeAttribute('src');
+    videoEl.load();
+  }
+  isPlayingLivePhoto.value = false;
+  livePhotoVideoUrl = '';
+}
+
+function onLivePhotoCanPlay() {
+  // Video is ready to play
+}
+
+function onLivePhotoError() {
+  stopLivePhotoPlayback();
+}
+
+onBeforeUnmount(() => {
+  stopLivePhotoPlayback();
 });
 </script>
 

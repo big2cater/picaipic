@@ -16,7 +16,7 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-10
+last_updated: 2026-07-17
 ---
 
 # Decisions
@@ -70,3 +70,19 @@ last_updated: 2026-07-10
 **Reasoning:** The AI plugin confinement/runtime implementation is Windows-oriented and no macOS Seatbelt integration exists.
 **Alternatives considered:** Keeping macOS packaging was rejected until plugin security and runtime support can meet the contract.
 **Consequences:** CI/release docs must not claim macOS support; remaining conditional Rust branches are not proof of a supported target.
+
+### Support both Apple Live Photo and Google Motion Photo with long-press preview
+**Date:** 2026-07-13
+**Status:** Active
+**Decision:** PicAiPic simultaneously supports Apple Live Photo (HEIC/JPEG + MOV paired by ContentIdentifier UUID) and Google Motion Photo (JPEG with embedded MP4 offset in XMP `Container:Directory`). Paired MOV files remain visible as independent videos in the library but are linked to their companion image via `paired_file_id`. Users long-press an image in MediaViewer to play the paired video and release to return to the static image.
+**Reasoning:** Live Photo and Motion Photo are the two dominant formats for hybrid still+motion captures; supporting both covers the majority of consumer device ecosystems (iPhone + Pixel/Samsung). Keeping the MOV visible as an independent video preserves user expectations that all imported files are browseable, while the link enables the Live Photo interaction. Long-press mirrors iOS native behavior and is the most intuitive gesture.
+**Alternatives considered:** Integrating the external `live-photo-conv` Vala/GTK/GStreamer project was rejected because it only handles Android Motion Photo (not Apple), requires GStreamer + GObject dependencies incompatible with the Tauri stack, and duplicates capability the project already has (libheif + FFmpeg + EXIF). Hidden-then-linked MOV files were rejected as they break the expectation that all imported files are visible. Click-to-play button was rejected as less intuitive than long-press.
+**Consequences:** DB schema is at v6 with `content_id`, `paired_file_id`, `live_photo_type` columns on `afiles`. `t_xmp.rs` module depends on `quick-xml`. HEIC container-internal video track extraction (some Apple Live Photos embed video in HEIC rather than separate MOV) is deferred to a future iteration. File-name stem pair fallback handles exported photos that lost ContentIdentifier metadata but requires same-folder + same-stem naming convention.
+
+### Rollback disk renames when DB metadata updates fail
+**Date:** 2026-07-17
+**Status:** Active
+**Decision:** After a successful filesystem rename (file or root folder), any subsequent SQLite metadata update failure must best-effort rename the path back to the original name before returning failure to the frontend. Partial multi-column DB writes (for example `name_pinyin` then `name`) also restore earlier columns when a later step fails.
+**Reasoning:** The UI treats a failed rename as no-op, but an unreverted disk rename leaves `afiles.name` / virtual `file_path` pointing at a missing path and breaks open/thumbnail/reindex. `move_file` already rolled back disk on DB failure; rename must match that invariant.
+**Alternatives considered:** Returning success after disk rename while logging DB failure was rejected because the list would show the old name and subsequent operations would target the wrong path. Leaving the new disk name and repairing only DB was rejected because the command already returned failure to the client.
+**Consequences:** `rename_file` and `rename_folder` call `t_utils::rename_*` again with the original basename on DB error. If rollback itself fails, log a critical message; full two-phase rename transactions remain a future hardening option.

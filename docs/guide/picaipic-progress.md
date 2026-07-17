@@ -1,6 +1,6 @@
 # PicAiPic Progress
 
-Updated: 2026-07-10
+Updated: 2026-07-17
 
 This document records the current implementation status for turning the existing
 PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight
@@ -11,6 +11,56 @@ For detailed plugin runtime status, use:
 - `docs/guide/plugin-runtime-status-2026-06-20.md`
 - `docs/guide/ai-plugin-interface.md`
 - `docs/guide/ai-plugin-development-roadmap.md`
+
+## 2026-07-17 Live Photo / Motion Photo + reliability fixes
+
+### Live Photo / Motion Photo (schema v6)
+
+- Apple Live Photo: HEIC/JPEG still + companion MOV paired by EXIF ContentIdentifier
+  (`Tag(Context::Tiff, 0x0011)`) and ffprobe `com.apple.quicktime.content.identifier`
+  (dotted and underscored key variants). Stem-based same-folder fallback when UUID is missing.
+- Google Motion Photo: single JPEG with embedded MP4; XMP parsed in `t_xmp.rs` (`quick-xml`);
+  `content_id` stores `motion:<offset>:<length>`.
+- HEIC-internal video (`live_photo_type=4`): detect/extract via libheif items/sequences with
+  ffmpeg demux fallback on Windows/Linux (not macOS product target).
+- DB columns on `afiles`: `content_id`, `paired_file_id`, `live_photo_type`
+  (0=none, 1=Apple image, 2=Apple video, 3=Motion Photo, 4=HEIC-internal).
+  Migration and open-time repair via `ensure_live_photo_columns`.
+- Motion extract cache: `app_cache_dir()/motion_cache/` with source-keyed reuse, size-based
+  prune, startup purge of legacy OS-temp extracts; cleared with `clear_video_cache`.
+- Preview: MediaViewer 400ms long-press plays paired MOV or extracted motion video; LIVE badge
+  on Thumbnail; FileInfo type labels; i18n en/zh.
+- Export/convert (`export_live_photo` + `LivePhotoExportDialog`): still / video / pair /
+  to_motion / to_pair / set_keyframe. Does **not** overwrite library originals.
+- Shared parser: `t_xmp::parse_motion_content_id` is the single source of truth for
+  `motion:<offset>:<length>` (used by `t_cmds` and `t_live_photo`).
+
+Runbook: `.mex/patterns/change-live-photo.md`.
+
+### Reliability / consistency fixes
+
+- `rename_file` / `rename_folder`: if disk rename succeeds and DB update fails, roll disk
+  back to the old name (aligned with `move_file` rollback).
+- `edit_album`: name-column errors propagate (no longer swallowed with `let _ =`).
+- Dedup `get_files_by_sizes`: reuses precomputed suspicious sizes via chunked `IN` binds
+  instead of a redundant full-table `GROUP BY`.
+- MediaViewer: null-safe `props.file?.file_type` on floating toolbar; Live Photo playback
+  guards when `props.file` is cleared mid long-press.
+- `getBuildTime`: drop double semicolon; treat `0` with `!= null`.
+
+### Verification (this pass)
+
+- `cargo check --manifest-path src-tauri/Cargo.toml` passed.
+- Frontend production build and full plugin-host regression not re-run in this reliability
+  pass; run `pnpm --dir src-vite build` and `scripts/check_plugin_host.ps1` before release.
+
+### Still open
+
+- In-library Live Photo keyframe overwrite of the original still (export-only keyframe exists).
+- Broader HEIC sequence sample coverage; unusual sequence brands may fail ffmpeg demux.
+- One-click confirmed switch from conflicting shared runtime to plugin-private runtime.
+- Network confinement / Linux process sandboxing; signing-key rotation/revocation design.
+- Release-executable plugin regression after host/plugin changes.
 
 ## 2026-07-10 v1.0.0 stabilization pass
 

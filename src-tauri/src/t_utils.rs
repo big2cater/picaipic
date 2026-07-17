@@ -3172,6 +3172,14 @@ pub async fn index_album_worker(
         }
     }
 
+    // Pair Live Photo / Motion Photo files after scan
+    if scan_complete {
+        let paired = AFile::pair_live_photos(album_id).unwrap_or(0);
+        if paired > 0 {
+            println!("Paired {} Live Photo files in album {}.", paired, album_id);
+        }
+    }
+
     if scan_complete {
         // Update last scan time only after a complete filesystem traversal.
         let _ = Album::update_last_scan_time(album_id, current_scan_time);

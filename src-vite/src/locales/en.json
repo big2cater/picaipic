@@ -414,7 +414,8 @@
       "reveal_in_file_explorer": "Reveal in File Explorer...",
       "refresh_file_info": "Refresh file info",
       "set_album_cover": "Set as album cover",
-      "show_info": "Show info"
+      "show_info": "Show info",
+      "export_live_photo": "Export Live Photo..."
     },
     "calendar": {
       "monthly": "Monthly",
@@ -731,6 +732,26 @@
       "save_as_new": "Save as",
       "overwrite_confirm": "Are you sure you want to overwrite the original file? This action cannot be undone."
     }
+  },
+  "live_photo": {
+    "export_menu": "Export Live Photo...",
+    "export_title": "Export Live Photo",
+    "export_hint": "Export, convert, or extract a keyframe. Original library files are not modified.",
+    "export_still": "Still image only",
+    "export_video": "Video only",
+    "export_pair": "Still + video pair (folder)",
+    "export_to_motion": "Convert to Motion Photo (single JPEG)",
+    "export_to_pair": "Convert to still + video pair",
+    "export_keyframe": "Export keyframe still from video",
+    "export_to_motion_need_apple": "Convert to Motion Photo requires an Apple Live Photo with a paired video.",
+    "export_to_pair_need_motion": "Convert to pair requires a Google Motion Photo.",
+    "keyframe_sec": "Time (seconds)",
+    "export_replace": "Replace existing files at the destination",
+    "export_action": "Export",
+    "exporting": "Exporting...",
+    "export_choose_folder": "Choose export folder",
+    "export_success": "Exported {count} file(s): {path}",
+    "export_failed": "Live Photo export failed"
   },
   "file_info": {
     "title": "Information",

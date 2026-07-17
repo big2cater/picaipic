@@ -532,6 +532,7 @@ pub struct VideoMetadata {
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
     pub gps_altitude: Option<f64>,
+    pub content_id: Option<String>,
 }
 
 pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, String> {
@@ -591,6 +592,36 @@ pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, 
         HashMap::new()
     };
 
+    // Apple Live Photo: extract com.apple.quicktime.content.identifier
+    // ffprobe may preserve the dotted key or convert dots to underscores.
+    let content_id = first_exist(
+        &meta,
+        &[
+            "com.apple.quicktime.content.identifier",
+            "com_apple_quicktime_content_identifier",
+        ],
+    )
+    .or_else(|| {
+        // Also search in stream-level tags (some MOV files store it there)
+        for stream in streams {
+            if let Some(tags) = stream["tags"].as_object() {
+                for (k, v) in tags {
+                    let key_lower = k.to_lowercase();
+                    if key_lower == "com.apple.quicktime.content.identifier"
+                        || key_lower == "com_apple_quicktime_content_identifier"
+                    {
+                        if let Some(s) = v.as_str() {
+                            if !s.is_empty() {
+                                return Some(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    });
+
     Ok(VideoMetadata {
         width: w,
         height: h,
@@ -602,6 +633,7 @@ pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, 
         gps_latitude: None,
         gps_longitude: None,
         gps_altitude: None,
+        content_id,
     })
 }
 
@@ -744,6 +776,247 @@ pub fn get_video_metadata(file_path: &str) -> Result<VideoMetadata, String> {
     tokio::task::block_in_place(|| handle.block_on(get_video_metadata_async(file_path)))
 }
 
+/// Remux (stream-copy) a video into MP4. Falls back to a light H.264/AAC transcode
+/// when copy fails. Used by Live Photo conversion exports.
+pub fn remux_or_transcode_to_mp4(src: &str, dest: &str) -> Result<(), String> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| "No runtime handle")?;
+    tokio::task::block_in_place(|| handle.block_on(remux_or_transcode_to_mp4_async(src, dest)))
+}
+
+/// Extract a single JPEG frame from `src` at `seconds` (best-effort seek).
+pub fn extract_keyframe_jpeg(src: &str, seconds: f64, dest: &str) -> Result<(), String> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| "No runtime handle")?;
+    tokio::task::block_in_place(|| handle.block_on(extract_keyframe_jpeg_async(src, seconds, dest)))
+}
+
+/// Copy/remux video while stamping Apple Live Photo content identifier metadata.
+pub fn remux_with_content_id(src: &str, dest: &str, content_id: &str) -> Result<(), String> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| "No runtime handle")?;
+    tokio::task::block_in_place(|| {
+        handle.block_on(remux_with_content_id_async(src, dest, content_id))
+    })
+}
+
+async fn remux_or_transcode_to_mp4_async(src: &str, dest: &str) -> Result<(), String> {
+    let dest_path = PathBuf::from(dest);
+    if let Some(parent) = dest_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp = dest_path.with_extension("tmp.mp4");
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    // Pass 1: stream copy
+    if run_ffmpeg_simple(
+        src,
+        tmp.to_string_lossy().as_ref(),
+        &[
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ],
+    )
+    .await
+    .is_ok()
+    {
+        promote_tmp_video(&tmp, &dest_path).await?;
+        return Ok(());
+    }
+
+    // Pass 2: light transcode
+    run_ffmpeg_simple(
+        src,
+        tmp.to_string_lossy().as_ref(),
+        &[
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "superfast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ],
+    )
+    .await?;
+    promote_tmp_video(&tmp, &dest_path).await
+}
+
+async fn remux_with_content_id_async(
+    src: &str,
+    dest: &str,
+    content_id: &str,
+) -> Result<(), String> {
+    let dest_path = PathBuf::from(dest);
+    if let Some(parent) = dest_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp = dest_path.with_extension("tmp.mp4");
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    let meta_key = "com.apple.quicktime.content.identifier";
+    let mut args = vec![
+        "-map".into(),
+        "0:v:0".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-c".into(),
+        "copy".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        "-metadata".into(),
+        format!("{}={}", meta_key, content_id),
+        "-f".into(),
+        "mp4".into(),
+    ];
+
+    if run_ffmpeg_simple_owned(src, tmp.to_string_lossy().as_ref(), args.clone())
+        .await
+        .is_err()
+    {
+        // Fallback: remux without metadata stamp, then plain copy path still usable.
+        args = vec![
+            "-map".into(),
+            "0:v:0".into(),
+            "-map".into(),
+            "0:a:0?".into(),
+            "-c".into(),
+            "copy".into(),
+            "-movflags".into(),
+            "+faststart".into(),
+            "-f".into(),
+            "mp4".into(),
+        ];
+        run_ffmpeg_simple_owned(src, tmp.to_string_lossy().as_ref(), args).await?;
+    }
+    promote_tmp_video(&tmp, &dest_path).await
+}
+
+async fn extract_keyframe_jpeg_async(src: &str, seconds: f64, dest: &str) -> Result<(), String> {
+    let dest_path = PathBuf::from(dest);
+    if let Some(parent) = dest_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp = dest_path.with_extension("tmp.jpg");
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    let ss = if seconds.is_finite() && seconds > 0.0 {
+        format!("{:.3}", seconds)
+    } else {
+        "0".to_string()
+    };
+
+    let mut cmd = ffmpeg_command();
+    // Input seek first for speed; accurate enough for keyframe export.
+    cmd.args(["-ss", &ss, "-i", src, "-frames:v", "1", "-q:v", "2", "-y"]);
+    cmd.arg(&tmp);
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(debug_stderr())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("ffmpeg keyframe spawn failed: {}", e))?;
+    let out = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .map_err(|_| "ffmpeg keyframe timed out".to_string())?
+        .map_err(|e| format!("ffmpeg keyframe failed: {}", e))?;
+    if !out.status.success() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!(
+            "ffmpeg keyframe exited with code {}",
+            out.status.code().unwrap_or(-1)
+        ));
+    }
+    if let Ok(meta) = tokio::fs::metadata(&tmp).await {
+        if meta.len() < 128 {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err("ffmpeg keyframe output too small".to_string());
+        }
+    }
+    if dest_path.exists() {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+    }
+    tokio::fs::rename(&tmp, &dest_path)
+        .await
+        .map_err(|e| format!("Failed to finalize keyframe JPEG: {}", e))?;
+    Ok(())
+}
+
+async fn run_ffmpeg_simple(src: &str, dest: &str, extra: &[&str]) -> Result<(), String> {
+    let owned: Vec<String> = extra.iter().map(|s| (*s).to_string()).collect();
+    run_ffmpeg_simple_owned(src, dest, owned).await
+}
+
+async fn run_ffmpeg_simple_owned(src: &str, dest: &str, extra: Vec<String>) -> Result<(), String> {
+    let mut cmd = ffmpeg_command();
+    cmd.arg("-i").arg(src);
+    for a in &extra {
+        cmd.arg(a);
+    }
+    cmd.arg("-y").arg(dest);
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(debug_stderr())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn failed: {}", e))?;
+    let out = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output())
+        .await
+        .map_err(|_| "ffmpeg timed out".to_string())?
+        .map_err(|e| format!("ffmpeg failed: {}", e))?;
+    if !out.status.success() {
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(format!(
+            "ffmpeg exited with code {}",
+            out.status.code().unwrap_or(-1)
+        ));
+    }
+    if let Ok(meta) = tokio::fs::metadata(dest).await {
+        if meta.len() < 1024 {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err("ffmpeg output too small".to_string());
+        }
+    } else {
+        return Err("ffmpeg produced no output file".to_string());
+    }
+    Ok(())
+}
+
+async fn promote_tmp_video(tmp: &PathBuf, dest: &PathBuf) -> Result<(), String> {
+    if dest.exists() {
+        let _ = tokio::fs::remove_file(dest).await;
+    }
+    tokio::fs::rename(tmp, dest)
+        .await
+        .map_err(|e| format!("Failed to finalize video export: {}", e))
+}
+
 fn first_exist(meta: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
     for k in keys {
         if let Some(v) = meta.get(*k) {
@@ -794,6 +1067,8 @@ pub async fn clear_video_cache(
             let _ = tokio::fs::create_dir_all(&d).await;
         }
     }
+    // Also clear Motion Photo extract cache (same user-facing "clear video cache").
+    let _ = crate::t_xmp::clear_motion_cache_dir(&app);
     Ok(())
 }
 

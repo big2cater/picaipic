@@ -1338,8 +1338,8 @@ export async function getBuildTime() {
   try {
     const unixTime = await invoke('get_build_time');
     console.log('get_build_time', unixTime);
-    if (unixTime) {
-      return new Date(unixTime * 1000).toLocaleString();;
+    if (unixTime != null) {
+      return new Date(unixTime * 1000).toLocaleString();
     }
   } catch (error) {
     console.error('Failed to get build time:', error);
@@ -2021,4 +2021,53 @@ export async function getFacesForFile(fileId) {
     console.error('Failed to get faces for file:', error);
   }
   return null;
+}
+
+// --- Live Photo / Motion Photo ---
+
+// get paired video info for a Live Photo / Motion Photo file
+export async function getPairedVideo(fileId) {
+  try {
+    return await invoke('get_paired_video', { fileId });
+  } catch (error) {
+    console.error('Failed to get paired video:', error);
+  }
+  return null;
+}
+
+// extract embedded video from a Google Motion Photo into app motion_cache
+export async function extractMotionVideo(fileId) {
+  try {
+    return await invoke('extract_motion_video', { fileId });
+  } catch (error) {
+    console.error('Failed to extract motion video:', error);
+  }
+  return null;
+}
+
+// rebuild Live Photo / Motion Photo pairings for an album
+export async function rebuildLivePhotoPairs(albumId) {
+  try {
+    return await invoke('rebuild_live_photo_pairs', { albumId });
+  } catch (error) {
+    console.error('Failed to rebuild live photo pairs:', error);
+  }
+  return null;
+}
+
+// export Live Photo / Motion Photo still, video, or pair
+export async function exportLivePhoto({
+  fileId,
+  mode,
+  destPath,
+  destDir,
+  options,
+}) {
+  return await invoke('export_live_photo', {
+    fileId,
+    mode,
+    destPath: destPath ?? null,
+    destDir: destDir ?? null,
+    options: options ?? null,
+  });
 }

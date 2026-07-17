@@ -28,6 +28,7 @@ mod t_jpeg;
 mod t_jxl;
 mod t_lens;
 mod t_libraw;
+mod t_live_photo;
 mod t_menu;
 mod t_migration;
 mod t_pasteboard;
@@ -38,6 +39,7 @@ mod t_sqlite;
 mod t_storage;
 mod t_utils;
 mod t_video;
+mod t_xmp;
 
 /// The main function is the entry point for the Tauri application.
 #[tokio::main]
@@ -120,6 +122,8 @@ async fn main() {
 
             // Cleanup video cache
             t_video::init_video_cache(&_app.handle());
+            // Motion Photo extract cache + purge legacy OS-temp extracts
+            t_xmp::init_motion_cache(&_app.handle());
 
             if let Err(e) = t_utils::restore_album_scopes(&_app.handle()) {
                 eprintln!("Failed to restore asset scopes: {}", e);
@@ -394,6 +398,11 @@ async fn main() {
             t_cmds::backup_databases,
             t_cmds::parse_backup_file,
             t_cmds::restore_databases,
+            // live photo / motion photo
+            t_cmds::get_paired_video,
+            t_cmds::extract_motion_video,
+            t_cmds::rebuild_live_photo_pairs,
+            t_cmds::export_live_photo,
         ])
         .build(tauri::generate_context!());
 

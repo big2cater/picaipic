@@ -506,6 +506,13 @@
     @resolve="resolveFileConflict"
   />
 
+  <LivePhotoExportDialog
+    v-if="showLivePhotoExport && livePhotoExportFile"
+    :file="livePhotoExportFile"
+    @done="showLivePhotoExport = false; livePhotoExportFile = null"
+    @cancel="showLivePhotoExport = false; livePhotoExportFile = null"
+  />
+
   <!-- move to trash -->
   <MessageBox
     v-if="showTrashMsgbox"
@@ -663,6 +670,7 @@ import DedupPane from '@/components/DedupPane.vue';
 import SelectionPanel from '@/components/SelectionPanel.vue';
 import FileConflictDialog from '@/components/FileConflictDialog.vue';
 import PluginActionDialog from '@/components/PluginActionDialog.vue';
+import LivePhotoExportDialog from '@/components/LivePhotoExportDialog.vue';
 import ScrollBar from '@/components/ScrollBar.vue';
 import SliderInput from '@/components/SliderInput.vue';
 import StatusBar from '@/components/StatusBar.vue';
@@ -1014,6 +1022,8 @@ const showRenameMsgbox = ref(false);  // show rename message box
 const renamingFileName = ref<{name?: string, ext?: string}>({}); // extract the file name to {name, ext}
 
 const showMoveTo = ref(false);
+const showLivePhotoExport = ref(false);
+const livePhotoExportFile = ref<any>(null);
 type FileConflictPolicy = 'skip' | 'keep_both' | 'replace';
 const fileConflictDialog = ref({
   show: false,
@@ -2511,6 +2521,12 @@ function handleItemAction(payload: { action: any, index: number }) {
       enterPersonSearchMode(fileList.value[selectedItemIndex.value]);
     },
     'set-album-cover': clickSetAlbumCover,
+    'export-live-photo': () => {
+      const file = fileList.value[selectedItemIndex.value];
+      if (!file || !(Number(file.live_photo_type || 0) > 0)) return;
+      livePhotoExportFile.value = file;
+      showLivePhotoExport.value = true;
+    },
   };
 
   if (typeof action === 'string' && (actionMap as any)[action]) {

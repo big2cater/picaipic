@@ -16,7 +16,9 @@ edges:
     condition: when extending frontend/backend IPC
   - target: patterns/change-database-schema.md
     condition: when persistent schema or storage behavior changes
-last_updated: 2026-07-10
+  - target: patterns/change-live-photo.md
+    condition: when working on Live Photo / Motion Photo features
+last_updated: 2026-07-17
 ---
 
 # Conventions
@@ -53,11 +55,15 @@ export async function operationName(value) {
 ```
 The Rust command must be registered in `main.rs`; event listeners must return/clean up the unlisten function when component-scoped.
 
-**Rust error pattern:** production commands return `Result<T, String>` (or another explicit error type) and add operation context. Avoid `panic!`; locks/files/native calls need explicit failure handling.
+**Rust error pattern:** production commands return `Result<T, String>` (or another explicit error type) and add operation context. Avoid `panic!`; locks/files/native calls need explicit failure handling. Multi-column updates must not swallow intermediate errors with `let _ =` when the overall operation is reported as success (see `edit_album`).
+
+**Disk/DB rename consistency:** for rename/move of user media, if the filesystem succeeds and the DB update fails, rollback the disk change (same pattern as `move_file` / `rename_file` / `rename_folder`) so the frontend failure path does not leave paths desynchronized.
 
 **Database migration pattern:** inspect `PRAGMA user_version`, apply idempotent/table-column-aware migration logic, then advance the version only after successful changes. Never edit an existing migration to redefine databases already in the field.
 
 **Plugin safety pattern:** validate normalized paths remain inside the intended store/task/output root before deletion or adoption. Preserve signature verification, trust prompts, permission gates, runtime probes/conflict checks, loopback binding, auth token, and input staging.
+
+**Live Photo / Motion Photo pattern:** Apple Live Photos pair图片+视频 by EXIF ContentIdentifier (tag 0x0011 in `Context::Tiff`); videos are matched by ffprobe's `com.apple.quicktime.content.identifier` (try both dotted and underscored key variants). Google Motion Photos are single JPEGs with XMP `GCamera:MotionPhoto=1` and `Container:Directory` items specifying embedded video offset/length; `t_xmp.rs` parses XMP with `quick-xml` and `content_id` stores `motion:<offset>:<length>`. File-name stem fallback pairing (e.g., `IMG_1234.HEIC` + `IMG_1234.MOV`) runs when ContentIdentifier is absent. The `afiles` table's `live_photo_type` field uses: 0=none, 1=Apple image, 2=Apple video, 3=Google Motion Photo. `paired_file_id` is bilateral (both sides point to each other). Frontend preview uses a 400ms long-press timer in MediaViewer; the MOV/video layer is a controlless `<video>` overlay with `getAssetSrc()` URL conversion.
 
 ## Verify Checklist
 

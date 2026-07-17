@@ -260,12 +260,15 @@ fn get_suspicious_file_sizes(conn: &Connection) -> Result<Vec<i64>, String> {
     Ok(sizes)
 }
 
-fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, String> {
-    // Basic trick: parameterize the sizes. SQLite limits to 999 max vars usually.
-    // For safety, let's fetch in chunks if huge. But we'll just do a joined query.
+fn get_files_by_sizes(conn: &Connection, sizes: &[i64]) -> Result<Vec<AFile>, String> {
+    if sizes.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let mut stmt = conn.prepare(
-        "SELECT a.id, a.folder_id, a.name, a.name_pinyin, a.size, a.file_type, a.format_label,
+    // Reuse sizes already computed by get_suspicious_file_sizes.
+    // SQLite default max variable count is 999; chunk to stay under the limit.
+    const CHUNK_SIZE: usize = 900;
+    let select_sql = "SELECT a.id, a.folder_id, a.name, a.name_pinyin, a.size, a.file_type, a.format_label,
                 a.created_at, a.modified_at, a.inode, a.taken_date, a.width, a.height, a.duration,
                 a.is_favorite, a.rating, a.rotate, a.comments, a.has_tags, a.has_faces, 
                 a.e_make, a.e_model, a.e_date_time, a.e_software, a.e_artist, a.e_copyright, 
@@ -276,70 +279,78 @@ fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, S
                 f.path || '/' || a.name as file_path
          FROM afiles a
          JOIN afolders f ON a.folder_id = f.id
-         WHERE a.size IN (SELECT size FROM afiles GROUP BY size HAVING COUNT(size) > 1 AND size > 0)
-         ORDER BY a.size DESC"
-    ).map_err(|e| e.to_string())?;
+         WHERE a.size IN (";
 
-    let iter = stmt
-        .query_map([], |row| {
-            Ok(AFile {
-                id: row.get(0)?,
-                folder_id: row.get(1)?,
-                name: row.get(2)?,
-                name_pinyin: row.get(3)?,
-                size: row.get(4)?,
-                file_type: row.get(5)?,
-                format_label: row.get(6)?,
-                created_at: row.get(7)?,
-                modified_at: row.get(8)?,
-                inode: row.get(9)?,
-                taken_date: row.get(10)?,
-                width: row.get(11)?,
-                height: row.get(12)?,
-                duration: row.get(13)?,
-                is_favorite: row.get(14)?,
-                rating: row.get(15)?,
-                rotate: row.get(16)?,
-                comments: row.get(17)?,
-                has_tags: row.get(18)?,
-                has_faces: row.get(19)?,
-                e_make: row.get(20)?,
-                e_model: row.get(21)?,
-                e_date_time: row.get(22)?,
-                e_software: row.get(23)?,
-                e_artist: row.get(24)?,
-                e_copyright: row.get(25)?,
-                e_description: row.get(26)?,
-                e_lens_make: row.get(27)?,
-                e_lens_model: row.get(28)?,
-                e_exposure_bias: row.get(29)?,
-                e_exposure_time: row.get(30)?,
-                e_f_number: row.get(31)?,
-                e_focal_length: row.get(32)?,
-                e_iso_speed: row.get(33)?,
-                e_flash: row.get(34)?,
-                e_orientation: row.get(35)?,
-                gps_latitude: row.get(36)?,
-                gps_longitude: row.get(37)?,
-                gps_altitude: row.get(38)?,
-                geo_name: row.get(39)?,
-                geo_admin1: row.get(40)?,
-                geo_admin2: row.get(41)?,
-                geo_cc: row.get(42)?,
-                file_path: row.get(43)?,
-                album_id: None,
-                album_name: None,
-                has_thumbnail: None,
-                has_embedding: None,
-                last_scan_time: Some(0),
-            })
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AFile> {
+        Ok(AFile {
+            id: row.get(0)?,
+            folder_id: row.get(1)?,
+            name: row.get(2)?,
+            name_pinyin: row.get(3)?,
+            size: row.get(4)?,
+            file_type: row.get(5)?,
+            format_label: row.get(6)?,
+            created_at: row.get(7)?,
+            modified_at: row.get(8)?,
+            inode: row.get(9)?,
+            taken_date: row.get(10)?,
+            width: row.get(11)?,
+            height: row.get(12)?,
+            duration: row.get(13)?,
+            is_favorite: row.get(14)?,
+            rating: row.get(15)?,
+            rotate: row.get(16)?,
+            comments: row.get(17)?,
+            has_tags: row.get(18)?,
+            has_faces: row.get(19)?,
+            e_make: row.get(20)?,
+            e_model: row.get(21)?,
+            e_date_time: row.get(22)?,
+            e_software: row.get(23)?,
+            e_artist: row.get(24)?,
+            e_copyright: row.get(25)?,
+            e_description: row.get(26)?,
+            e_lens_make: row.get(27)?,
+            e_lens_model: row.get(28)?,
+            e_exposure_bias: row.get(29)?,
+            e_exposure_time: row.get(30)?,
+            e_f_number: row.get(31)?,
+            e_focal_length: row.get(32)?,
+            e_iso_speed: row.get(33)?,
+            e_flash: row.get(34)?,
+            e_orientation: row.get(35)?,
+            gps_latitude: row.get(36)?,
+            gps_longitude: row.get(37)?,
+            gps_altitude: row.get(38)?,
+            geo_name: row.get(39)?,
+            geo_admin1: row.get(40)?,
+            geo_admin2: row.get(41)?,
+            geo_cc: row.get(42)?,
+            file_path: row.get(43)?,
+            album_id: None,
+            album_name: None,
+            has_thumbnail: None,
+            has_embedding: None,
+            last_scan_time: Some(0),
+            content_id: None,
+            paired_file_id: None,
+            live_photo_type: Some(0),
         })
-        .map_err(|e| e.to_string())?;
+    };
 
     let mut files = Vec::new();
-    for f in iter {
-        if let Ok(file) = f {
-            files.push(file);
+    for chunk in sizes.chunks(CHUNK_SIZE) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let query = format!("{}{}) ORDER BY a.size DESC", select_sql, placeholders);
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), map_row)
+            .map_err(|e| e.to_string())?;
+
+        for f in iter {
+            if let Ok(file) = f {
+                files.push(file);
+            }
         }
     }
 

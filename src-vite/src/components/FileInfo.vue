@@ -200,6 +200,15 @@
               />
             </div>
 
+            <!-- Live Photo type label -->
+            <template v-if="livePhotoLabel">
+              <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.type') }}</div>
+              <div class="flex items-center gap-1.5">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+                <span class="text-[12px] text-base-content/75 font-medium">{{ livePhotoLabel }}</span>
+              </div>
+            </template>
+
             <!-- Path -->
             <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.folder') }}</div>
             <div class="group/field flex items-center gap-1 min-w-0 min-h-6">
@@ -541,6 +550,13 @@ const showBasicInfoPanel = computed(() => config.infoPanel.showBasicInfo);
 const showMetadataPanel = computed(() => config.infoPanel.showMetadata);
 const showMapPanel = computed(() => config.infoPanel.showMap);
 const isVideoFile = computed(() => Number(props.fileInfo?.file_type || 0) === 2);
+const livePhotoLabel = computed(() => {
+  const type = Number(props.fileInfo?.live_photo_type || 0);
+  if (type === 1 || type === 2) return 'Live Photo';
+  if (type === 3) return 'Motion Photo';
+  if (type === 4) return 'HEIC Live';
+  return '';
+});
 const canShowHistogram = computed(() => !isVideoFile.value);
 const activePreviewMode = computed(() => canShowHistogram.value ? config.infoPanel.previewMode : 'thumbnail');
 const isHistogramPreview = computed(() => activePreviewMode.value === 'histogram');

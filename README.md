@@ -51,6 +51,7 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 - **Fast library browsing** with timeline, folder, location, camera, lens, tag, favorite, rating, and face filters.
 - **Local AI search** for text prompts, visual similarity, smart tags, face clustering, and optional multilingual search in 50+ languages.
 - **Folder-first workflow** with multiple libraries, drag-and-drop import, copy-paste import, filesystem sync, and safe move/copy/delete operations.
+- **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview and still/video/pair export without overwriting library originals.
 - **Cleanup tools** to find duplicates and batch move unwanted files to trash.
 - **Built-in editing** for crop, rotate, flip, resize, and basic image adjustments.
 - **Broad format support** for 60+ photo, RAW, and video formats.
@@ -100,8 +101,10 @@ PicAiPic is now on the `v1.0.0` host/plugin baseline. Recent work completed:
 - correct per-library thumbnail/preview isolation when requests finish after a library switch
 - host/plugin minimum and maximum PicAiPic version enforcement
 - frontend route/component splitting; the Home entry chunk was reduced from about 527 KB to about 15 KB
+- Live Photo / Motion Photo detection, pairing, long-press preview, motion extract cache, and still/video/pair/conversion export (schema v6)
+- disk↔DB rename consistency, album edit error propagation, large-library dedup scan efficiency, and MediaViewer null-safety hardening
 
-The highest-priority remaining work is release-executable regression testing after host/plugin changes, user-confirmed one-click fallback from conflicting shared runtimes to plugin-private runtimes, signing-key rotation/revocation design, and stronger network/Linux plugin isolation.
+The highest-priority remaining work is release-executable regression testing after host/plugin changes, user-confirmed one-click fallback from conflicting shared runtimes to plugin-private runtimes, signing-key rotation/revocation design, stronger network/Linux plugin isolation, and optional in-library Live Photo keyframe replace.
 
 ## Build from Source
 

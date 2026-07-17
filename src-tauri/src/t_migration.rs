@@ -68,6 +68,11 @@ fn get_migrations() -> Vec<Migration> {
             description: "Post v0.2.2 schema updates",
             sql: "",
         },
+        Migration {
+            version: 6,
+            description: "Add Live Photo / Motion Photo pairing columns",
+            sql: "",
+        },
     ]
 }
 
@@ -190,6 +195,10 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                         migration.version, e
                     )
                 })?;
+            } else if migration.version == 6 {
+                // Live Photo / Motion Photo support: add pairing columns
+                ensure_live_photo_columns(conn)
+                    .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
             } else if !migration.sql.trim().is_empty() {
                 conn.execute_batch(migration.sql)
                     .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
@@ -209,5 +218,50 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
         println!("Database is up to date.");
     }
 
+    // Repair path: even if user_version already claims >=6 (interrupted earlier
+    // build, restored backup, multi-library open order), make sure Live Photo
+    // columns exist. Otherwise every file query selects missing columns and
+    // the UI shows zero recognized media.
+    ensure_live_photo_columns(conn)?;
+
+    Ok(())
+}
+
+/// Ensure Live Photo / Motion Photo columns and indexes exist on `afiles`.
+/// Safe to call repeatedly (idempotent).
+pub fn ensure_live_photo_columns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "afiles", "content_id")? {
+        conn.execute("ALTER TABLE afiles ADD COLUMN content_id TEXT", [])
+            .map_err(|e| format!("Failed adding content_id: {}", e))?;
+        println!("Repaired schema: added afiles.content_id");
+    }
+    if !table_has_column(conn, "afiles", "paired_file_id")? {
+        conn.execute("ALTER TABLE afiles ADD COLUMN paired_file_id INTEGER", [])
+            .map_err(|e| format!("Failed adding paired_file_id: {}", e))?;
+        println!("Repaired schema: added afiles.paired_file_id");
+    }
+    if !table_has_column(conn, "afiles", "live_photo_type")? {
+        conn.execute(
+            "ALTER TABLE afiles ADD COLUMN live_photo_type INTEGER DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("Failed adding live_photo_type: {}", e))?;
+        println!("Repaired schema: added afiles.live_photo_type");
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_content_id ON afiles(content_id)",
+        [],
+    )
+    .map_err(|e| format!("Failed adding content_id index: {}", e))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_paired_file_id ON afiles(paired_file_id)",
+        [],
+    )
+    .map_err(|e| format!("Failed adding paired_file_id index: {}", e))?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_live_photo_type ON afiles(live_photo_type)",
+        [],
+    )
+    .map_err(|e| format!("Failed adding live_photo_type index: {}", e))?;
     Ok(())
 }

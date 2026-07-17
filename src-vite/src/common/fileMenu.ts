@@ -21,6 +21,7 @@ import {
   IconExternal,
   IconHeartFilled,
   IconPalette,
+  IconDownload,
 } from '@/common/icons';
 
 type PluginMenuItem = {
@@ -52,6 +53,7 @@ export const useFileMenuItems = (
     const videoAppName = String(config.settings.externalVideoAppName || '');
     const isImage = f.file_type === 1 || f.file_type === 3;
     const isVideo = f.file_type === 2;
+    const isLivePhoto = Number(f.live_photo_type || 0) > 0;
     const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, DEFAULT_PLATFORM);
     const pluginMenuItems = (pluginMenus?.value || [])
       .map((menu) => ({
@@ -90,6 +92,14 @@ export const useFileMenuItems = (
         shortcut: shortcut('file.editImage'),
         disabled: !isImage,
         action: createAction('edit')
+      },
+      {
+        label: localeMsg.value.menu.file.export_live_photo
+          || localeMsg.value.live_photo?.export_menu
+          || 'Export Live Photo...',
+        icon: markRaw(IconDownload),
+        hidden: !isLivePhoto,
+        action: createAction('export-live-photo')
       },
       {
         label: localeMsg.value.menu.file.print,

@@ -16,7 +16,9 @@ edges:
     condition: when the flow crosses into an AI plugin process
   - target: patterns/add-tauri-command.md
     condition: when adding or changing a frontend-to-Rust operation
-last_updated: 2026-07-10
+  - target: patterns/change-live-photo.md
+    condition: when working on Live Photo / Motion Photo detection, pairing, or preview
+last_updated: 2026-07-17
 ---
 
 # Architecture
@@ -33,6 +35,7 @@ User interaction starts in Vue views/components under `src-vite/src/`. Pinia sto
 - **Persistence (`t_sqlite.rs`, `t_migration.rs`, `t_storage.rs`, `t_config.rs`)** — per-library SQLite databases, schema migrations, configuration, custom database storage, WAL checkpointing, backup, and restore.
 - **Media protocols (`t_protocol.rs`)** — `thumb://` and `preview://` URLs include a library id and must open that specific library database so in-flight WebView requests stay isolated across library switches.
 - **Media/AI pipeline (`t_image.rs`, `t_video.rs`, `t_libraw.rs`, `t_heif.rs`, `t_jpeg.rs`, `t_jxl.rs`, `t_ai.rs`, `t_face.rs`)** — decoding, metadata, thumbnails, video compatibility, ONNX inference, embeddings, and face detection/clustering.
+- **Live Photo / Motion Photo (`t_xmp.rs`, `t_live_photo.rs`, `t_heif.rs`, pair logic in `t_sqlite.rs`)** — Apple Live Photo (HEIC+MOV via ContentIdentifier UUID), Google Motion Photo (JPEG+embedded MP4 via XMP), and HEIC-internal video (`live_photo_type=4` via libheif items/sequences + ffmpeg fallback); long-press preview and still/video/pair/conversion export; extracts land in `app_cache_dir()/motion_cache/`; see `patterns/change-live-photo.md`.
 - **Plugin host (`t_plugin.rs`, `t_sandbox.rs`, frontend plugin store/settings)** — signed package lifecycle, trust/permissions, runtime profiles, loopback HTTP tasks, logs, outputs, model bindings, and input staging; see `context/plugin-runtime.md`.
 
 ## External Dependencies

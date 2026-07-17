@@ -414,7 +414,8 @@
       "reveal_in_file_explorer": "在文件资源管理器中显示...",
       "refresh_file_info": "刷新文件信息",
       "set_album_cover": "设置为相册封面",
-      "show_info": "显示信息"
+      "show_info": "显示信息",
+      "export_live_photo": "导出 Live Photo..."
     },
     "calendar": {
       "monthly": "按月",
@@ -731,6 +732,26 @@
       "save_as_new": "另存为",
       "overwrite_confirm": "确定覆盖现有文件吗？该操作无法撤销。"
     }
+  },
+  "live_photo": {
+    "export_menu": "导出 Live Photo...",
+    "export_title": "导出 Live Photo",
+    "export_hint": "导出、格式互转或从动态视频提取关键帧。不会修改图库中的原文件。",
+    "export_still": "仅静态图",
+    "export_video": "仅视频",
+    "export_pair": "静态图 + 视频（导出到文件夹）",
+    "export_to_motion": "转为 Motion Photo（单张 JPEG）",
+    "export_to_pair": "拆成静态图 + 视频",
+    "export_keyframe": "从视频导出关键帧静图",
+    "export_to_motion_need_apple": "转为 Motion Photo 需要已配对视频的 Apple Live Photo。",
+    "export_to_pair_need_motion": "拆成双文件需要 Google Motion Photo。",
+    "keyframe_sec": "时间（秒）",
+    "export_replace": "覆盖目标位置的同名文件",
+    "export_action": "导出",
+    "exporting": "正在导出...",
+    "export_choose_folder": "选择导出文件夹",
+    "export_success": "已导出 {count} 个文件：{path}",
+    "export_failed": "Live Photo 导出失败"
   },
   "file_info": {
     "title": "信息",

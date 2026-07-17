@@ -16,7 +16,7 @@ edges:
     condition: when installing or troubleshooting toolchains
   - target: context/plugin-runtime.md
     condition: when Python, PyTorch, or plugin runtime dependencies are involved
-last_updated: 2026-07-10
+last_updated: 2026-07-13
 ---
 
 # Stack
@@ -27,7 +27,7 @@ last_updated: 2026-07-10
 - **Vue 3.5 + Vite 8** — frontend SPA in `src-vite`; Vue code uses Composition API and `<script setup>`.
 - **JavaScript/TypeScript 6** — most frontend application code is JavaScript, with shared typed helpers/composables in TypeScript.
 - **Pinia 3 + persisted-state plugin** — frontend application and preference state.
-- **SQLite via rusqlite 0.32.1 (bundled)** — one local metadata database per library.
+- **SQLite via rusqlite 0.32.1 (bundled)** — one local metadata database per library; schema currently at migration v6.
 - **Tailwind CSS 4 + daisyUI 5** — styling and component conventions.
 - **Python plugin runtimes** — independent local AI plugin processes, typically Python 3.12/PyTorch profiles selected by manifest/runtime binding.
 
@@ -36,7 +36,9 @@ last_updated: 2026-07-10
 - **Tauri plugins** — dialog, filesystem, OS, process, shell, updater, and window-state integrations; use these rather than ad-hoc frontend OS access.
 - **ONNX Runtime (`ort = 2.0.0-rc.10`) + ndarray/tokenizers** — bundled local CLIP and InsightFace inference.
 - **LibRaw/libheif/libjpeg-turbo/jxl-oxide/Rust image** — native and Rust image decoding; do not replace casually because format coverage and release linking are sensitive.
-- **FFmpeg/FFprobe sidecars** — video probing, compatibility conversion, and thumbnails; downloaded by project scripts and bundled as resources.
+- **FFmpeg/FFprobe sidecars** — video probing, compatibility conversion, thumbnails, and Apple Live Photo MOV `com.apple.quicktime.content.identifier` extraction.
+- **kamadak-exif + little_exif** — EXIF reading and writing; kamadak-exif `Tag(Context::Tiff, 0x0011)` reads Apple Live Photo ContentIdentifier from images.
+- **quick-xml (`0.37`)** — XMP parsing for Google Motion Photo detection (`GCamera:MotionPhoto` / `Container:Directory`); no C dependencies, safe for Tauri.
 - **Leaflet + leaflet.heat** — map and GPS heatmap UI.
 - **Video.js 8** — frontend video playback UI.
 - **reqwest with rustls** — Rust HTTP without an OpenSSL runtime dependency.

@@ -828,6 +828,11 @@ pub struct AFile {
     pub geo_admin2: Option<String>, // Administrative district 2
     pub geo_cc: Option<String>,     // Country code
 
+    // Live Photo / Motion Photo pairing
+    pub content_id: Option<String>, // Apple ContentIdentifier UUID or Motion Photo XMP marker
+    pub paired_file_id: Option<i64>, // paired video/image file id
+    pub live_photo_type: Option<i64>, // 0=none, 1=Apple image, 2=Apple video, 3=Motion Photo, 4=HEIC-internal video
+
     // output only
     pub file_path: Option<String>,   // file path (for webview)
     pub album_id: Option<i64>,       // album id (for webview)
@@ -937,6 +942,10 @@ impl AFile {
         let mut gps_longitude: Option<f64> = None;
         let mut gps_altitude: Option<f64> = None;
 
+        // Live Photo / Motion Photo pairing
+        let mut content_id: Option<String> = None;
+        let mut live_photo_type: i64 = 0;
+
         // Pre-read file header once for images (saves 3-4 redundant File::open per file).
         let file_header: Option<Vec<u8>> = if file_type == 1 || file_type == 3 {
             std::fs::File::open(file_path).ok().and_then(|mut f| {
@@ -970,6 +979,11 @@ impl AFile {
                 gps_latitude = video_metadata.gps_latitude;
                 gps_longitude = video_metadata.gps_longitude;
                 gps_altitude = video_metadata.gps_altitude;
+                // Apple Live Photo video: content identifier from MOV metadata
+                content_id = video_metadata.content_id;
+                if content_id.is_some() {
+                    live_photo_type = 2; // Apple Live Photo video
+                }
             }
             3 => {
                 let (w, h) = t_image::get_raw_dimensions(file_path)?;
@@ -1176,6 +1190,79 @@ impl AFile {
                     }
                 }
             }
+
+            // Apple Live Photo: read ContentIdentifier (EXIF tag 0x0011 in TIFF/IFD0).
+            // This UUID matches the MOV side's com.apple.quicktime.content.identifier.
+            content_id = exif.as_ref().and_then(|exif_data| {
+                exif_data
+                    .get_field(Tag(exif::Context::Tiff, 0x0011), In::PRIMARY)
+                    .and_then(|field| {
+                        field
+                            .value
+                            .display_as(field.tag)
+                            .to_string()
+                            .strip_suffix('\0')
+                            .map(|s| s.to_string())
+                    })
+                    .filter(|s| !s.is_empty())
+            });
+            // Binary fallback for ContentIdentifier
+            if content_id.is_none() {
+                if let Some(hdr) = file_header_deref {
+                    content_id = Self::scrape_ascii_from_tag(hdr, 0x0011);
+                }
+            }
+            if content_id.is_some() {
+                live_photo_type = 1; // Apple Live Photo image
+            }
+
+            // Google Motion Photo detection via XMP.
+            // Guard with catch_unwind so a bad XMP packet never aborts indexing
+            // for an otherwise normal JPEG/HEIC.
+            if content_id.is_none() {
+                let motion_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::t_xmp::detect_motion_photo(file_path)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!(
+                        "Motion Photo detection panicked for {}; continuing without live metadata",
+                        file_path
+                    );
+                    None
+                });
+                if let Some(motion_info) = motion_info {
+                    // Encode the video offset in content_id as "motion:<offset>:<length>"
+                    let length_str = motion_info
+                        .video_length
+                        .map(|l| l.to_string())
+                        .unwrap_or_default();
+                    content_id = Some(format!(
+                        "motion:{}:{}",
+                        motion_info.video_offset, length_str
+                    ));
+                    live_photo_type = 3; // Google Motion Photo
+                }
+            }
+
+            // HEIC container-internal video (item or sequence) when not already
+            // classified as Apple Live (paired MOV) or Motion Photo.
+            #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
+            if content_id.is_none() && t_image::is_heic_path(file_path) {
+                let heic_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::t_heif::detect_heic_embedded_video(file_path)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!(
+                        "HEIC embedded-video detect panicked for {}; continuing",
+                        file_path
+                    );
+                    None
+                });
+                if let Some(info) = heic_info {
+                    content_id = Some(info.content_id_marker());
+                    live_photo_type = 4; // HEIC-internal video
+                }
+            }
         } else if file_type == 2 {
             taken_date = e_date_time
                 .as_ref()
@@ -1271,6 +1358,10 @@ impl AFile {
             geo_admin1,
             geo_admin2,
             geo_cc,
+
+            content_id,
+            paired_file_id: None,
+            live_photo_type: Some(live_photo_type),
 
             file_path: None,
             album_id: None,
@@ -1540,9 +1631,10 @@ impl AFile {
                 is_favorite, rating, rotate, comments, has_tags,
                 e_make, e_model, e_date_time, e_software, e_artist, e_copyright, e_description, e_lens_make, e_lens_model, e_exposure_bias, e_exposure_time, e_f_number, e_focal_length, e_iso_speed, e_flash, e_orientation,
                 gps_latitude, gps_longitude, gps_altitude, geo_name, geo_admin1, geo_admin2, geo_cc,
+                content_id, paired_file_id, live_photo_type,
                 last_scan_time
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45)",
             params![
                 self.folder_id,
 
@@ -1591,6 +1683,9 @@ impl AFile {
                 self.geo_admin1,
                 self.geo_admin2,
                 self.geo_cc,
+                self.content_id,
+                self.paired_file_id,
+                self.live_photo_type,
                 self.last_scan_time,
             ]
         ).map_err(|e| e.to_string())?;
@@ -1608,8 +1703,9 @@ impl AFile {
                 rating = ?13,
                 e_make = ?14, e_model = ?15, e_date_time = ?16, e_software = ?17, e_artist = ?18, e_copyright = ?19, e_description = ?20, e_lens_make = ?21, e_lens_model = ?22, e_exposure_bias = ?23, e_exposure_time = ?24, e_f_number = ?25, e_focal_length = ?26, e_iso_speed = ?27, e_flash = ?28, e_orientation = ?29,
                 gps_latitude = ?30, gps_longitude = ?31, gps_altitude = ?32, geo_name = ?33, geo_admin1 = ?34, geo_admin2 = ?35, geo_cc = ?36,
-                last_scan_time = ?37
-            WHERE id = ?38",
+                content_id = ?37, paired_file_id = ?38, live_photo_type = ?39,
+                last_scan_time = ?40
+            WHERE id = ?41",
             params![
                 file.name,
                 file.name_pinyin,
@@ -1651,6 +1747,9 @@ impl AFile {
                 file.geo_admin1,
                 file.geo_admin2,
                 file.geo_cc,
+                file.content_id,
+                file.paired_file_id,
+                file.live_photo_type,
                 file.last_scan_time,
                 file_id,
             ]
@@ -1780,7 +1879,8 @@ impl AFile {
                 (SELECT 1 FROM athumbs t WHERE t.file_id = a.id LIMIT 1) AS has_thumbnail,
                 CASE WHEN a.embeds IS NOT NULL THEN 1 ELSE 0 END AS has_embedding,
                 a.has_faces,
-                a.last_scan_time
+                a.last_scan_time,
+                a.content_id, a.paired_file_id, a.live_photo_type
             FROM afiles a 
             LEFT JOIN afolders b ON a.folder_id = b.id
             LEFT JOIN albums c ON b.album_id = c.id"
@@ -1839,16 +1939,23 @@ impl AFile {
             geo_admin2: row.get(40)?,
             geo_cc: row.get(41)?,
 
-            file_path: Some(t_utils::get_file_path(
-                row.get::<_, String>(42)?.as_str(),
-                row.get::<_, String>(2)?.as_str(),
-            )),
+            // Folder path may be NULL if the folder row was removed / orphaned.
+            // Fall back to empty path so one bad join does not drop the whole list.
+            file_path: {
+                let folder_path = row.get::<_, Option<String>>(42)?.unwrap_or_default();
+                let name = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+                Some(t_utils::get_file_path(folder_path.as_str(), name.as_str()))
+            },
             album_id: row.get(43)?,
             album_name: row.get(44)?,
             has_thumbnail: row.get::<_, Option<i64>>(45)?.map(|v| v == 1),
             has_embedding: row.get::<_, Option<i64>>(46)?.map(|v| v == 1),
             has_faces: row.get::<_, Option<i32>>(47)?,
             last_scan_time: row.get(48)?,
+
+            content_id: row.get(49).unwrap_or(None),
+            paired_file_id: row.get(50).unwrap_or(None),
+            live_photo_type: row.get(51).unwrap_or(Some(0)),
         })
     }
 
@@ -1875,15 +1982,48 @@ impl AFile {
     fn query_files(sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
 
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(sql).map_err(|e| {
+            // Common failure after Live Photo schema change: query selects
+            // content_id/paired_file_id/live_photo_type but migration did not
+            // run. Surface a clear message instead of a raw SQLite error.
+            let msg = e.to_string();
+            if msg.contains("content_id")
+                || msg.contains("paired_file_id")
+                || msg.contains("live_photo_type")
+            {
+                format!(
+                    "Database schema is missing Live Photo columns ({}). \
+                     Restart the app to migrate, or re-open the library.",
+                    msg
+                )
+            } else {
+                msg
+            }
+        })?;
 
         let rows = stmt
             .query_map(params, Self::from_row)
             .map_err(|e| e.to_string())?;
 
         let mut files = Vec::new();
+        let mut row_errors = 0usize;
         for file in rows {
-            files.push(file.map_err(|e| e.to_string())?);
+            match file {
+                Ok(f) => files.push(f),
+                Err(e) => {
+                    row_errors += 1;
+                    if row_errors <= 5 {
+                        eprintln!("Skipping unreadable afiles row: {}", e);
+                    }
+                }
+            }
+        }
+        if row_errors > 0 {
+            eprintln!(
+                "query_files: skipped {} unreadable row(s); returning {}",
+                row_errors,
+                files.len()
+            );
         }
 
         Ok(files)
@@ -2161,6 +2301,99 @@ impl AFile {
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    /// Pair Live Photo files by content_id within an album.
+    /// Matches Apple Live Photo images (live_photo_type=1) with their
+    /// companion MOV videos (live_photo_type=2) sharing the same content_id.
+    /// Also pairs by file name stem as a fallback (e.g. IMG_1234.HEIC + IMG_1234.MOV).
+    /// Returns the number of pairs updated.
+    pub fn pair_live_photos(album_id: i64) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        // Ensure columns exist before pairing (covers DBs that skipped migrate).
+        crate::t_migration::ensure_live_photo_columns(&conn)?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let mut updated = 0usize;
+
+        // --- Strategy 1: Pair by Apple ContentIdentifier (content_id) ---
+        // Find images (live_photo_type=1) and videos (live_photo_type=2) with
+        // matching content_id that aren't already paired.
+        let sql = "SELECT a.id, b.id
+            FROM afiles a
+            JOIN afiles b ON a.content_id = b.content_id
+            JOIN afolders fa ON a.folder_id = fa.id
+            JOIN afolders fb ON b.folder_id = fb.id
+            WHERE fa.album_id = ?1 AND fb.album_id = ?1
+              AND a.live_photo_type = 1 AND b.live_photo_type = 2
+              AND a.paired_file_id IS NULL AND b.paired_file_id IS NULL";
+        let mut stmt = tx.prepare(sql).map_err(|e| e.to_string())?;
+        let pairs: Vec<(i64, i64)> = stmt
+            .query_map(params![album_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        for (img_id, vid_id) in &pairs {
+            tx.execute(
+                "UPDATE afiles SET paired_file_id = ?1 WHERE id = ?2 AND paired_file_id IS NULL",
+                params![vid_id, img_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE afiles SET paired_file_id = ?1 WHERE id = ?2 AND paired_file_id IS NULL",
+                params![img_id, vid_id],
+            )
+            .map_err(|e| e.to_string())?;
+            updated += 1;
+        }
+
+        // --- Strategy 2: Pair by file name stem (fallback) ---
+        // For images without content_id that share a file name stem with a
+        // video in the same folder. e.g. IMG_1234.HEIC + IMG_1234.MOV
+        let sql = "SELECT a.id, a.name, b.id, b.name
+            FROM afiles a
+            JOIN afiles b ON a.folder_id = b.folder_id
+            JOIN afolders f ON a.folder_id = f.id
+            WHERE f.album_id = ?1
+              AND a.file_type IN (1, 3) AND b.file_type = 2
+              AND a.paired_file_id IS NULL AND b.paired_file_id IS NULL";
+        let mut stmt = tx.prepare(sql).map_err(|e| e.to_string())?;
+        let candidates: Vec<(i64, String, i64, String)> = stmt
+            .query_map(params![album_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        for (img_id, img_name, vid_id, vid_name) in &candidates {
+            // Compare file name stems (without extension)
+            let img_stem = Path::new(img_name).file_stem().and_then(|s| s.to_str());
+            let vid_stem = Path::new(vid_name).file_stem().and_then(|s| s.to_str());
+            if img_stem.is_none() || vid_stem.is_none() || img_stem != vid_stem {
+                continue;
+            }
+            // Mark as Apple Live Photo type if not already typed
+            tx.execute(
+                "UPDATE afiles SET paired_file_id = ?1, live_photo_type = CASE WHEN live_photo_type > 0 THEN live_photo_type ELSE 1 END
+                 WHERE id = ?2 AND paired_file_id IS NULL",
+                params![vid_id, img_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE afiles SET paired_file_id = ?1, live_photo_type = CASE WHEN live_photo_type > 0 THEN live_photo_type ELSE 2 END
+                 WHERE id = ?2 AND paired_file_id IS NULL",
+                params![img_id, vid_id],
+            )
+            .map_err(|e| e.to_string())?;
+            updated += 1;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
     }
 
     /// Get a file's has_tags status
@@ -5132,6 +5365,11 @@ fn create_conn() -> Result<(String, Connection), String> {
     let conn = Connection::open(&path)
         .map_err(|e| format!("Failed to open database connection: {}", e))?;
     setup_conn(&conn)?;
+    // Cheap idempotent repair for Live Photo columns so file queries never
+    // select missing columns on an older library DB opened without create_db().
+    if let Err(e) = crate::t_migration::ensure_live_photo_columns(&conn) {
+        eprintln!("ensure_live_photo_columns on open: {}", e);
+    }
     Ok((path, conn))
 }
 
@@ -5139,6 +5377,9 @@ fn create_conn_for_path(path: String) -> Result<(String, Connection), String> {
     let conn = Connection::open(&path)
         .map_err(|e| format!("Failed to open database connection: {}", e))?;
     setup_conn(&conn)?;
+    if let Err(e) = crate::t_migration::ensure_live_photo_columns(&conn) {
+        eprintln!("ensure_live_photo_columns on open: {}", e);
+    }
     Ok((path, conn))
 }
 
@@ -5313,6 +5554,9 @@ fn create_db_internal() -> Result<(), String> {
             geo_cc TEXT,
             embeds BLOB,
             last_scan_time INTEGER DEFAULT 0,
+            content_id TEXT,
+            paired_file_id INTEGER,
+            live_photo_type INTEGER DEFAULT 0,
             FOREIGN KEY (folder_id) REFERENCES afolders(id) ON DELETE CASCADE
         )",
         [],
@@ -5410,6 +5654,21 @@ fn create_db_internal() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_afiles_geo_cc ON afiles(geo_cc)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_content_id ON afiles(content_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_paired_file_id ON afiles(paired_file_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_live_photo_type ON afiles(live_photo_type)",
         [],
     )
     .map_err(|e| e.to_string())?;

@@ -231,8 +231,8 @@ pub fn add_album(app_handle: tauri::AppHandle, folder_path: &str) -> Result<Albu
 /// edit an album
 #[tauri::command]
 pub fn edit_album(id: i64, name: &str, description: &str) -> Result<usize, String> {
-    let _ = Album::update_column(id, "name", &name)
-        .map_err(|e| format!("Error while editing album with id {}: {}", id, e));
+    Album::update_column(id, "name", &name)
+        .map_err(|e| format!("Error while editing album with id {}: {}", id, e))?;
 
     Album::update_column(id, "description", &description)
         .map_err(|e| format!("Error while editing album with id {}: {}", id, e))
@@ -361,18 +361,24 @@ pub fn create_folder(path: &str, folder_name: &str) -> Option<String> {
 /// rename a folder
 #[tauri::command]
 pub fn rename_folder(folder_path: &str, new_folder_name: &str) -> Option<String> {
-    let new_folder_path = t_utils::rename_folder(folder_path, new_folder_name);
+    let Some(new_path) = t_utils::rename_folder(folder_path, new_folder_name) else {
+        return None;
+    };
 
-    match new_folder_path {
-        Some(new_path) => {
-            if let Err(e) = Album::rename_root_folder(folder_path, &new_path) {
-                eprintln!("Error while renaming root folder in DB: {}", e);
-                return None;
+    if let Err(e) = Album::rename_root_folder(folder_path, &new_path) {
+        eprintln!("Error while renaming root folder in DB: {}", e);
+        // Keep disk and DB aligned when the DB update fails.
+        if let Some(old_name) = Path::new(folder_path).file_name().and_then(|n| n.to_str()) {
+            if t_utils::rename_folder(&new_path, old_name).is_none() {
+                eprintln!(
+                    "Critical: DB folder rename failed and disk rollback also failed (new_path={}, old_path={})",
+                    new_path, folder_path
+                );
             }
-            Some(new_path)
         }
-        None => None,
+        return None;
     }
+    Some(new_path)
 }
 
 /// move a folder
@@ -639,23 +645,57 @@ pub async fn copy_images(
 /// rename a file
 #[tauri::command]
 pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<String> {
-    match t_utils::rename_file(file_path, new_name) {
-        Some(new_file_path) => {
-            let name_pinyin = t_utils::natural_sort_key(&new_name.to_lowercase());
-            if let Err(e) = AFile::update_column(file_id, "name_pinyin", &name_pinyin) {
-                eprintln!("Error while renaming file in DB: {}", e);
-                return None;
-            }
+    let Some(new_file_path) = t_utils::rename_file(file_path, new_name) else {
+        return None;
+    };
 
-            match AFile::update_column(file_id, "name", &new_name) {
-                Ok(_) => Some(new_file_path),
-                Err(e) => {
-                    eprintln!("Error while renaming file in DB: {}", e);
-                    None
+    let old_name = Path::new(file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+
+    // Keep disk and DB aligned: if any DB write fails, rename the file back.
+    let rollback_disk = |new_path: &str| {
+        if let Some(ref old_name) = old_name {
+            if t_utils::rename_file(new_path, old_name).is_none() {
+                eprintln!(
+                    "Critical: DB rename failed and disk rollback also failed (new_path={}, old_path={})",
+                    new_path, file_path
+                );
+            }
+        } else {
+            eprintln!(
+                "Critical: DB rename failed and cannot rollback disk (missing old name for {})",
+                file_path
+            );
+        }
+    };
+
+    let name_pinyin = t_utils::natural_sort_key(&new_name.to_lowercase());
+    if let Err(e) = AFile::update_column(file_id, "name_pinyin", &name_pinyin) {
+        eprintln!("Error while renaming file in DB: {}", e);
+        rollback_disk(&new_file_path);
+        return None;
+    }
+
+    match AFile::update_column(file_id, "name", &new_name) {
+        Ok(_) => Some(new_file_path),
+        Err(e) => {
+            eprintln!("Error while renaming file in DB: {}", e);
+            // Best-effort restore of name_pinyin so partial DB state is not left behind.
+            if let Some(ref old_name) = old_name {
+                let old_pinyin = t_utils::natural_sort_key(&old_name.to_lowercase());
+                if let Err(restore_err) = AFile::update_column(file_id, "name_pinyin", &old_pinyin)
+                {
+                    eprintln!(
+                        "Error while restoring name_pinyin after failed rename: {}",
+                        restore_err
+                    );
                 }
             }
+            rollback_disk(&new_file_path);
+            None
         }
-        None => None,
     }
 }
 
@@ -1917,3 +1957,171 @@ pub fn restore_databases(
 ) -> Result<t_storage::RestoreResult, String> {
     t_storage::restore_databases(&backup_path, &selections)
 }
+
+// --- Live Photo / Motion Photo commands ---
+
+/// Information about a paired video for Live Photo preview.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PairedVideoInfo {
+    /// File path of the paired video (for Apple Live Photo) or the source
+    /// image (for Motion Photo, where video is embedded).
+    pub file_path: String,
+    /// File ID of the paired file (if applicable).
+    pub file_id: Option<i64>,
+    /// Live photo type for the *still* being previewed:
+    /// 1=Apple Live Photo still (pair is a separate MOV), 3=Google Motion Photo,
+    /// 4=HEIC-internal video. Type 2 (Apple companion MOV) is not returned here
+    /// because the viewer treats it as a normal video (`file_type === 2`).
+    pub live_photo_type: i64,
+    /// For Motion Photo: embedded video offset in the file.
+    pub motion_video_offset: Option<u64>,
+    /// For Motion Photo: embedded video length (if known).
+    pub motion_video_length: Option<u64>,
+}
+
+/// Get the paired video info for a Live Photo / Motion Photo file.
+#[tauri::command]
+pub fn get_paired_video(file_id: i64) -> Result<Option<PairedVideoInfo>, String> {
+    let file = AFile::get_file_info(file_id)
+        .map_err(|e| format!("Error while getting file info: {}", e))?
+        .ok_or_else(|| format!("File not found: {}", file_id))?;
+
+    let live_photo_type = file.live_photo_type.unwrap_or(0);
+    if live_photo_type == 0 {
+        return Ok(None);
+    }
+
+    // Apple Live Photo (type 1): look up paired_file_id to get the MOV path
+    if live_photo_type == 1 {
+        if let Some(paired_id) = file.paired_file_id {
+            let paired = AFile::get_file_info(paired_id)
+                .map_err(|e| format!("Error while getting paired file info: {}", e))?;
+            if let Some(p) = paired {
+                let path = p.file_path.unwrap_or_default();
+                if !path.is_empty() {
+                    return Ok(Some(PairedVideoInfo {
+                        file_path: path,
+                        file_id: Some(paired_id),
+                        live_photo_type,
+                        motion_video_offset: None,
+                        motion_video_length: None,
+                    }));
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    // Google Motion Photo (type 3): content_id encodes "motion:<offset>:<length>"
+    if live_photo_type == 3 {
+        if let Some(content_id) = &file.content_id {
+            if let Some(info) = crate::t_xmp::parse_motion_content_id(content_id) {
+                let path = file.file_path.unwrap_or_default();
+                if !path.is_empty() {
+                    return Ok(Some(PairedVideoInfo {
+                        file_path: path,
+                        file_id: None,
+                        live_photo_type,
+                        motion_video_offset: Some(info.video_offset),
+                        motion_video_length: info.video_length,
+                    }));
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    // HEIC-internal video (type 4): still is the HEIC itself; video is extracted on demand.
+    if live_photo_type == 4 {
+        let path = file.file_path.unwrap_or_default();
+        if path.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(PairedVideoInfo {
+            file_path: path,
+            file_id: None,
+            live_photo_type,
+            motion_video_offset: None,
+            motion_video_length: None,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Extract embedded motion video (Motion Photo type 3 or HEIC-internal type 4)
+/// into app motion_cache.
+#[tauri::command]
+pub fn extract_motion_video(app_handle: AppHandle, file_id: i64) -> Result<Option<String>, String> {
+    let file = AFile::get_file_info(file_id)
+        .map_err(|e| format!("Error while getting file info: {}", e))?
+        .ok_or_else(|| format!("File not found: {}", file_id))?;
+
+    let live_photo_type = file.live_photo_type.unwrap_or(0);
+    let file_path = file
+        .file_path
+        .ok_or_else(|| "File path not available".to_string())?;
+    let cache_dir = crate::t_xmp::motion_cache_dir(&app_handle)?;
+
+    if live_photo_type == 3 {
+        let content_id = file
+            .content_id
+            .as_ref()
+            .ok_or_else(|| "Motion Photo has no content_id".to_string())?;
+
+        let info = crate::t_xmp::parse_motion_content_id(content_id)
+            .ok_or_else(|| "Invalid Motion Photo content_id".to_string())?;
+
+        let cache_path =
+            crate::t_xmp::extract_motion_video_to_cache(&file_path, &info, &cache_dir)
+                .map_err(|e| format!("Failed to extract Motion Photo video: {}", e))?;
+        return Ok(Some(cache_path));
+    }
+
+    if live_photo_type == 4 {
+        #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
+        {
+            let cache_path =
+                crate::t_heif::extract_heic_embedded_video_to_cache(&file_path, &cache_dir)
+                    .map_err(|e| format!("Failed to extract HEIC embedded video: {}", e))?;
+            return Ok(Some(cache_path));
+        }
+        #[cfg(not(all(not(target_os = "macos"), lap_has_libheif)))]
+        {
+            return Err(
+                "HEIC embedded video extraction requires libheif (Windows/Linux builds)".to_string(),
+            );
+        }
+    }
+
+    Ok(None)
+}
+
+/// Rebuild Live Photo / Motion Photo pairings for an album.
+#[tauri::command]
+pub fn rebuild_live_photo_pairs(album_id: i64) -> Result<(usize,), String> {
+    let paired = AFile::pair_live_photos(album_id)
+        .map_err(|e| format!("Error while rebuilding Live Photo pairs: {}", e))?;
+    Ok((paired,))
+}
+
+/// Export a Live Photo / Motion Photo (still, video, or pair).
+#[tauri::command]
+pub fn export_live_photo(
+    app_handle: AppHandle,
+    file_id: i64,
+    mode: String,
+    dest_path: Option<String>,
+    dest_dir: Option<String>,
+    options: Option<crate::t_live_photo::ExportLivePhotoOptions>,
+) -> Result<crate::t_live_photo::ExportLivePhotoResult, String> {
+    crate::t_live_photo::export_live_photo(
+        &app_handle,
+        file_id,
+        &mode,
+        dest_path.as_deref(),
+        dest_dir.as_deref(),
+        options.unwrap_or_default(),
+    )
+}
+
