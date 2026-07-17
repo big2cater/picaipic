@@ -224,7 +224,9 @@ import {
 import { getAlbumQueueIndex, getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { getAllAlbums, setDisplayOrder, addAlbum, editAlbum, removeAlbum, 
          fetchFolder, expandFinalFolder, getFileThumbById,
-         getAlbum, hasImportableClipboard, isDirectoryAccessible, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished } from '@/common/api';
+         getAlbum, hasImportableClipboard, isDirectoryAccessible, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished,
+         rescanLivePhotoMetadata } from '@/common/api';
+import { useToast } from '@/common/toast';
 import { DEFAULT_PLATFORM, getShortcutLabel } from '@/common/shortcuts';
 import { Album, Folder } from '@/common/types';
 import { useAlbumSelectionProvider, SelectionSource } from '@/composables/useAlbumSelection';
@@ -258,6 +260,7 @@ const props = withDefaults(defineProps<{
 
 /// i18n
 const { t, locale, messages } = useI18n();
+const toast = useToast();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
@@ -395,6 +398,12 @@ const getMoreMenuItems = async (album: any) => {
       icon: isAlbumQueued(album.id) ? IconUpdateOff : IconUpdate,
       disabled: !isAccessible && !isAlbumQueued(album.id),
       action: () => toggleIndexAlbum(album.id)
+    },
+    {
+      label: t('live_photo.rescan_menu'),
+      icon: IconUpdate,
+      disabled: !isAccessible,
+      action: () => void rescanAlbumLivePhotos(album.id)
     },
     {
       label: "-",   // separator
@@ -673,6 +682,23 @@ const toggleIndexAlbum = async (albumId: number) => {
     await clickIndexAlbum(albumId);
   }
 }
+
+/// Lightweight Live Photo / Motion Photo / HEIC-internal metadata repair.
+const rescanAlbumLivePhotos = async (albumId: number) => {
+  try {
+    const result = await rescanLivePhotoMetadata(albumId);
+    toast.success(
+      t('live_photo.rescan_success', {
+        updated: result?.updated ?? 0,
+        paired: result?.paired ?? 0,
+      })
+    );
+    // Nudge Content to reload files if this album is currently open.
+    tauriEmit('album-updated', { albumId });
+  } catch (error: any) {
+    toast.error(error?.message || error?.toString?.() || t('live_photo.rescan_failed'));
+  }
+};
 
 /// Cancel indexing for an album
 const clickCancelIndexAlbum = async (albumId: number) => {

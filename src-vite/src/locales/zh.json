@@ -746,12 +746,21 @@
     "export_to_motion_need_apple": "转为 Motion Photo 需要已配对视频的 Apple Live Photo。",
     "export_to_pair_need_motion": "拆成双文件需要 Google Motion Photo。",
     "keyframe_sec": "时间（秒）",
+    "overwrite_original": "覆盖图库中的原静图",
+    "overwrite_original_hint": "会破坏性地覆盖 JPEG 静图（Motion Photo 会保留视频 trailer）。操作前会再次确认。",
+    "overwrite_original_heic": "HEIC 静图不支持原地覆盖——请改为导出新的 JPEG 关键帧。",
+    "overwrite_confirm": "确定用关键帧覆盖磁盘上的原静图？此操作无法通过废纸篓撤销，也可能使外部软件中的旧缓存失效。",
+    "overwrite_success": "已覆盖原静图：{path}",
     "export_replace": "覆盖目标位置的同名文件",
     "export_action": "导出",
     "exporting": "正在导出...",
     "export_choose_folder": "选择导出文件夹",
     "export_success": "已导出 {count} 个文件：{path}",
-    "export_failed": "Live Photo 导出失败"
+    "export_failed": "Live Photo 导出失败",
+    "rescan_menu": "修复 Live Photo 元数据",
+    "rescan_success": "已更新 {updated} 个文件，配对 {paired} 组",
+    "rescan_failed": "Live Photo 元数据修复失败",
+    "export_button": "导出…"
   },
   "file_info": {
     "title": "信息",

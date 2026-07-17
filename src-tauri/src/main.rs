@@ -403,6 +403,7 @@ async fn main() {
             t_cmds::extract_motion_video,
             t_cmds::rebuild_live_photo_pairs,
             t_cmds::export_live_photo,
+            t_cmds::rescan_live_photo_metadata,
         ])
         .build(tauri::generate_context!());
 

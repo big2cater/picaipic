@@ -746,12 +746,21 @@
     "export_to_motion_need_apple": "Convert to Motion Photo requires an Apple Live Photo with a paired video.",
     "export_to_pair_need_motion": "Convert to pair requires a Google Motion Photo.",
     "keyframe_sec": "Time (seconds)",
+    "overwrite_original": "Replace original still in library",
+    "overwrite_original_hint": "Destructively overwrites the JPEG still (Motion Photo keeps its video trailer). Confirm before proceeding.",
+    "overwrite_original_heic": "Not available for HEIC stills — export a new JPEG keyframe instead.",
+    "overwrite_confirm": "Replace the original still image on disk? This cannot be undone from the trash and may break external apps that cached the old file.",
+    "overwrite_success": "Replaced original still: {path}",
     "export_replace": "Replace existing files at the destination",
     "export_action": "Export",
     "exporting": "Exporting...",
     "export_choose_folder": "Choose export folder",
     "export_success": "Exported {count} file(s): {path}",
-    "export_failed": "Live Photo export failed"
+    "export_failed": "Live Photo export failed",
+    "rescan_menu": "Repair Live Photo metadata",
+    "rescan_success": "Updated {updated} file(s), paired {paired}",
+    "rescan_failed": "Live Photo metadata repair failed",
+    "export_button": "Export…"
   },
   "file_info": {
     "title": "Information",

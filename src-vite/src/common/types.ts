@@ -120,10 +120,18 @@ export interface ExportLivePhotoOptions {
     stillFormat?: string | null;
     keyframeSec?: number | null;
     stampContentId?: boolean | null;
+    overwriteOriginal?: boolean | null;
 }
 
 /** Result of `exportLivePhoto`. */
 export interface ExportLivePhotoResult {
     outputs: string[];
-    content_id?: string | null;
+    contentId?: string | null;
+    overwroteOriginal?: boolean;
+}
+
+/** Result of `rescanLivePhotoMetadata`. */
+export interface RescanLivePhotoResult {
+    updated: number;
+    paired: number;
 }

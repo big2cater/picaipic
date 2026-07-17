@@ -8,11 +8,13 @@
  * - to_motion: convert Apple Live pair → single Google Motion Photo JPEG
  * - to_pair: convert Motion Photo → still JPEG + video (same stem)
  * - set_keyframe: export a still JPEG from the motion video at keyframe_sec
+ *   (optional overwrite_original replaces the library still with confirmation from UI)
  */
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
@@ -34,6 +36,9 @@ pub struct ExportLivePhotoOptions {
     pub keyframe_sec: Option<f64>,
     /// When true (default), stamp a shared ContentIdentifier on to_pair outputs.
     pub stamp_content_id: Option<bool>,
+    /// When true with set_keyframe: replace the library still in-place (destructive).
+    /// UI must confirm before setting this. Default false.
+    pub overwrite_original: Option<bool>,
 }
 
 fn default_conflict() -> String {
@@ -48,6 +53,7 @@ impl Default for ExportLivePhotoOptions {
             still_format: None,
             keyframe_sec: None,
             stamp_content_id: Some(true),
+            overwrite_original: Some(false),
         }
     }
 }
@@ -57,6 +63,15 @@ impl Default for ExportLivePhotoOptions {
 pub struct ExportLivePhotoResult {
     pub outputs: Vec<String>,
     pub content_id: Option<String>,
+    /// True when set_keyframe replaced the library original still.
+    pub overwrote_original: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescanLivePhotoResult {
+    pub updated: usize,
+    pub paired: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +104,7 @@ pub fn export_live_photo(
             Ok(ExportLivePhotoResult {
                 outputs: vec![out],
                 content_id: sources.content_id,
+                overwrote_original: false,
             })
         }
         "video" => {
@@ -99,6 +115,7 @@ pub fn export_live_photo(
             Ok(ExportLivePhotoResult {
                 outputs: vec![out],
                 content_id: sources.content_id,
+                overwrote_original: false,
             })
         }
         "pair" => {
@@ -109,6 +126,7 @@ pub fn export_live_photo(
             Ok(ExportLivePhotoResult {
                 outputs: outs,
                 content_id: sources.content_id,
+                overwrote_original: false,
             })
         }
         "to_motion" => {
@@ -119,6 +137,7 @@ pub fn export_live_photo(
             Ok(ExportLivePhotoResult {
                 outputs: vec![out],
                 content_id: sources.content_id,
+                overwrote_original: false,
             })
         }
         "to_pair" => {
@@ -129,20 +148,169 @@ pub fn export_live_photo(
             Ok(ExportLivePhotoResult {
                 outputs: outs,
                 content_id,
+                overwrote_original: false,
             })
         }
         "set_keyframe" => {
-            let dest = dest_path
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "dest_path is required for set_keyframe export".to_string())?;
-            let out = export_set_keyframe(app, &sources, dest, &options, policy)?;
-            Ok(ExportLivePhotoResult {
-                outputs: vec![out],
-                content_id: sources.content_id,
-            })
+            let overwrite = options.overwrite_original.unwrap_or(false);
+            if overwrite {
+                let out = overwrite_still_with_keyframe(app, &sources, &options)?;
+                Ok(ExportLivePhotoResult {
+                    outputs: vec![out],
+                    content_id: sources.content_id,
+                    overwrote_original: true,
+                })
+            } else {
+                let dest = dest_path
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "dest_path is required for set_keyframe export".to_string())?;
+                let out = export_set_keyframe(app, &sources, dest, &options, policy)?;
+                Ok(ExportLivePhotoResult {
+                    outputs: vec![out],
+                    content_id: sources.content_id,
+                    overwrote_original: false,
+                })
+            }
         }
         other => Err(format!("Unsupported export mode: {}", other)),
     }
+}
+
+/// Lightweight Live Photo metadata repair for an already-indexed album.
+///
+/// Re-detects Motion Photo / HEIC-internal video for candidates that are still
+/// untyped (`live_photo_type=0`) or already HEIC-internal (`=4`), then re-runs pairing.
+/// Does not re-read full EXIF for every file.
+pub fn rescan_live_photo_metadata(album_id: i64) -> Result<RescanLivePhotoResult, String> {
+    let conn = crate::t_sqlite::open_conn()?;
+    crate::t_migration::ensure_live_photo_columns(&conn)?;
+
+    let sql = "SELECT a.id, a.name, b.path, a.file_type, a.live_photo_type, a.content_id
+               FROM afiles a
+               JOIN afolders b ON a.folder_id = b.id
+               WHERE b.album_id = ?1
+                 AND a.file_type IN (1, 2, 3)
+                 AND COALESCE(a.live_photo_type, 0) IN (0, 4)";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![album_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut updated = 0usize;
+    for row in rows {
+        let (id, name, folder_path, file_type, live_type, old_content_id) =
+            row.map_err(|e| e.to_string())?;
+        let file_path = crate::t_utils::get_file_path(&folder_path, &name);
+        if !Path::new(&file_path).exists() {
+            continue;
+        }
+
+        let mut new_type = live_type;
+        let mut new_content_id = old_content_id.clone();
+
+        if file_type == 1 || file_type == 3 {
+            // Prefer not to clobber an existing Apple UUID content_id on type 0
+            // unless we find a stronger HEIC/Motion marker.
+            let is_heic = crate::t_image::is_heic_path(&file_path);
+            let looks_jpeg = Path::new(&file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "jpe"))
+                .unwrap_or(false);
+
+            // HEIC-internal video
+            #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
+            if is_heic && (live_type == 0 || live_type == 4) {
+                if let Some(info) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::t_heif::detect_heic_embedded_video(&file_path)
+                }))
+                .ok()
+                .flatten()
+                {
+                    new_type = 4;
+                    new_content_id = Some(info.content_id_marker());
+                } else if live_type == 4 {
+                    // Lost detection: clear type 4 back to none so UI is honest.
+                    new_type = 0;
+                    new_content_id = None;
+                }
+            }
+
+            // Motion Photo (JPEG primarily; also HEIC XMP scan)
+            if new_type == 0 && (looks_jpeg || is_heic) {
+                if let Some(motion) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    t_xmp::detect_motion_photo(&file_path)
+                }))
+                .ok()
+                .flatten()
+                {
+                    let length_str = motion
+                        .video_length
+                        .map(|l| l.to_string())
+                        .unwrap_or_default();
+                    new_type = 3;
+                    new_content_id = Some(format!("motion:{}:{}", motion.video_offset, length_str));
+                }
+            }
+
+            // Apple ContentIdentifier on still (only when still untyped)
+            if new_type == 0 {
+                if let Some(cid) = read_image_content_identifier(&file_path) {
+                    new_type = 1;
+                    new_content_id = Some(cid);
+                }
+            }
+        } else if file_type == 2 && live_type == 0 {
+            // Apple Live Photo video content id via ffprobe
+            if let Ok(meta) = t_video::get_video_metadata(&file_path) {
+                if let Some(cid) = meta.content_id.filter(|s| !s.is_empty()) {
+                    new_type = 2;
+                    new_content_id = Some(cid);
+                }
+            }
+        }
+
+        if new_type != live_type || new_content_id != old_content_id {
+            AFile::update_column(id, "live_photo_type", &new_type)
+                .map_err(|e| format!("Failed updating live_photo_type for {}: {}", id, e))?;
+            AFile::update_column(id, "content_id", &new_content_id)
+                .map_err(|e| format!("Failed updating content_id for {}: {}", id, e))?;
+            // Clear stale pairing when type/content changed; pair pass will relink.
+            AFile::update_column(id, "paired_file_id", &None::<i64>).ok();
+            updated += 1;
+        }
+    }
+
+    let paired = AFile::pair_live_photos(album_id).unwrap_or(0);
+    Ok(RescanLivePhotoResult { updated, paired })
+}
+
+fn read_image_content_identifier(file_path: &str) -> Option<String> {
+    use exif::{In, Tag};
+    let exif = crate::t_image::read_exif_permissive(file_path)?;
+    exif.get_field(Tag(exif::Context::Tiff, 0x0011), In::PRIMARY)
+        .and_then(|field| {
+            field
+                .value
+                .display_as(field.tag)
+                .to_string()
+                .strip_suffix('\0')
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    let s = field.value.display_as(field.tag).to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
+        })
+        .filter(|s| !s.is_empty())
 }
 
 fn resolve_live_sources(app: &AppHandle, file_id: i64) -> Result<LiveSources, String> {
@@ -493,6 +661,97 @@ fn export_set_keyframe(
         format!("Failed to finalize keyframe export: {}", e)
     })?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Replace the library still with a keyframe extracted from the motion video.
+///
+/// Supported:
+/// - Apple Live image that is already JPEG
+/// - Google Motion Photo JPEG (repackages still + existing trailer video)
+///
+/// Not supported (clear error): HEIC stills / type 4 HEIC-internal (would require
+/// rewriting a HEIC container). Export-only keyframe remains available.
+fn overwrite_still_with_keyframe(
+    app: &AppHandle,
+    sources: &LiveSources,
+    options: &ExportLivePhotoOptions,
+) -> Result<String, String> {
+    let still = sources
+        .still_path
+        .as_ref()
+        .ok_or_else(|| "No still image available to overwrite".to_string())?;
+    let still_path = Path::new(still);
+    if !still_path.exists() {
+        return Err(format!("Still file does not exist: {}", still));
+    }
+
+    let ext = still_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_jpeg = matches!(ext.as_str(), "jpg" | "jpeg" | "jpe");
+
+    if sources.live_photo_type == 4 || (!is_jpeg && crate::t_image::is_heic_path(still)) {
+        return Err(
+            "Cannot overwrite HEIC still with a keyframe JPEG. Export the keyframe as a new file instead."
+                .to_string(),
+        );
+    }
+    if !is_jpeg {
+        return Err(format!(
+            "Cannot overwrite still with extension '.{}'. Only JPEG stills are supported for in-place keyframe replace.",
+            ext
+        ));
+    }
+
+    let video_src = resolve_video_source_path(app, sources)?;
+    let sec = options.keyframe_sec.unwrap_or(0.0);
+    let parent = still_path.parent().unwrap_or_else(|| Path::new("."));
+    let keyframe_tmp = parent.join(format!(".lap-keyframe-src-{}.jpg", uuid::Uuid::new_v4()));
+    t_video::extract_keyframe_jpeg(&video_src, sec, keyframe_tmp.to_string_lossy().as_ref())?;
+    let keyframe_bytes =
+        fs::read(&keyframe_tmp).map_err(|e| format!("Failed to read keyframe: {}", e))?;
+    if keyframe_bytes.len() < 128 {
+        let _ = fs::remove_file(&keyframe_tmp);
+        return Err("Keyframe extract produced empty image".to_string());
+    }
+
+    let final_bytes = if let Some(motion) = &sources.motion {
+        // Motion Photo: keep embedded video trailer, replace still portion only.
+        let cache_dir = t_xmp::motion_cache_dir(app)?;
+        let extracted =
+            t_xmp::extract_motion_video_to_cache(still, motion, &cache_dir)?;
+        let video_bytes =
+            fs::read(&extracted).map_err(|e| format!("Failed to read motion video: {}", e))?;
+        t_xmp::package_motion_photo_jpeg(&keyframe_bytes, &video_bytes)?
+    } else {
+        keyframe_bytes
+    };
+
+    // Staged promote next to original (same-volume rename).
+    let staged = parent.join(format!(".lap-keyframe-overwrite-{}", uuid::Uuid::new_v4()));
+    fs::write(&staged, &final_bytes)
+        .map_err(|e| format!("Failed to stage keyframe overwrite: {}", e))?;
+
+    // Backup original briefly for rollback on rename failure.
+    let backup = parent.join(format!(".lap-keyframe-backup-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = fs::rename(still_path, &backup) {
+        let _ = fs::remove_file(&staged);
+        let _ = fs::remove_file(&keyframe_tmp);
+        return Err(format!("Failed to move original still aside: {}", e));
+    }
+    if let Err(e) = fs::rename(&staged, still_path) {
+        // Roll back original
+        let _ = fs::rename(&backup, still_path);
+        let _ = fs::remove_file(&staged);
+        let _ = fs::remove_file(&keyframe_tmp);
+        return Err(format!("Failed to promote keyframe still: {}", e));
+    }
+    let _ = fs::remove_file(&backup);
+    let _ = fs::remove_file(&keyframe_tmp);
+
+    Ok(still.to_string())
 }
 
 fn resolve_video_source_path(app: &AppHandle, sources: &LiveSources) -> Result<String, String> {

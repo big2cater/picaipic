@@ -203,9 +203,16 @@
             <!-- Live Photo type label -->
             <template v-if="livePhotoLabel">
               <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.type') }}</div>
-              <div class="flex items-center gap-1.5">
-                <span class="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+              <div class="group/field flex items-center gap-1.5 min-w-0">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse shrink-0"></span>
                 <span class="text-[12px] text-base-content/75 font-medium">{{ livePhotoLabel }}</span>
+                <TButton
+                  :icon="IconDownload"
+                  :tooltip="$t('live_photo.export_button')"
+                  :buttonSize="'small'"
+                  class="opacity-0 pointer-events-none transition-opacity duration-200 ease-in-out group-hover/general:opacity-30 group-hover/general:pointer-events-auto group-hover/field:opacity-100! group-hover/field:pointer-events-auto"
+                  @click.stop="emit('exportLivePhoto')"
+                />
               </div>
             </template>
 
@@ -506,6 +513,7 @@ import {
   IconZoomIn,
   IconZoomOut,
   IconExternal,
+  IconDownload,
 } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
@@ -534,6 +542,7 @@ const emit = defineEmits([
   'quickEditComment',
   'navigateFolder',
   'editAlbum',
+  'exportLivePhoto',
 ]);
 
 const toast = useToast();

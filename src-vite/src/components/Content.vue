@@ -443,6 +443,7 @@
             @quick-edit-comment="openCommentEditor"
             @navigate-folder="handleInfoNavigateFolder"
             @edit-album="openAlbumEdit"
+            @export-live-photo="handleItemAction({ action: 'export-live-photo', index: selectedItemIndex })"
           />
         </div>
       </div>
@@ -509,7 +510,7 @@
   <LivePhotoExportDialog
     v-if="showLivePhotoExport && livePhotoExportFile"
     :file="livePhotoExportFile"
-    @done="showLivePhotoExport = false; livePhotoExportFile = null"
+    @done="onLivePhotoExportDone"
     @cancel="showLivePhotoExport = false; livePhotoExportFile = null"
   />
 
@@ -1024,6 +1025,18 @@ const renamingFileName = ref<{name?: string, ext?: string}>({}); // extract the 
 const showMoveTo = ref(false);
 const showLivePhotoExport = ref(false);
 const livePhotoExportFile = ref<any>(null);
+
+async function onLivePhotoExportDone(_outputs: string[]) {
+  const file = livePhotoExportFile.value;
+  showLivePhotoExport.value = false;
+  livePhotoExportFile.value = null;
+  // If the original still was overwritten (or metadata may have shifted),
+  // refresh the current file so thumbnails/preview pick up the new bytes.
+  if (file?.id) {
+    const current = fileList.value.find((f: any) => f.id === file.id) || file;
+    await updateFile(current, false);
+  }
+}
 type FileConflictPolicy = 'skip' | 'keep_both' | 'replace';
 const fileConflictDialog = ref({
   show: false,
