@@ -130,8 +130,9 @@ is under test.
 - [x] Unit test for hardlink preference + real-layout report (`hardlink` or `copy`)
 - [x] Windows host-path staged materialize (library outside store → plugin-cache `inputs/` + report; cross-volume → copy)
 - [x] Windows SA-LUT full start + color-transfer on staged library paths (ROCm GPU; PNG output under task `outputs/`)
+- [x] Windows plugin-host / packaging smoke (2026-07-18): `scripts/check_plugin_host.ps1` + `package_windows.ps1 -CheckOnly` + user-confirmed smoke pass
 - [ ] Manual staged-path check on Linux build (if available)
-- [ ] Optional: same invoke via Tauri GUI / `invoke_ai_plugin_capability` IPC (release shell wiring)
+- [x] Optional: Tauri GUI / `invoke_ai_plugin_capability` IPC / release-shell smoke (user-confirmed pass, 2026-07-18)
 
 Phase 1 (allow-list) and Phase 2 (hardlink mainline) have also landed in code.
 This checklist remains valid for manual staged-path proof. Phase 3 network OS

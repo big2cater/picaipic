@@ -53,7 +53,7 @@ last_updated: 2026-07-18
 - Writable roots allow-list (Phase 1): `plugin_writable_roots` centralizes data/cache/outputs/plugin-runtimes/code + shared runtimes + bound model dirs + task extras; used for staging skip + optional ACL exclusions. Adoption still requires task-output containment only.
 - Windows deny-ACL confinement is opt-in; stale deny ACEs are cleaned best-effort.
 - Sandbox roadmap status: **Phase 0–2 done** (cross-platform staging, fail-closed, diagnostics, `plugin_writable_roots`, same-volume hardlink→copy). **Phase 3 network OS block and Phase 4 Linux Landlock are not implemented** (v1 does not claim them). Roadmap: `docs/ai-plugin-sandbox-roadmap.md`.
-- Phase 0 verification (2026-07-18): automated `input_staging*` + plugin-host script; Windows cross-volume host-path proof; SA-LUT full start+color-transfer on staged album paths (ROCm, PNG output). Checklist: `docs/ai-plugin-sandbox-phase0-verify.md`.
+- Phase 0 verification (2026-07-18): automated `input_staging*` + plugin-host script; Windows cross-volume host-path proof; SA-LUT full start+color-transfer on staged album paths (ROCm, PNG output); user-confirmed GUI/release-shell smoke pass. Checklist: `docs/ai-plugin-sandbox-phase0-verify.md`.
 - All delete/adopt/uninstall paths require canonical containment checks. `code_and_data` may delete plugin-private data/runtimes but must retain shared runtimes.
 
 ## Runtime Rules

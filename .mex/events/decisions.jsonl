@@ -34,3 +34,4 @@
 {"timestamp":"2026-07-17T16:35:42.285Z","kind":"note","message":"Phase 0 Windows host-path acceptance: 5 input_staging tests + plugin-host green; C: library → D: plugin-cache proves hardlink fail / copy + staging-report.json. Full SA-LUT UI GPU invoke still optional.","files":[],"cwd":"."}
 {"timestamp":"2026-07-18T03:35:25.534Z","kind":"note","message":"SA-LUT full E2E: ROCm start + C:→D: staging (2 copy) + color-transfer produced PNG under plugin-cache task outputs (phase0-e2e-de513e5c).","files":[],"cwd":"."}
 {"timestamp":"2026-07-18T03:52:38.254Z","kind":"note","message":"Split work into live-photo-polish-docs (already on origin) vs plugin-sandbox-phase0-2 (pushed; sandbox 0-2 + private runtime + model UX). package_windows -CheckOnly OK.","files":[],"cwd":"."}
+{"timestamp":"2026-07-18T04:07:53.764Z","kind":"note","message":"User confirmed smoke testing passed for plugin sandbox Phase 0–2 work; checklist GUI/IPC optional item closed.","files":[],"cwd":"."}
