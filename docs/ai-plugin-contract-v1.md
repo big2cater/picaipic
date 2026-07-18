@@ -186,12 +186,14 @@ python scripts/sign_plugin.py sign <picaipic.package.json> <private-key-base64>
 The `package_plugin.ps1` script accepts `-SignKeyFile <path>` to sign the
 manifest automatically during packaging.
 
-### Process confinement (v1, Windows)
+### Process confinement (v1)
 
 The host confines normal plugin task input access by staging source files into
 the plugin task directory before invocation. This is a runtime enforcement
 layered on top of the signature/trust checks above; plugins do not need to opt
-in and are not generally aware of it.
+in and are not generally aware of it. Staging is the default on **Windows and
+Linux**. Optional OS write ACLs remain Windows-only. Full roadmap:
+`docs/ai-plugin-sandbox-roadmap.md`.
 
 - **Default confinement via input staging**: when a task is invoked with
   input files that live outside the plugin's writable area (e.g. a
@@ -199,7 +201,15 @@ in and are not generally aware of it.
   `plugin-cache/<id>/tasks/<taskId>/inputs/` before invoking, and rewrites
   the `path` fields in the `inputs` payload to point at the staged copies.
   The plugin reads from the staged paths; it does not need raw access to the
-  original locations.
+  original locations. Materialization prefers a **same-volume hardlink**
+  (near zero-copy for large media) and falls back to a full **copy** when
+  hardlink is unsupported (cross-volume, filesystem limits, permissions).
+  If both fail, invocation fails closed (original external paths are not
+  left in the payload). Each staged invoke records diagnostics in the task
+  queue `message` and writes
+  `plugin-cache/<id>/tasks/<taskId>/inputs/staging-report.json` with
+  `stagedFiles` / `stagedBytes` / `hardlinkedFiles` / `copiedFiles` / skip
+  counters. Only JSON object fields named `path` are rewritten.
 - **Optional Windows write confinement (deny-ACL)**: set
   `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` to enable the experimental
   non-recursive deny-write ACE path (`icacls /deny <user>:(W) /L`) on
@@ -208,10 +218,15 @@ in and are not generally aware of it.
   `PICAIPIC_SANDBOX_DENY_PATHS` env var (semicolon-separated). This mode is
   opt-in because it changes real directory ACLs for the current Windows user
   while the plugin runs, which can surface confusing host/UI access prompts.
-- **Writable directories**: the plugin may write to its
-  `plugin-data/<id>`, `plugin-cache/<id>`, `plugin-outputs/<id>`, plugin
-  code directory, `plugin-runtimes/<id>`, and `shared-runtimes/<id>`.
-  These are never denied.
+- **Writable directories (host allow-list)**: the host builds a per-plugin root
+  list via `plugin_writable_roots` used for input-staging skip decisions and
+  optional Windows deny-ACL exclusions:
+  `plugin-data/<id>`, `plugin-cache/<id>`, `plugin-outputs/<id>`,
+  `plugin-runtimes/<id>`, installed code root, shared runtimes declared by
+  the manifest, persisted external model-dir bindings, and the current task
+  directory/output directory. These roots are never deny-ACL'd. Host
+  **adoption** still requires outputs to sit under the **task output
+  directory** only (not the full allow-list).
 - **GPU/CPU access is fully preserved**: input staging does not constrain
   runtime/device access. The optional deny-ACL approach was also confirmed
   (via `scripts/sandbox_gpu_spike.py`) not to break ROCm/CUDA driver
@@ -219,9 +234,10 @@ in and are not generally aware of it.
 - **Disable switch**: set `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` to skip
   staging and optional ACL sandboxing entirely (useful for plugin
   development/debugging).
-- **Scope of v1**: input staging by default; optional Windows deny-ACL write
-  confinement for explicit testing. Network blocking, macOS Seatbelt, and
-  Linux seccomp are future work.
+- **Scope of v1**: input staging by default on supported platforms; optional
+  Windows deny-ACL write confinement for explicit testing. Network blocking,
+  macOS Seatbelt, and Linux Landlock/seccomp are future work (see sandbox
+  roadmap).
 
 When optional ACL mode is enabled, ACLs are revoked (`icacls /remove:d`) when
 the plugin process is torn down — on stop, restart, crash-detection, and app

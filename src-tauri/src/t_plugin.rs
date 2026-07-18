@@ -611,6 +611,31 @@ pub struct AiPluginSummary {
     pub task_states: Vec<AiPluginTaskState>,
     #[serde(default)]
     pub model_bindings: Vec<PluginModelBinding>,
+    /// Declared model files under the managed plugin model directory, with
+    /// current on-disk presence. Used by Settings for open/validate/import UX.
+    #[serde(default)]
+    pub model_files: Vec<AiPluginModelFileSummary>,
+}
+
+/// One file copied into the managed plugin model directory by the import helper.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginModelImportItem {
+    pub model_id: String,
+    pub model_name: String,
+    pub source_path: String,
+    pub target_path: String,
+}
+
+/// Result of importing user-selected model files into `plugin-data/<id>/models`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginModelImportResult {
+    pub plugin_id: String,
+    pub model_dir: String,
+    pub imported: Vec<AiPluginModelImportItem>,
+    pub unmatched: Vec<String>,
+    pub model_files: Vec<AiPluginModelFileSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1243,6 +1268,126 @@ fn is_path_inside(path: &Path, root: &Path) -> bool {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     path.starts_with(root)
+}
+
+/// True when `path` is inside any of the allow-listed roots (after canonicalize).
+fn path_is_inside_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| is_path_inside(path, root))
+}
+
+/// Collect shared-runtime directories declared by a manifest's install profiles.
+///
+/// Shared runtimes live under `shared-runtimes/<id>` and must remain writable
+/// for setup/start even though they are outside `plugin-runtimes/<plugin-id>`.
+fn collect_shared_runtime_roots(manifest: &AiPluginManifest) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+    for profile in &manifest.install_profiles {
+        for binding in profile_runtime_bindings(profile) {
+            if !binding.scope.eq_ignore_ascii_case("shared") {
+                continue;
+            }
+            let runtime_id = binding
+                .id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(profile.id.as_str());
+            let Ok(dir) = shared_runtime_root(runtime_id) else {
+                continue;
+            };
+            let key = normalize_path(&dir);
+            if seen.insert(key) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// User-bound external model directories for this plugin (any profile).
+///
+/// These are not under the store root but are intentionally granted to the
+/// plugin process via env injection; staging must not re-copy them and ACL
+/// deny mode must not lock them out.
+fn collect_bound_model_dirs(plugin_id: &str) -> Vec<PathBuf> {
+    let Ok(registry) = load_registry() else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+    for state in registry.profile_states.values() {
+        if state.plugin_id != plugin_id {
+            continue;
+        }
+        for path in state.model_dir_bindings.values() {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let dir = PathBuf::from(trimmed);
+            if !dir.is_dir() {
+                continue;
+            }
+            let key = normalize_path(&dir);
+            if seen.insert(key) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// Host-side write/read allow-list roots for a managed plugin process.
+///
+/// This is **not** an OS sandbox. It is the single source of truth for:
+/// - input staging (paths already under these roots are not re-copied)
+/// - Windows deny-ACL exclusion lists
+///
+/// Always includes:
+/// - `plugin-data/<id>` (covers models/logs/config)
+/// - `plugin-cache/<id>`
+/// - `plugin-outputs/<id>`
+/// - `plugin-runtimes/<id>`
+/// - installed/registered code root
+/// - shared runtimes declared by the manifest (when provided)
+/// - persisted external model-dir bindings
+/// plus any `extra_dirs` (task dir, task output dir, etc.).
+fn plugin_writable_roots(
+    plugin_id: &str,
+    code_root: &Path,
+    manifest: Option<&AiPluginManifest>,
+    extra_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |path: PathBuf| {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        let key = normalize_path(&path);
+        if seen.insert(key) {
+            roots.push(path);
+        }
+    };
+
+    push(plugin_data_dir(plugin_id)?);
+    push(plugin_cache_dir(plugin_id)?);
+    push(plugin_output_dir(plugin_id)?);
+    push(plugin_runtime_root(plugin_id)?);
+    push(code_root.to_path_buf());
+
+    if let Some(manifest) = manifest {
+        for dir in collect_shared_runtime_roots(manifest) {
+            push(dir);
+        }
+    }
+    for dir in collect_bound_model_dirs(plugin_id) {
+        push(dir);
+    }
+    for dir in extra_dirs {
+        push(dir);
+    }
+    Ok(roots)
 }
 
 /// Quietly remove a directory if it exists. Does NOT create it (unlike the
@@ -2309,6 +2454,54 @@ fn profile_with_runtime_binding(
     let mut effective = profile.clone();
     effective.runtime_binding = runtime_binding;
     effective
+}
+
+/// Build a synthetic plugin-private runtime binding for a profile.
+///
+/// Shared profiles declare `envDir` for the private isolation path
+/// (`plugin-runtimes/<plugin-id>/<envDir>`). The host can switch a profile to
+/// this binding after user confirmation when a shared runtime has blocking
+/// package conflicts. The binding is intentionally not required in the
+/// plugin manifest so authors can keep shared defaults.
+fn plugin_private_runtime_binding(
+    profile: &PluginInstallProfile,
+) -> Result<PluginRuntimeBinding, String> {
+    let env_dir = profile
+        .env_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Install profile '{}' does not declare envDir required for a plugin-private runtime",
+                profile.id
+            )
+        })?;
+    if !safe_profile_relative_path(env_dir) {
+        return Err(format!(
+            "Install profile '{}' has unsafe envDir '{}'",
+            profile.id, env_dir
+        ));
+    }
+    let label = profile
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(profile.id.as_str());
+    Ok(PluginRuntimeBinding {
+        scope: "plugin".to_string(),
+        kind: Some("python".to_string()),
+        id: Some(format!("plugin-private:{}", profile.id)),
+        label: Some(format!("Plugin-private {}", label)),
+        python: None,
+        root: None,
+        requirements: profile_requirements(profile).map(|value| value.to_string()),
+        notes: Some(
+            "Isolated plugin-private runtime under plugin-runtimes/<plugin-id>/<envDir>. Shared runtimes are left unchanged."
+                .to_string(),
+        ),
+    })
 }
 
 fn start_profile_signature(
@@ -4101,14 +4294,20 @@ fn manifest_to_summary(
                 .and_then(|state| state.setup_job_id.as_ref())
                 .and_then(|job_id| setup_jobs.get(job_id))
                 .cloned();
-            let runtime_binding = profile.runtime_binding.clone();
-            let effective_profile = profile_with_runtime_binding(profile, runtime_binding.clone());
+            // Prefer the user-selected/persisted binding (including synthetic
+            // plugin-private fallbacks) so probe cards, path chips, and conflict
+            // detection all follow the active runtime, not only the manifest default.
+            let active_binding = state
+                .as_ref()
+                .and_then(|s| s.runtime_binding.clone())
+                .or_else(|| profile.runtime_binding.clone());
+            let effective_profile = profile_with_runtime_binding(profile, active_binding.clone());
             let runtime_probe_state = runtime_probe_states
                 .get(&runtime_probe_key(
                     &plugin_id,
                     &profile.id,
                     &profile.backend,
-                    runtime_binding.as_ref(),
+                    active_binding.as_ref(),
                 ))
                 .cloned()
                 .map(|state| {
@@ -4117,7 +4316,7 @@ fn manifest_to_summary(
                         runtime_probe_fingerprint(
                             root,
                             &effective_profile,
-                            runtime_binding.as_ref(),
+                            active_binding.as_ref(),
                         ),
                     )
                 });
@@ -4137,10 +4336,6 @@ fn manifest_to_summary(
                     )
                 })
                 .collect();
-            let active_binding = state
-                .as_ref()
-                .and_then(|s| s.runtime_binding.clone())
-                .or_else(|| profile.runtime_binding.clone());
             let effective_for_path = profile_with_runtime_binding(profile, active_binding.clone());
             let resolved_runtime_dir = (|| {
                 let scope = active_binding
@@ -4200,6 +4395,29 @@ fn manifest_to_summary(
             .unwrap_or_default();
             let model_binding_checks =
                 model_binding_summaries(&manifest, &profile.id).unwrap_or_default();
+            // Surface a synthetic plugin-private option whenever the profile
+            // has an envDir. Authors keep shared defaults; users can opt into
+            // isolation after a shared conflict without editing the manifest.
+            let mut runtime_bindings = profile.runtime_bindings.clone();
+            if let Ok(private_binding) = plugin_private_runtime_binding(profile) {
+                let private_id = private_binding.id.clone();
+                let already_declared = runtime_bindings.iter().any(|binding| {
+                    binding.scope.eq_ignore_ascii_case("plugin")
+                        && (private_id.is_some() && binding.id == private_id
+                            || private_id.is_none())
+                }) || profile
+                    .runtime_binding
+                    .as_ref()
+                    .map(|binding| {
+                        binding.scope.eq_ignore_ascii_case("plugin")
+                            && (private_id.is_some() && binding.id == private_id
+                                || private_id.is_none())
+                    })
+                    .unwrap_or(false);
+                if !already_declared {
+                    runtime_bindings.push(private_binding);
+                }
+            }
             PluginInstallProfileSummary {
                 id: profile.id.clone(),
                 backend: profile.backend.clone(),
@@ -4211,8 +4429,12 @@ fn manifest_to_summary(
                 derived_from: profile.derived_from.clone(),
                 env_dir: profile.env_dir.clone(),
                 requirements: profile.requirements.clone(),
-                runtime_binding: profile.runtime_binding.clone(),
-                runtime_bindings: profile.runtime_bindings.clone(),
+                // Expose the active binding first so UI path/probe/conflict
+                // cards follow the selected shared or private runtime.
+                runtime_binding: active_binding
+                    .clone()
+                    .or_else(|| profile.runtime_binding.clone()),
+                runtime_bindings,
                 notes: profile.notes.clone(),
                 resolved_runtime_dir,
                 state,
@@ -4274,6 +4496,7 @@ fn manifest_to_summary(
     plugin_task_states.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     plugin_task_states.truncate(8);
 
+    let model_files = plugin_model_file_summaries(&manifest).unwrap_or_default();
     AiPluginSummary {
         id: manifest.id,
         name: manifest.name,
@@ -4296,6 +4519,7 @@ fn manifest_to_summary(
         contributes,
         task_states: plugin_task_states,
         model_bindings: manifest.model_bindings,
+        model_files,
     }
 }
 
@@ -4699,9 +4923,6 @@ fn validate_plugin_output_paths(result: &Value, output_dir: &Path) -> Result<(),
     let Some(outputs) = result.get("outputs").and_then(Value::as_array) else {
         return Ok(());
     };
-    let output_root = output_dir
-        .canonicalize()
-        .map_err(|e| format!("Failed to resolve plugin output directory: {}", e))?;
     for output in outputs {
         let Some(path) = output.get("path").and_then(Value::as_str) else {
             continue;
@@ -4710,7 +4931,9 @@ fn validate_plugin_output_paths(result: &Value, output_dir: &Path) -> Result<(),
         let canonical = output_path
             .canonicalize()
             .map_err(|e| format!("Plugin returned missing output '{}': {}", path, e))?;
-        if !canonical.starts_with(&output_root) {
+        // Host adoption only trusts outputs under the task output root (not the
+        // full writable allow-list — library paths must never appear here).
+        if !is_path_inside(&canonical, output_dir) {
             return Err(format!(
                 "Plugin returned output outside the task output directory: {}",
                 path
@@ -4728,68 +4951,177 @@ fn validate_plugin_output_paths(result: &Value, output_dir: &Path) -> Result<(),
     Ok(())
 }
 
+/// How one external input was materialized under the staging directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageMaterializeMethod {
+    /// Same-volume hard link (near zero-copy). Preferred when the OS allows it.
+    Hardlink,
+    /// Full byte copy (cross-volume or hardlink unsupported/failed).
+    Copy,
+}
+
+/// Diagnostics for one invoke-time input staging pass.
+///
+/// Surfaced in the task `message` and written to
+/// `<task_dir>/inputs/staging-report.json` when staging ran (or was disabled).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputStagingReport {
+    enabled: bool,
+    staged_files: u32,
+    /// Logical size of staged inputs (file length). For hardlinks this is not
+    /// extra disk usage; for copies it approximates transferred bytes.
+    staged_bytes: u64,
+    hardlinked_files: u32,
+    copied_files: u32,
+    skipped_writable: u32,
+    skipped_missing: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging_dir: Option<String>,
+}
+
+impl InputStagingReport {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+
+    fn queue_message(&self) -> String {
+        if !self.enabled {
+            return "Queued (input staging disabled)".to_string();
+        }
+        if self.staged_files == 0 {
+            return format!(
+                "Queued (staging: 0 files, {} already writable, {} missing)",
+                self.skipped_writable, self.skipped_missing
+            );
+        }
+        format!(
+            "Queued (staging: {} file(s), {} bytes, {} hardlink, {} copy, {} already writable)",
+            self.staged_files,
+            self.staged_bytes,
+            self.hardlinked_files,
+            self.copied_files,
+            self.skipped_writable
+        )
+    }
+
+    fn record_materialized(&mut self, bytes: u64, method: StageMaterializeMethod) {
+        self.staged_files = self.staged_files.saturating_add(1);
+        self.staged_bytes = self.staged_bytes.saturating_add(bytes);
+        match method {
+            StageMaterializeMethod::Hardlink => {
+                self.hardlinked_files = self.hardlinked_files.saturating_add(1);
+            }
+            StageMaterializeMethod::Copy => {
+                self.copied_files = self.copied_files.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// Stage external input files into the plugin's readable area for sandboxing.
 ///
-/// When the process sandbox is enabled (Windows + not disabled), the plugin
-/// cannot read arbitrary files on disk. This rewrites every `path` field in
-/// `inputs` that points outside the plugin's writable directories: the file
-/// is copied into `<task_dir>/inputs/<original_name>` and the path is
-/// replaced with the staging location. Files already inside a writable dir
-/// are left untouched.
+/// When default input staging is enabled (all supported platforms unless
+/// `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`), this rewrites every JSON `path` field
+/// in `inputs` that points outside the plugin's writable directories. The file is
+/// materialized under `<task_dir>/inputs/` via **hardlink when same-volume**
+/// (Phase 2), otherwise a full **copy**, and the path is replaced with the
+/// staged location. Files already inside a writable dir are left untouched.
 ///
-/// Returns the (possibly rewritten) inputs value. When the sandbox is off,
-/// returns the inputs unchanged without any filesystem work.
+/// Returns the (possibly rewritten) inputs value plus a diagnostics report.
+/// Staging materialize failures fail closed (error, no original external path left).
 fn stage_input_files_for_sandbox(
     plugin_id: &str,
     task_id: &str,
     inputs: &Value,
     writable_dirs: &[PathBuf],
-) -> Result<Value, String> {
+) -> Result<(Value, InputStagingReport), String> {
     if !t_sandbox::sandbox_enabled() {
-        return Ok(inputs.clone());
+        return Ok((inputs.clone(), InputStagingReport::disabled()));
     }
     let task_dir = plugin_task_temp_dir(plugin_id, task_id)?;
     let staging_dir = task_dir.join("inputs");
     fs::create_dir_all(&staging_dir)
         .map_err(|e| format!("Failed to create input staging directory: {}", e))?;
     let mut staged = inputs.clone();
-    stage_paths_in_value(&mut staged, &staging_dir, writable_dirs);
-    Ok(staged)
+    let mut report = InputStagingReport {
+        enabled: true,
+        staging_dir: Some(normalize_path(&staging_dir)),
+        ..InputStagingReport::default()
+    };
+    // Fail closed: a staging error must not leave the original external path in
+    // the payload (that would silently bypass default confinement).
+    stage_paths_in_value(&mut staged, &staging_dir, writable_dirs, &mut report)?;
+    write_input_staging_report(&staging_dir, &report);
+    Ok((staged, report))
+}
+
+/// Best-effort diagnostics file next to staged inputs for support/debug.
+fn write_input_staging_report(staging_dir: &Path, report: &InputStagingReport) {
+    let path = staging_dir.join("staging-report.json");
+    if let Ok(json) = serde_json::to_vec_pretty(report) {
+        let _ = fs::write(path, json);
+    }
 }
 
 /// Recursively walk a JSON value, rewriting every `path` string field that
-/// points outside the writable dirs to a staged copy under `staging_dir`.
-fn stage_paths_in_value(value: &mut Value, staging_dir: &Path, writable_dirs: &[PathBuf]) {
+/// points outside the writable dirs to a staged file under `staging_dir`.
+/// Returns an error if any required staging materialize fails.
+fn stage_paths_in_value(
+    value: &mut Value,
+    staging_dir: &Path,
+    writable_dirs: &[PathBuf],
+    report: &mut InputStagingReport,
+) -> Result<(), String> {
     match value {
         Value::Object(map) => {
             if let Some(path_str) = map.get("path").and_then(Value::as_str) {
                 let path = PathBuf::from(path_str);
-                if path.is_absolute() && path.exists() {
-                    let inside_writable = writable_dirs.iter().any(|w| is_path_inside(&path, w));
+                if !path.is_absolute() {
+                    // Relative paths are plugin-local; leave them alone.
+                } else if !path.exists() {
+                    report.skipped_missing = report.skipped_missing.saturating_add(1);
+                } else {
+                    let inside_writable = path_is_inside_any(&path, writable_dirs);
                     let inside_staging = is_path_inside(&path, staging_dir);
-                    if !inside_writable && !inside_staging {
-                        if let Ok(staged_path) = stage_one_file(&path, staging_dir) {
-                            map["path"] = Value::String(staged_path.to_string_lossy().into_owned());
-                        }
+                    if inside_writable || inside_staging {
+                        report.skipped_writable = report.skipped_writable.saturating_add(1);
+                    } else {
+                        let (staged_path, bytes, method) = stage_one_file(&path, staging_dir)?;
+                        map["path"] = Value::String(staged_path.to_string_lossy().into_owned());
+                        report.record_materialized(bytes, method);
                     }
                 }
             }
             for (_, child) in map.iter_mut() {
-                stage_paths_in_value(child, staging_dir, writable_dirs);
+                stage_paths_in_value(child, staging_dir, writable_dirs, report)?;
             }
         }
         Value::Array(items) => {
             for item in items.iter_mut() {
-                stage_paths_in_value(item, staging_dir, writable_dirs);
+                stage_paths_in_value(item, staging_dir, writable_dirs, report)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
-/// Copy a single file into the staging directory, generating a unique name to
-/// avoid collisions when multiple inputs share a basename.
-fn stage_one_file(src: &Path, staging_dir: &Path) -> Result<PathBuf, String> {
+/// Materialize a single file into the staging directory, generating a unique
+/// name to avoid collisions when multiple inputs share a basename.
+///
+/// Preference order (Phase 2):
+/// 1. `hard_link` — near zero-copy when source and staging share a volume
+/// 2. `copy` — fallback for cross-volume paths or hardlink errors
+///
+/// Returns `(staged_path, logical_bytes, method)`.
+fn stage_one_file(
+    src: &Path,
+    staging_dir: &Path,
+) -> Result<(PathBuf, u64, StageMaterializeMethod), String> {
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -4805,9 +5137,26 @@ fn stage_one_file(src: &Path, staging_dir: &Path) -> Result<PathBuf, String> {
         candidate = staging_dir.join(format!("{}_{}{}", stem, counter, ext));
         counter += 1;
     }
-    fs::copy(src, &candidate)
-        .map_err(|e| format!("Failed to stage input '{}': {}", src.display(), e))?;
-    Ok(candidate)
+
+    let logical_bytes = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+
+    // Prefer hardlink: same-volume, no extra disk for large video/RAW.
+    // If the link fails (cross-device, permissions, FAT, etc.), fall back to copy.
+    match fs::hard_link(src, &candidate) {
+        Ok(()) => Ok((candidate, logical_bytes, StageMaterializeMethod::Hardlink)),
+        Err(_hardlink_err) => {
+            // Clean a partial hardlink target if the OS left one (rare).
+            let _ = fs::remove_file(&candidate);
+            let bytes = fs::copy(src, &candidate).map_err(|e| {
+                format!(
+                    "Failed to stage input '{}' (hardlink and copy both failed; last copy error: {})",
+                    src.display(),
+                    e
+                )
+            })?;
+            Ok((candidate, bytes, StageMaterializeMethod::Copy))
+        }
+    }
 }
 
 fn cleanup_failed_plugin_task_dir(state: &AiPluginTaskState) {
@@ -5317,21 +5666,33 @@ fn ensure_runtime_probe_gate(
     let Some(profile) = profile_for_invocation(manifest, runtime) else {
         return Ok(());
     };
-    let runtime_binding = selected_runtime_binding(profile, None, None)?;
+    let registry = load_registry()?;
+    // Honor the user-selected/persisted binding first (shared default or
+    // confirmed plugin-private fallback). Manifest defaults only apply when no
+    // profile state has chosen a runtime yet.
+    let runtime_binding = registry
+        .profile_states
+        .get(&profile_state_key(plugin_id, &profile.id))
+        .and_then(|state| state.runtime_binding.clone())
+        .map(Some)
+        .unwrap_or(selected_runtime_binding(profile, None, None)?);
     let Some(binding) = runtime_binding.as_ref() else {
         return Ok(());
     };
+    // Managed shared/plugin scopes may not yet have a concrete python path
+    // until setup creates the venv. Only skip the gate when there is truly no
+    // selectable binding identity (no python and no id).
     if binding
         .python
         .as_deref()
         .unwrap_or_default()
         .trim()
         .is_empty()
+        && binding.id.as_deref().unwrap_or_default().trim().is_empty()
     {
         return Ok(());
     }
 
-    let registry = load_registry()?;
     if let Some(profile_state) = registry
         .profile_states
         .get(&profile_state_key(plugin_id, &profile.id))
@@ -6732,6 +7093,72 @@ pub fn clear_ai_plugin_model_dir_binding(
     save_registry(&registry)
 }
 
+/// Persist a confirmed switch from a shared (or external) runtime to a
+/// plugin-private runtime for one install profile.
+///
+/// This does **not** run setup. After switching, the UI should re-run Setup so
+/// dependencies install into `plugin-runtimes/<plugin-id>/<envDir>`, then Probe
+/// and Smoke. Shared runtimes are left intact for other plugins.
+#[tauri::command]
+pub fn switch_ai_plugin_profile_to_private_runtime(
+    plugin_id: String,
+    profile_id: String,
+) -> Result<AiPluginProfileState, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    let profile = find_manifest_profile(&manifest, &plugin_id, &profile_id)?;
+    let private_binding = plugin_private_runtime_binding(profile)?;
+    let effective_profile = profile_with_runtime_binding(profile, Some(private_binding.clone()));
+    // Ensure the private runtime root exists so path chips and setup preview
+    // can resolve immediately after the switch.
+    let _ = profile_runtime_dir(&plugin_id, &effective_profile)?;
+
+    let mut registry = load_registry()?;
+    let key = profile_state_key(&plugin_id, &profile_id);
+    let previous = registry.profile_states.get(&key).cloned();
+    let backend = previous
+        .as_ref()
+        .map(|state| state.backend.clone())
+        .filter(|backend| !backend.trim().is_empty())
+        .unwrap_or_else(|| profile.backend.clone());
+    let capability = previous
+        .as_ref()
+        .map(|state| state.capability.clone())
+        .filter(|capability| !capability.trim().is_empty())
+        .unwrap_or_else(|| default_smoke_capability(&manifest));
+    let model_dir_bindings = previous
+        .as_ref()
+        .map(|state| state.model_dir_bindings.clone())
+        .unwrap_or_else(|| persisted_model_dir_bindings(&plugin_id, &profile_id));
+    let now = Utc::now().to_rfc3339();
+    let state = AiPluginProfileState {
+        plugin_id: plugin_id.clone(),
+        profile_id: profile_id.clone(),
+        backend: backend.clone(),
+        capability,
+        // Switching isolation invalidates prior verification for the old binding.
+        status: "needsVerify".to_string(),
+        verified: false,
+        updated_at: now,
+        setup_attempted: previous
+            .as_ref()
+            .map(|state| state.setup_attempted)
+            .unwrap_or(false),
+        setup_job_id: previous.and_then(|state| state.setup_job_id),
+        duration_ms: None,
+        error: None,
+        result: None,
+        runtime_binding: Some(private_binding),
+        model_dir_bindings,
+    };
+    registry.profile_states.insert(key, state.clone());
+    save_registry(&registry)?;
+    // Drop stale probe cache for the previous shared binding so the next probe
+    // is binding-specific. Keep other profiles untouched.
+    clear_profile_runtime_probe_states(&plugin_id, &profile_id, &backend)?;
+    Ok(state)
+}
+
 #[tauri::command]
 pub fn check_ai_plugin_model_bindings(
     plugin_id: String,
@@ -6758,6 +7185,125 @@ pub fn check_ai_plugin_model_bindings(
         .canonicalize()
         .map_err(|e| format!("Failed to resolve directory: {}", e))?;
     Ok(check_model_binding(binding, &canonical))
+}
+
+/// Re-check the managed plugin model directory against the declared `models[]`
+/// entries. Used by Settings "open model folder & validate" without changing
+/// bindings.
+#[tauri::command]
+pub fn check_ai_plugin_model_files(
+    plugin_id: String,
+) -> Result<Vec<AiPluginModelFileSummary>, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    plugin_model_file_summaries(&manifest)
+}
+
+/// Copy user-selected model files into the managed plugin model directory.
+///
+/// Matching is filename-based against declared `models[].path` basenames so
+/// users can import checkpoints without recreating nested folders manually.
+/// Only paths that resolve inside `plugin-data/<id>/models` are written.
+/// Unmatched selections are returned and not copied.
+#[tauri::command]
+pub fn import_ai_plugin_model_files(
+    plugin_id: String,
+    source_paths: Vec<String>,
+) -> Result<AiPluginModelImportResult, String> {
+    let (manifest_path, manifest) = find_plugin_manifest(&plugin_id)?;
+    ensure_valid_manifest(&manifest_path, &manifest)?;
+    if source_paths.is_empty() {
+        return Err("No model files selected".to_string());
+    }
+    // Ensure drop folders / README exist before writing.
+    prepare_installed_plugin_storage(&manifest)?;
+    let model_dir = plugin_model_dir(&plugin_id)?;
+    let model_dir_canon = model_dir.canonicalize().unwrap_or(model_dir.clone());
+
+    // Map basename (lowercase) -> first declared model that needs that file.
+    let mut by_basename: HashMap<String, (String, String, PathBuf)> = HashMap::new();
+    for model in &manifest.models {
+        let Some(relative) = plugin_model_relative_path(model) else {
+            continue;
+        };
+        let Some(file_name) = relative.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("model")
+            .to_string();
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&id)
+            .to_string();
+        by_basename
+            .entry(file_name.to_ascii_lowercase())
+            .or_insert((id, name, relative));
+    }
+
+    let mut imported = Vec::new();
+    let mut unmatched = Vec::new();
+    for source in source_paths {
+        let source_path = PathBuf::from(&source);
+        if !source_path.is_file() {
+            unmatched.push(source);
+            continue;
+        }
+        let Some(file_name) = source_path.file_name().and_then(|n| n.to_str()) else {
+            unmatched.push(source);
+            continue;
+        };
+        let Some((model_id, model_name, relative)) =
+            by_basename.get(&file_name.to_ascii_lowercase())
+        else {
+            unmatched.push(source);
+            continue;
+        };
+        let target = model_dir.join(relative);
+        let target_parent = target.parent().unwrap_or(model_dir.as_path());
+        fs::create_dir_all(target_parent).map_err(|e| {
+            format!(
+                "Failed to create model directory '{}': {}",
+                target_parent.display(),
+                e
+            )
+        })?;
+        // Containment: refuse to write outside the managed model root.
+        let parent_canon = target_parent
+            .canonicalize()
+            .unwrap_or(target_parent.to_path_buf());
+        if !is_path_inside(&parent_canon, &model_dir_canon) && parent_canon != model_dir_canon {
+            return Err(format!(
+                "Refusing to import outside plugin model directory: {}",
+                target.display()
+            ));
+        }
+        fs::copy(&source_path, &target).map_err(|e| {
+            format!(
+                "Failed to copy '{}' to '{}': {}",
+                source_path.display(),
+                target.display(),
+                e
+            )
+        })?;
+        imported.push(AiPluginModelImportItem {
+            model_id: model_id.clone(),
+            model_name: model_name.clone(),
+            source_path: normalize_path(&source_path),
+            target_path: normalize_path(&target),
+        });
+    }
+
+    Ok(AiPluginModelImportResult {
+        plugin_id,
+        model_dir: normalize_path(&model_dir),
+        imported,
+        unmatched,
+        model_files: plugin_model_file_summaries(&manifest)?,
+    })
 }
 
 #[tauri::command]
@@ -6854,6 +7400,7 @@ pub fn list_ai_plugins() -> Result<Vec<AiPluginSummary>, String> {
                 contributes: PluginContributesSummary::default(),
                 task_states: Vec::new(),
                 model_bindings: Vec::new(),
+                model_files: Vec::new(),
             });
         }
     }
@@ -7768,15 +8315,21 @@ pub async fn start_ai_plugin(
 
     // Apply process sandbox (deny-ACL write confinement) before spawn.
     // The handle's Drop revokes the ACLs when the RunningPlugin is torn down.
-    let writable_dirs = vec![
-        data_dir.clone(),
-        cache_dir.clone(),
-        output_dir.clone(),
-        model_dir.clone(),
-        runtime_dir.clone(),
-        task_dir.clone(),
-        root.to_path_buf(),
-    ];
+    // Writable roots use the Phase 1 allow-list (data/cache/outputs/runtimes/
+    // code + shared runtimes + bound model dirs + task/output extras).
+    let writable_dirs = plugin_writable_roots(
+        &plugin_id,
+        root,
+        Some(&manifest),
+        [
+            data_dir.clone(),
+            cache_dir.clone(),
+            output_dir.clone(),
+            model_dir.clone(),
+            runtime_dir.clone(),
+            task_dir.clone(),
+        ],
+    )?;
     let sandbox = match t_sandbox::apply_plugin_sandbox(&plugin_id, &writable_dirs).await {
         Ok(handle) => Some(handle),
         Err(e) => {
@@ -8319,16 +8872,13 @@ async fn invoke_ai_plugin_capability_inner(
     let root = manifest_path
         .parent()
         .ok_or_else(|| "Plugin manifest has no parent directory".to_string())?;
-    let writable_dirs = vec![
-        plugin_data_dir(&plugin_id)?,
-        plugin_cache_dir(&plugin_id)?,
-        PathBuf::from(&output_dir),
-        plugin_model_dir(&plugin_id)?,
-        plugin_runtime_root(&plugin_id)?,
-        task_dir.clone(),
-        PathBuf::from(normalize_path(root)),
-    ];
-    let inputs =
+    let writable_dirs = plugin_writable_roots(
+        &plugin_id,
+        root,
+        Some(&manifest),
+        [PathBuf::from(&output_dir), task_dir.clone()],
+    )?;
+    let (inputs, staging_report) =
         stage_input_files_for_sandbox(&plugin_id, &task_id, &request.inputs, &writable_dirs)?;
     let now = Utc::now().to_rfc3339();
     let result_policy = request
@@ -8348,7 +8898,7 @@ async fn invoke_ai_plugin_capability_inner(
         adopted: false,
         outputs: Vec::new(),
         progress: Some(0),
-        message: Some("Queued".to_string()),
+        message: Some(staging_report.queue_message()),
         error: None,
         error_code: None,
         error_domain: None,
@@ -8767,6 +9317,310 @@ mod tests {
             Some(std::cmp::Ordering::Greater)
         );
         assert_eq!(compare_app_versions("not-a-version", "1.0.0"), None);
+    }
+
+    #[test]
+    fn plugin_private_runtime_binding_requires_env_dir() {
+        let mut profile = PluginInstallProfile {
+            id: "windows-cpu".to_string(),
+            backend: "cpu".to_string(),
+            label: Some("CPU".to_string()),
+            support_level: Some("fallback".to_string()),
+            derived_from: None,
+            env_dir: None,
+            requirements: Some("backend/requirements-cpu.txt".to_string()),
+            runtime_binding: None,
+            runtime_bindings: vec![],
+            notes: None,
+        };
+        assert!(plugin_private_runtime_binding(&profile).is_err());
+
+        profile.env_dir = Some(".venv-cpu".to_string());
+        let binding = plugin_private_runtime_binding(&profile).expect("private binding");
+        assert_eq!(binding.scope, "plugin");
+        assert_eq!(binding.id.as_deref(), Some("plugin-private:windows-cpu"));
+        assert_eq!(
+            binding.requirements.as_deref(),
+            Some("backend/requirements-cpu.txt")
+        );
+        assert!(binding.label.as_deref().unwrap_or("").contains("CPU"));
+    }
+
+    #[test]
+    fn input_staging_rewrites_external_paths_and_counts_bytes() {
+        let root = std::env::temp_dir().join(format!("picaipic-stage-ok-{}", Uuid::new_v4()));
+        let external = root.join("library");
+        let staging = root.join("staging");
+        let writable = root.join("writable");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(&writable).unwrap();
+
+        let external_file = external.join("photo.jpg");
+        let writable_file = writable.join("already-inside.bin");
+        fs::write(&external_file, b"hello-stage").unwrap();
+        fs::write(&writable_file, b"inside").unwrap();
+
+        let mut inputs = serde_json::json!({
+            "items": [
+                { "path": external_file.to_string_lossy(), "role": "source" },
+                { "path": writable_file.to_string_lossy(), "role": "mask" },
+                { "path": external.join("missing.jpg").to_string_lossy(), "role": "gone" },
+            ]
+        });
+        let mut report = InputStagingReport {
+            enabled: true,
+            staging_dir: Some(normalize_path(&staging)),
+            ..InputStagingReport::default()
+        };
+        stage_paths_in_value(&mut inputs, &staging, &[writable.clone()], &mut report)
+            .expect("staging should succeed");
+
+        assert_eq!(report.staged_files, 1);
+        assert_eq!(report.staged_bytes, 11);
+        assert_eq!(report.skipped_writable, 1);
+        assert_eq!(report.skipped_missing, 1);
+        // Same temp volume → hardlink preferred (Phase 2).
+        assert_eq!(report.hardlinked_files, 1);
+        assert_eq!(report.copied_files, 0);
+
+        let staged_path = inputs["items"][0]["path"].as_str().unwrap();
+        assert!(
+            Path::new(staged_path).starts_with(&staging),
+            "external path must be rewritten under staging: {}",
+            staged_path
+        );
+        assert_eq!(
+            inputs["items"][1]["path"].as_str().unwrap(),
+            writable_file.to_string_lossy()
+        );
+        assert!(report.queue_message().contains("1 file"));
+        assert!(report.queue_message().contains("hardlink"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_staging_hardlink_shares_inode_when_same_volume() {
+        let root = std::env::temp_dir().join(format!("picaipic-stage-hl-{}", Uuid::new_v4()));
+        let external = root.join("library");
+        let staging = root.join("staging");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        let external_file = external.join("big.bin");
+        fs::write(&external_file, b"0123456789abcdef").unwrap();
+
+        let (staged, bytes, method) =
+            stage_one_file(&external_file, &staging).expect("stage_one_file");
+        assert_eq!(method, StageMaterializeMethod::Hardlink);
+        assert_eq!(bytes, 16);
+        assert!(staged.exists());
+        // Content must match; on Unix hardlinks share inode (optional check).
+        assert_eq!(fs::read(&staged).unwrap(), b"0123456789abcdef");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = fs::metadata(&external_file).unwrap().ino();
+            let b = fs::metadata(&staged).unwrap().ino();
+            assert_eq!(a, b, "hardlink should share inode");
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_staging_fails_closed_when_copy_cannot_complete() {
+        let root = std::env::temp_dir().join(format!("picaipic-stage-fail-{}", Uuid::new_v4()));
+        let external = root.join("library");
+        // staging is intentionally a file, so create_dir is not used and copy fails.
+        let staging_as_file = root.join("staging-not-a-dir");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(&staging_as_file, b"block").unwrap();
+        let external_file = external.join("photo.jpg");
+        fs::write(&external_file, b"data").unwrap();
+
+        let mut inputs = serde_json::json!({ "path": external_file.to_string_lossy() });
+        let mut report = InputStagingReport {
+            enabled: true,
+            ..InputStagingReport::default()
+        };
+        let err = stage_paths_in_value(&mut inputs, &staging_as_file, &[], &mut report)
+            .expect_err("staging into a non-directory must fail closed");
+        assert!(
+            err.contains("Failed to stage input"),
+            "unexpected error: {}",
+            err
+        );
+        // Original external path must remain only because the whole invoke aborts;
+        // the helper itself may have partially rewritten — fail closed means Result::Err.
+        assert_eq!(report.staged_files, 0);
+        assert_eq!(report.hardlinked_files, 0);
+        assert_eq!(report.copied_files, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_staging_disabled_queue_message() {
+        let report = InputStagingReport::disabled();
+        assert!(!report.enabled);
+        assert!(report.queue_message().contains("disabled"));
+    }
+
+    /// Real layout proof: library-like source under the OS temp dir staged into
+    /// a path under the crate (often a different Windows volume than `%TEMP%`).
+    /// Same-volume → hardlink; cross-volume → copy. Always writes
+    /// `staging-report.json` with hardlinked/copied counts.
+    #[test]
+    fn input_staging_real_layout_report_hardlink_or_copy() {
+        let case_id = Uuid::new_v4();
+        let external = std::env::temp_dir().join(format!("picaipic-lib-{}", case_id));
+        // Stage under the crate target tree so Windows C: TEMP → D: workspace
+        // reproduces the production library-vs-plugin-store volume split.
+        let staging = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("stage-real-layout")
+            .join(case_id.to_string())
+            .join("inputs");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+
+        let external_file = external.join("library-photo.jpg");
+        let payload = b"phase0-real-layout-library-bytes";
+        fs::write(&external_file, payload).unwrap();
+
+        let mut inputs = serde_json::json!({
+            "items": [{ "path": external_file.to_string_lossy(), "role": "source" }]
+        });
+        let mut report = InputStagingReport {
+            enabled: true,
+            staging_dir: Some(normalize_path(&staging)),
+            ..InputStagingReport::default()
+        };
+        stage_paths_in_value(&mut inputs, &staging, &[], &mut report).expect("staging");
+        write_input_staging_report(&staging, &report);
+
+        assert_eq!(report.staged_files, 1);
+        assert_eq!(report.staged_bytes, payload.len() as u64);
+        assert_eq!(
+            report.hardlinked_files + report.copied_files,
+            1,
+            "exactly one materialize method"
+        );
+        assert!(
+            report.hardlinked_files == 1 || report.copied_files == 1,
+            "must hardlink or copy: hl={} copy={}",
+            report.hardlinked_files,
+            report.copied_files
+        );
+
+        let src_vol = external_file
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned());
+        let dst_vol = staging
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned());
+        if src_vol.is_some() && src_vol != dst_vol {
+            // Cross-volume (typical Windows C: library / D: plugin store): copy only.
+            assert_eq!(report.hardlinked_files, 0);
+            assert_eq!(report.copied_files, 1);
+            assert!(
+                report.queue_message().contains("0 hardlink")
+                    && report.queue_message().contains("1 copy"),
+                "queue message: {}",
+                report.queue_message()
+            );
+        }
+
+        let report_path = staging.join("staging-report.json");
+        assert!(report_path.is_file(), "staging-report.json must exist");
+        let body = fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["enabled"], true);
+        assert_eq!(parsed["stagedFiles"], 1);
+        assert_eq!(
+            parsed["hardlinkedFiles"].as_u64().unwrap_or(0)
+                + parsed["copiedFiles"].as_u64().unwrap_or(0),
+            1
+        );
+        let staged_path = inputs["items"][0]["path"].as_str().unwrap();
+        assert!(
+            Path::new(staged_path).starts_with(&staging),
+            "rewritten path under staging: {}",
+            staged_path
+        );
+        assert_eq!(fs::read(staged_path).unwrap(), payload);
+
+        let _ = fs::remove_dir_all(&external);
+        let _ = fs::remove_dir_all(staging.parent().unwrap());
+    }
+
+    #[test]
+    fn path_is_inside_any_matches_allow_list_roots() {
+        let root = std::env::temp_dir().join(format!("picaipic-allow-{}", Uuid::new_v4()));
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(a.join("nested")).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let nested = a.join("nested").join("file.txt");
+        fs::write(&nested, b"x").unwrap();
+        assert!(path_is_inside_any(&nested, &[a.clone(), b.clone()]));
+        assert!(!path_is_inside_any(&nested, &[b]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_shared_runtime_roots_dedupes_by_id() {
+        let profile = PluginInstallProfile {
+            id: "windows-cpu".to_string(),
+            backend: "cpu".to_string(),
+            label: None,
+            support_level: None,
+            derived_from: None,
+            env_dir: Some(".venv-cpu".to_string()),
+            requirements: None,
+            runtime_binding: Some(PluginRuntimeBinding {
+                scope: "shared".to_string(),
+                kind: Some("python".to_string()),
+                id: Some("python312-cpu".to_string()),
+                label: None,
+                python: None,
+                root: None,
+                requirements: None,
+                notes: None,
+            }),
+            runtime_bindings: vec![PluginRuntimeBinding {
+                scope: "shared".to_string(),
+                kind: Some("python".to_string()),
+                id: Some("python312-cpu".to_string()),
+                label: None,
+                python: None,
+                root: None,
+                requirements: None,
+                notes: None,
+            }],
+            notes: None,
+        };
+        let mut manifest: AiPluginManifest = serde_json::from_value(serde_json::json!({
+            "id": "test-plugin",
+            "name": "test",
+            "version": "0.0.0"
+        }))
+        .expect("minimal manifest");
+        manifest.install_profiles = vec![profile];
+        let roots = collect_shared_runtime_roots(&manifest);
+        assert_eq!(roots.len(), 1);
+        assert!(
+            roots[0]
+                .to_string_lossy()
+                .replace('\\', "/")
+                .contains("shared-runtimes/python312-cpu")
+                || roots[0]
+                    .to_string_lossy()
+                    .contains("shared-runtimes\\python312-cpu")
+        );
     }
 
     /// Build a minimal manifest matching the one signed by `sign_plugin.py`

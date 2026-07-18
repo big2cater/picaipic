@@ -826,7 +826,7 @@
                   </div>
                 </div>
 
-                <div v-if="pluginStorageRows(plugin).length" class="space-y-1 rounded-box bg-base-300/30 border border-base-content/10 p-2 text-xs">
+                <div v-if="pluginStorageRows(plugin).length || pluginModelFiles(plugin).length" class="space-y-1 rounded-box bg-base-300/30 border border-base-content/10 p-2 text-xs">
                   <div class="flex items-center justify-between gap-3">
                     <div class="text-[10px] uppercase tracking-widest text-base-content/30">
                       {{ pluginText('storage') }}
@@ -858,6 +858,55 @@
                       >
                         {{ pluginText('open') }}
                       </button>
+                    </div>
+                  </div>
+                  <div
+                    v-if="pluginModelFiles(plugin).length"
+                    class="mt-1 space-y-1 rounded-box bg-base-100/20 border border-base-content/5 px-2 py-1"
+                  >
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="text-[10px] font-semibold uppercase tracking-wider text-base-content/30">
+                          {{ pluginText('modelFilesTitle') }}
+                        </div>
+                        <div
+                          class="truncate"
+                          :class="pluginModelFilesMissing(plugin).length ? 'text-warning/80' : 'text-success/70'"
+                          :title="pluginModelFilesStatusTitle(plugin)"
+                        >
+                          {{ pluginModelFilesStatusText(plugin) }}
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button
+                          class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
+                          :disabled="Boolean(aiPluginModelActionLoading[pluginModelActionKey(plugin, 'validate')])"
+                          @click="openAndValidatePluginModelDir(plugin)"
+                        >{{ pluginText('openAndValidateModelDir') }}</button>
+                        <button
+                          class="px-1.5 py-0.5 rounded-box border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20"
+                          :disabled="Boolean(aiPluginModelActionLoading[pluginModelActionKey(plugin, 'import')])"
+                          @click="importPluginModelFiles(plugin)"
+                        >{{ pluginText('importModelFiles') }}</button>
+                      </div>
+                    </div>
+                    <div class="space-y-0.5 text-base-content/45">
+                      <div
+                        v-for="model in pluginModelFiles(plugin)"
+                        :key="model.id"
+                        class="min-w-0 flex items-center gap-1"
+                      >
+                        <span
+                          class="shrink-0"
+                          :class="model.exists ? 'text-success/70' : (model.required ? 'text-error/70' : 'text-warning/70')"
+                        >{{ model.exists ? '✓' : '○' }}</span>
+                        <span class="truncate" :title="model.path">{{ model.name }}</span>
+                        <span class="shrink-0 text-base-content/30">
+                          {{ model.required ? pluginText('modelFileRequired') : pluginText('modelFileOptional') }}
+                          ·
+                          {{ model.exists ? pluginText('modelFilePresent') : pluginText('modelFileMissing') }}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1060,8 +1109,9 @@
                             <button
                               v-if="binding.dir"
                               class="px-1.5 py-0.5 rounded-box border border-base-content/10 bg-base-100/40 text-base-content/40 hover:text-base-content"
-                              @click="openPluginPath(binding.dir)"
-                            >{{ pluginText('open') }}</button>
+                              :disabled="Boolean(aiPluginModelBindingLoading[bindingKey(plugin, profile, binding)])"
+                              @click="openAndValidateModelDirBinding(plugin, profile, binding)"
+                            >{{ pluginText('openAndValidateModelDir') }}</button>
                             <button
                               v-if="binding.dir"
                               class="px-1.5 py-0.5 rounded-box border border-error/20 bg-error/10 text-error/70 hover:bg-error/20"
@@ -1168,13 +1218,23 @@
                           >
                             <span class="mr-0.5">{{ conflict.kind === 'unprobed' ? '○' : '⚠' }}</span>{{ conflict.message }}
                           </div>
-                          <div
-                            v-if="profileRuntimeConflicts(profile).some((c) => c.kind === 'version_mismatch' || c.kind === 'missing')"
-                            class="text-primary/70 font-medium"
-                          >
+<div
+                          v-if="profileRuntimeConflicts(profile).some((c) => c.kind === 'version_mismatch' || c.kind === 'missing')"
+                          class="flex flex-wrap items-center gap-2 text-primary/70 font-medium"
+                        >
+                          <span class="min-w-0">
                             <span class="mr-0.5">→</span>{{ pluginText('runtimeConflictAdvice') }}
-                          </div>
+                          </span>
+                          <button
+                            v-if="canSwitchProfileToPrivateRuntime(plugin, profile)"
+                            class="px-1.5 py-0.5 rounded-box border border-primary/25 bg-primary/10 text-primary hover:bg-primary/20"
+                            :disabled="Boolean(aiPluginProfileActionLoading[profileActionKey(plugin, profile, 'switchPrivate')])"
+                            @click="switchProfileToPrivateRuntime(plugin, profile)"
+                          >
+                            {{ pluginText('switchToPrivateRuntime') }}
+                          </button>
                         </div>
+                      </div>
                         <div
                           v-if="runtimeProbeAdvice(plugin, profile, profileRuntimeProbeResult(plugin, profile)).length"
                           class="space-y-0.5 border-t border-base-content/10 pt-1"
@@ -1544,6 +1604,9 @@ import {
   setAiPluginModelDirBinding,
   clearAiPluginModelDirBinding,
   checkAiPluginModelBindings,
+  checkAiPluginModelFiles,
+  importAiPluginModelFiles,
+  switchAiPluginProfileToPrivateRuntime,
   revokeAiPluginPermissions,
   listTrustedPublishers,
   trustPublisher,
@@ -1628,6 +1691,7 @@ const aiPluginProfileSmokeResults = ref<Record<string, AiPluginSmokeTestResult>>
 const aiPluginRuntimeProbeResults = ref<Record<string, AiPluginPythonRuntimeProbeResult>>({});
 const aiPluginRuntimeBindingSelection = ref<Record<string, string>>({});
 const aiPluginModelBindingLoading = ref<Record<string, boolean>>({});
+const aiPluginModelActionLoading = ref<Record<string, boolean>>({});
 const isLoadingAiPlugins = ref(false);
 const isRefreshingAiPlugins = ref(false);
 const isLoadingAiPluginHostEnvironment = ref(false);
@@ -1800,6 +1864,16 @@ type AiPluginSummary = {
   contributes?: AiPluginContributes;
   taskStates?: AiPluginTaskState[];
   modelBindings?: AiPluginModelBindingSummary[];
+  modelFiles?: AiPluginModelFileSummary[];
+};
+
+type AiPluginModelFileSummary = {
+  id: string;
+  name: string;
+  required: boolean;
+  path: string;
+  exists: boolean;
+  purpose?: string;
 };
 
 type AiPluginStorage = {
@@ -2350,6 +2424,24 @@ function pluginText(key: string, params?: Record<string, string | number | null 
     modelDirReady: 'ready',
     modelDirBindingFailed: 'Failed to bind model directory.',
     modelDirBindingCleared: 'Model directory binding cleared.',
+    modelFilesTitle: 'Managed model files',
+    modelFilesReady: 'All declared model files are present.',
+    modelFilesMissing: 'Missing {count} model file(s).',
+    modelFilesRequiredMissing: 'Missing required: {names}',
+    openAndValidateModelDir: 'Open & validate',
+    modelDirValidatedReady: 'Model folder opened. Validation: ready.',
+    modelDirValidatedMissing: 'Model folder opened. Missing: {names}',
+    modelDirValidateFailed: 'Failed to validate model folder.',
+    importModelFiles: 'Import model files',
+    importModelFilesTitle: 'Import model files',
+    importModelFilesSuccess: 'Imported {count} model file(s).',
+    importModelFilesPartial: 'Imported {imported}; skipped unmatched: {unmatched}.',
+    importModelFilesNone: 'No selected files matched declared model filenames.',
+    importModelFilesFailed: 'Failed to import model files.',
+    modelFilePresent: 'present',
+    modelFileMissing: 'missing',
+    modelFileRequired: 'required',
+    modelFileOptional: 'optional',
     probeRuntime: 'Probe',
     probeRuntimeSuccess: 'Runtime probe completed.',
     probeRuntimeFailed: 'Runtime probe failed.',
@@ -2401,6 +2493,13 @@ function pluginText(key: string, params?: Record<string, string | number | null 
     probeAdviceRunSetup: 'Run setup or install the missing Python packages for this binding.',
     probeAdviceOpenDiagnostics: 'Refresh Diagnostics and Logs for more detail.',
     runtimeConflictAdvice: 'Switch to a plugin-private runtime, or re-run Setup to fix.',
+    switchToPrivateRuntime: 'Use private runtime',
+    switchToPrivateRuntimeTitle: 'Switch to a plugin-private runtime?',
+    switchToPrivateRuntimeMessage: 'Plugin: {plugin}\nProfile: {profile}\nRuntime path: {runtimeDir}\n\nThis keeps the shared runtime unchanged for other plugins and stores a private environment under plugin-runtimes for this profile only. After switching, re-run Setup, then Probe and Smoke.',
+    switchToPrivateRuntimeSuccess: 'Switched to plugin-private runtime. Re-run Setup for this profile.',
+    switchToPrivateRuntimeFailed: 'Failed to switch to plugin-private runtime.',
+    switchToPrivateRuntimeUnavailable: 'This profile has no envDir for a private runtime.',
+    alreadyUsingPrivateRuntime: 'Already using a plugin-private runtime. Re-run Setup if packages are still missing.',
     probeAdviceTorchImportError: 'torch is installed but failed to import — check the error detail below.',
     probeAdviceInstallTorch: 'Install torch for this Python environment (pip install torch or run setup).',
     probeAdviceInstallOnnx: 'Install onnxruntime for this Python environment to use ONNX-based backends.',
@@ -2752,6 +2851,154 @@ function modelBindingStatusClass(binding: any): string {
     : 'border-error/30 bg-error/10 text-error/70';
 }
 
+function pluginModelFiles(plugin: AiPluginSummary): AiPluginModelFileSummary[] {
+  return Array.isArray(plugin.modelFiles) ? plugin.modelFiles : [];
+}
+
+function pluginModelFilesMissing(plugin: AiPluginSummary): AiPluginModelFileSummary[] {
+  return pluginModelFiles(plugin).filter((model) => !model.exists);
+}
+
+function pluginModelFilesRequiredMissing(plugin: AiPluginSummary): AiPluginModelFileSummary[] {
+  return pluginModelFiles(plugin).filter((model) => model.required && !model.exists);
+}
+
+function pluginModelFilesStatusText(plugin: AiPluginSummary) {
+  const missing = pluginModelFilesMissing(plugin);
+  if (!missing.length) return pluginText('modelFilesReady');
+  const requiredMissing = pluginModelFilesRequiredMissing(plugin);
+  if (requiredMissing.length) {
+    return pluginText('modelFilesRequiredMissing').replace(
+      '{names}',
+      requiredMissing.map((model) => model.name).join(', '),
+    );
+  }
+  return pluginText('modelFilesMissing').replace('{count}', String(missing.length));
+}
+
+function pluginModelFilesStatusTitle(plugin: AiPluginSummary) {
+  return pluginModelFiles(plugin)
+    .map((model) => `${model.name}: ${model.exists ? 'ok' : 'missing'} (${model.path})`)
+    .join('\n');
+}
+
+function pluginModelActionKey(plugin: AiPluginSummary, action: string) {
+  return `${aiPluginKey(plugin)}:model:${action}`;
+}
+
+async function withPluginModelActionLoading(
+  plugin: AiPluginSummary,
+  action: string,
+  task: () => Promise<void>,
+) {
+  const key = pluginModelActionKey(plugin, action);
+  if (aiPluginModelActionLoading.value[key]) return;
+  aiPluginModelActionLoading.value = { ...aiPluginModelActionLoading.value, [key]: true };
+  try {
+    await task();
+  } finally {
+    aiPluginModelActionLoading.value = { ...aiPluginModelActionLoading.value, [key]: false };
+  }
+}
+
+function applyPluginModelFiles(pluginId: string, modelFiles: AiPluginModelFileSummary[]) {
+  aiPlugins.value = aiPlugins.value.map((plugin) => (
+    plugin.id === pluginId ? { ...plugin, modelFiles } : plugin
+  ));
+}
+
+async function openAndValidatePluginModelDir(plugin: AiPluginSummary) {
+  await withPluginModelActionLoading(plugin, 'validate', async () => {
+    if (!plugin.id) return;
+    const modelDir = plugin.storage?.modelDir || plugin.storage?.modelDirs?.[0];
+    if (modelDir) {
+      await openPluginPath(modelDir);
+    }
+    try {
+      const modelFiles = await checkAiPluginModelFiles(plugin.id) as AiPluginModelFileSummary[];
+      applyPluginModelFiles(plugin.id, modelFiles || []);
+      const missing = (modelFiles || []).filter((model) => !model.exists);
+      if (!missing.length) {
+        toast.success(pluginText('modelDirValidatedReady'));
+      } else {
+        toast.warning(
+          pluginText('modelDirValidatedMissing').replace(
+            '{names}',
+            missing.map((model) => model.name).join(', '),
+          ),
+        );
+      }
+    } catch (error: any) {
+      toast.error(error?.message || String(error) || pluginText('modelDirValidateFailed'));
+    }
+  });
+}
+
+async function importPluginModelFiles(plugin: AiPluginSummary) {
+  await withPluginModelActionLoading(plugin, 'import', async () => {
+    if (!plugin.id) return;
+    const result = await openDialog({
+      title: pluginText('importModelFilesTitle'),
+      multiple: true,
+      directory: false,
+      filters: [
+        { name: 'Model files', extensions: ['pt', 'pth', 'ckpt', 'bin', 'onnx', 'safetensors'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (!result) return;
+    const sourcePaths = Array.isArray(result) ? result : [result];
+    if (!sourcePaths.length) return;
+    try {
+      const importResult = await importAiPluginModelFiles(plugin.id, sourcePaths);
+      if (Array.isArray(importResult?.modelFiles)) {
+        applyPluginModelFiles(plugin.id, importResult.modelFiles);
+      }
+      const importedCount = importResult?.imported?.length || 0;
+      const unmatched = importResult?.unmatched || [];
+      if (importedCount > 0 && unmatched.length === 0) {
+        toast.success(pluginText('importModelFilesSuccess').replace('{count}', String(importedCount)));
+      } else if (importedCount > 0) {
+        toast.warning(
+          pluginText('importModelFilesPartial')
+            .replace('{imported}', String(importedCount))
+            .replace('{unmatched}', unmatched.map((path: string) => path.split(/[\\/]/).pop() || path).join(', ')),
+        );
+      } else {
+        toast.warning(pluginText('importModelFilesNone'));
+      }
+      await loadAiPluginPanel(false, true);
+    } catch (error: any) {
+      toast.error(error?.message || String(error) || pluginText('importModelFilesFailed'));
+    }
+  });
+}
+
+async function openAndValidateModelDirBinding(plugin: AiPluginSummary, profile: any, binding: any) {
+  const key = bindingKey(plugin, profile, binding);
+  if (aiPluginModelBindingLoading.value[key] || !binding?.dir) return;
+  try {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: true };
+    await openPluginPath(binding.dir);
+    const check = await checkAiPluginModelBindings(plugin.id, binding.id, binding.dir);
+    await loadAiPluginPanel(false, true);
+    if (check?.ok) {
+      toast.success(pluginText('modelDirValidatedReady'));
+    } else {
+      toast.warning(
+        pluginText('modelDirValidatedMissing').replace(
+          '{names}',
+          (check?.missingFiles || []).join(', ') || pluginText('modelDirMissingFiles'),
+        ),
+      );
+    }
+  } catch (error: any) {
+    toast.error(error?.message || String(error) || pluginText('modelDirValidateFailed'));
+  } finally {
+    aiPluginModelBindingLoading.value = { ...aiPluginModelBindingLoading.value, [key]: false };
+  }
+}
+
 async function chooseModelDirBinding(plugin: AiPluginSummary, profile: any, binding: any) {
   const key = bindingKey(plugin, profile, binding);
   if (aiPluginModelBindingLoading.value[key]) return;
@@ -3068,6 +3315,92 @@ function profileRuntimeProbeResult(plugin: AiPluginSummary, profile: AiPluginIns
 
 function profileRuntimeConflicts(profile: AiPluginInstallProfile): RuntimeConflict[] {
   return profile.runtimeConflicts || [];
+}
+
+function profileHasBlockingRuntimeConflicts(profile: AiPluginInstallProfile) {
+  return profileRuntimeConflicts(profile).some(
+    (conflict) => conflict.kind === 'version_mismatch' || conflict.kind === 'missing',
+  );
+}
+
+function profilePrivateRuntimeBinding(profile: AiPluginInstallProfile): AiPluginRuntimeBinding | undefined {
+  const options = profileRuntimeBindingOptions(profile);
+  return options.find((binding) => String(binding.scope || '').toLowerCase() === 'plugin')
+    || (profile.envDir
+      ? {
+          scope: 'plugin',
+          kind: 'python',
+          id: `plugin-private:${profile.id}`,
+          label: `Plugin-private ${profile.label || profile.id}`,
+          requirements: profile.requirements,
+          notes: 'Isolated plugin-private runtime under plugin-runtimes/<plugin-id>/<envDir>.',
+        } as AiPluginRuntimeBinding
+      : undefined);
+}
+
+function canSwitchProfileToPrivateRuntime(plugin: AiPluginSummary, profile: AiPluginInstallProfile) {
+  if (!plugin.id || !profile.envDir) return false;
+  if (!profileHasBlockingRuntimeConflicts(profile)) return false;
+  const selected = selectedRuntimeBinding(plugin, profile);
+  return String(selected?.scope || '').toLowerCase() !== 'plugin';
+}
+
+async function switchProfileToPrivateRuntime(plugin: AiPluginSummary, profile: AiPluginInstallProfile) {
+  await withProfileActionLoading(plugin, profile, 'switchPrivate', async () => {
+    if (!plugin.id) return;
+    const privateBinding = profilePrivateRuntimeBinding(profile);
+    if (!privateBinding || !profile.envDir) {
+      toast.error(pluginText('switchToPrivateRuntimeUnavailable'));
+      return;
+    }
+    const selected = selectedRuntimeBinding(plugin, profile);
+    if (String(selected?.scope || '').toLowerCase() === 'plugin') {
+      toast.info(pluginText('alreadyUsingPrivateRuntime'));
+      return;
+    }
+    const runtimeDir = profile.resolvedRuntimeDir
+      || (profile.envDir ? `plugin-runtimes/${plugin.id}/${profile.envDir}` : '');
+    const confirmed = await ask(
+      pluginText('switchToPrivateRuntimeMessage')
+        .replace('{plugin}', plugin.name || plugin.id)
+        .replace('{profile}', profile.label || profile.id)
+        .replace('{runtimeDir}', runtimeDir || profile.envDir || ''),
+      {
+        title: pluginText('switchToPrivateRuntimeTitle'),
+        kind: 'warning',
+        okLabel: pluginText('switchToPrivateRuntime'),
+        cancelLabel: localeMsg.value.msgbox?.cancel || 'Cancel',
+      },
+    );
+    if (!confirmed) return;
+
+    try {
+      const state = await switchAiPluginProfileToPrivateRuntime(plugin.id, profile.id);
+      if (state?.runtimeBinding) {
+        const options = profileRuntimeBindingOptions({
+          ...profile,
+          runtimeBindings: [
+            ...(profile.runtimeBindings || []),
+            state.runtimeBinding,
+          ],
+        });
+        const index = Math.max(
+          options.findIndex((binding) => binding.id && binding.id === state.runtimeBinding?.id),
+          0,
+        );
+        setRuntimeBindingSelection(
+          plugin,
+          profile,
+          runtimeBindingKey(state.runtimeBinding, index),
+        );
+      }
+      setAiPluginExpanded(plugin, true);
+      toast.success(pluginText('switchToPrivateRuntimeSuccess'));
+      await loadAiPluginPanel(false, true);
+    } catch (error: any) {
+      toast.error(error?.message || String(error) || pluginText('switchToPrivateRuntimeFailed'));
+    }
+  });
 }
 
 function matchProbeStateByBinding(

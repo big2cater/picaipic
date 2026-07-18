@@ -1,17 +1,21 @@
 //! Plugin process sandbox helpers.
 //!
 //! The default runtime path stages external input files into the plugin task
-//! directory before invocation. That keeps normal plugin runs from needing
-//! direct access to arbitrary source-image paths.
+//! directory before invocation on **every supported platform**. That keeps
+//! normal plugin runs from needing direct access to arbitrary source-image
+//! paths. Staging is a host-side copy/rewrite and does not require OS
+//! sandbox APIs.
 //!
-//! The old v1 write-confinement path is still available for explicit testing:
+//! The Windows write-confinement path is still available for explicit testing:
 //! set `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` to apply a temporary Windows
 //! deny-ACE (`icacls /deny <user>:(W)`) on sensitive user directories before
 //! the plugin process is spawned. The handle revokes those ACEs on drop.
 //!
 //! The ACL mode is opt-in because it changes ACLs on real user directories
 //! for the current Windows account, so it can surface confusing system access
-//! prompts in the host UI while a plugin is running.
+//! prompts in the host UI while a plugin is running. Network blocking and
+//! Linux process sandboxing remain future work — see
+//! `docs/ai-plugin-sandbox-roadmap.md`.
 // Fields/methods are part of the sandbox's public surface used by t_plugin
 // and reserved for future diagnostics; allow dead code at module level.
 #![allow(dead_code)]
@@ -207,10 +211,15 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether input staging is active for this build/config. When false, staging
-/// is skipped and the plugin receives original source paths directly.
+/// Whether default input staging is active for this build/config.
+///
+/// Staging is platform-agnostic (host copies external inputs into the task
+/// directory and rewrites payload `path` fields). When false, staging is
+/// skipped and the plugin receives original source paths directly.
+/// Windows deny-ACL write confinement is controlled separately by
+/// `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX` and is never implied by this flag.
 pub fn sandbox_enabled() -> bool {
-    cfg!(target_os = "windows") && !sandbox_disabled()
+    !sandbox_disabled()
 }
 
 #[cfg(target_os = "windows")]

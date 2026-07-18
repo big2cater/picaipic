@@ -155,6 +155,19 @@ side (`real_signed_zips_verify` test).
 
 ---
 
+
+## 2026-07-17/18 sandbox Phase 0–2 (host path control)
+
+Status summary (see `docs/ai-plugin-sandbox-roadmap.md` for full board):
+
+- **Done:** cross-platform default input staging; fail-closed materialize errors;
+  task message + `staging-report.json`; `plugin_writable_roots` allow-list;
+  same-volume hardlink with copy fallback (`hardlinkedFiles` / `copiedFiles`).
+- **Not done:** network OS block (Phase 3); Linux Landlock/seccomp (Phase 4);
+  env strip (Phase 5); universal zero-copy across volumes / cache ref-range.
+- Windows deny-ACL remains opt-in (`PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1`).
+- Do not claim a complete OS sandbox in release notes.
+
 ## 2026-07-10 sandbox policy update — input staging default, deny-ACL opt-in
 
 The Windows deny-ACL write-confinement path caused confusing host/UI behavior
@@ -291,9 +304,13 @@ What changed:
 
 Boundary:
 
-- The host does **not** auto-switch a profile from shared to plugin-private.
-  It only advises. Auto-switch still requires user confirmation and is future
-  work.
+- Confirmed one-click switch to plugin-private is implemented (2026-07-17).
+  When blocking conflicts exist, Settings shows **Use private runtime**. After
+  user confirmation, `switch_ai_plugin_profile_to_private_runtime` persists a
+  synthetic `scope: "plugin"` binding (`plugin-private:<profileId>`) on the
+  profile state, clears that profile's probe cache, and marks the profile
+  `needsVerify`. Shared runtimes are never modified. The host still does **not**
+  switch without confirmation and does **not** auto-run Setup.
 - The probe script was **not** extended to inspect NAFNet-only packages
   (`timm`, `scikit-image`, `addict`, `pyyaml`). They surface as `unprobed` and
   do not block.
@@ -438,7 +455,8 @@ Important boundary:
   `picaipic-local\plugin-runtimes\<plugin-id>\<envDir>`.
 - Automatic dependency-conflict detection is not implemented yet. The host
   does not currently inspect requirements, compare installed package versions,
-  or switch a profile from shared to plugin-private by itself.
+  or switch a profile from shared to plugin-private without user confirmation.
+  Confirmed one-click switch is available in Settings after blocking conflicts.
 
 Next validation is a packaged-app UI pass: rebuild plugin zips, install them
 from Settings, grant setup download permission, run setup for the target
@@ -861,17 +879,16 @@ These should stay deferred unless a v1 freeze regression exposes a host boundary
    - successful plugin output can be imported/adopted/discarded.
    - failed/cancelled plugin tasks remain bounded task failures, not app hangs.
 4. Keep NAFNet as a complex sample/stress plugin, not a quality benchmark.
-5. Runtime conflict detection is implemented (2026-07-03). Remaining work:
-   - auto-switch a profile from shared to plugin-private when a blocking
-     conflict is detected, with explicit user confirmation (currently only
-     advises).
-   - optionally extend the probe script to inspect NAFNet-only packages
-     (`timm`, `scikit-image`, `addict`, `pyyaml`) so they move from `unprobed`
-     to real checks.
+5. Runtime conflict detection is implemented (2026-07-03). Confirmed
+   shared→plugin-private switch is implemented (2026-07-17):
+   - Settings conflict block offers **Use private runtime** after user confirm.
+   - Host command: `switch_ai_plugin_profile_to_private_runtime`.
+   - Remaining optional work: extend the probe script to inspect NAFNet-only
+     packages (`timm`, `scikit-image`, `addict`, `pyyaml`) so they move from
+     `unprobed` to real checks.
 6. Add first-class runtime management UI:
    - show shared/plugin/external scope, actual venv path, and disk location
    - show key package versions for `python`, `torch`, `torchvision`, `numpy`, `opencv-python`, and plugin-specific requirements
-   - the user-confirmed private-runtime fallback is the natural next step after conflict detection
 7. Uninstall mode is implemented (2026-07-03). Remaining work:
    - consider scanning registered plugins to determine whether a
      `shared-runtime` is unreferenced before offering to delete it in a future
@@ -882,6 +899,10 @@ These should stay deferred unless a v1 freeze regression exposes a host boundary
 11. ~~Add model import / external model directory binding.~~ **Completed
     2026-07-08:** manifest-declared `modelBindings[]`, Settings binding UI,
     validation, persistence, and environment injection are implemented.
+    **Reinforced 2026-07-17:** managed model-file presence in `list_ai_plugins`
+    (`modelFiles`), Settings **Open & validate**
+    (`check_ai_plugin_model_files`), and basename **Import model files** into
+    `plugin-data/<id>/models` (`import_ai_plugin_model_files`).
 12. Keep the host/plugin version gate covered whenever compatibility fields or
     product versioning changes.
 13. Keep thumbnail/preview protocol database access library-scoped; add a

@@ -64,14 +64,62 @@ Runbook: `.mex/patterns/change-live-photo.md`.
 ### Still open
 
 - Broader HEIC sequence sample coverage; unusual sequence brands may fail ffmpeg demux.
-- One-click confirmed switch from conflicting shared runtime to plugin-private runtime
-  (conflict detection + advice + manual private binding already exist).
-- Optional bulk “import model files into plugin model dir” wizard (external **directory**
-  binding UI already shipped 2026-07-08).
-- Network confinement / Linux process sandboxing; strict OS write allow-list; zero-copy
-  large-video staging (default isolation remains input staging + optional Windows deny-ACL).
+- Sandbox **Phase 3–5 only** (Phase 0–2 done): network OS block, Linux Landlock/seccomp,
+  env hygiene, optional cache ref/range zero-copy — `docs/ai-plugin-sandbox-roadmap.md`.
 - Signing-key rotation/revocation design.
 - Release-executable plugin regression after host/plugin changes.
+- Manual SA-LUT/NAFNet staged-path checklist on release builds
+  (`docs/ai-plugin-sandbox-phase0-verify.md`).
+
+### 2026-07-17 shared→plugin-private confirmed switch
+
+- Settings probe conflict block now offers **Use private runtime** when blocking
+  conflicts exist and the profile still uses a non-private binding.
+- User confirmation persists a synthetic `scope: "plugin"` binding via
+  `switch_ai_plugin_profile_to_private_runtime`, clears that profile's probe
+  cache, and marks the profile `needsVerify` without touching shared runtimes.
+- After the switch, the user still re-runs Setup → Probe → Smoke for the private
+  env under `plugin-runtimes/<plugin-id>/<envDir>`.
+
+### 2026-07-17 model UX reinforcement
+
+- `list_ai_plugins` now includes `modelFiles` presence under the managed model
+  directory (`plugin-data/<id>/models`).
+- Settings storage panel shows declared model files and offers:
+  - **Open & validate** → `check_ai_plugin_model_files` + reveal model dir
+  - **Import model files** → `import_ai_plugin_model_files` copies selected
+    files by basename into declared model paths (containment-checked)
+- External model-dir binding rows also open+validate the bound directory.
+
+### 2026-07-17 sandbox Phase 0 (design + small correctness fixes)
+
+- Roadmap: `docs/ai-plugin-sandbox-roadmap.md` (phased; no Settings sandbox panel).
+- Input staging default is **platform-agnostic** (was Windows-gated).
+- Staging copy failures **fail closed** (no silent fallthrough to original paths).
+- Diagnostics: task queue message + `plugin-cache/.../inputs/staging-report.json`
+  with staged file/byte counts and skip counters.
+- Unit tests cover rewrite, fail-closed, and disabled messaging.
+- Manual SA-LUT/NAFNet checklist: `docs/ai-plugin-sandbox-phase0-verify.md`.
+- Network/Linux OS sandbox remain future opt-in research spikes.
+
+### 2026-07-17 sandbox Phase 1 (host write allow-list)
+
+- Single helper `plugin_writable_roots`: data/cache/outputs/plugin-runtimes/code
+  + manifest shared runtimes + persisted model-dir bindings + call-site extras
+  (task dir / task output).
+- Used by invoke-time staging skip list and start-time optional deny-ACL
+  exclusions (no Settings UI; no OS allow-list enforcement beyond existing ACL opt-in).
+- Output adoption remains stricter: paths must stay under the **task output**
+  directory only.
+
+### 2026-07-17 sandbox Phase 2 (same-volume hardlink staging) — **done**
+
+- Phase 2 **mainline complete**: `stage_one_file` tries hardlink first, then copy.
+- Not full universal zero-copy: cross-volume still copies; cache ref/range not implemented.
+- Staging report + task message include `hardlinkedFiles` / `copiedFiles`.
+- Unit tests cover hardlink path on same temp volume; fail-closed still enforced.
+- **Next sandbox work is Phase 3/4 research only** (do not ship as default).
+
 
 ## 2026-07-10 v1.0.0 stabilization pass
 
