@@ -77,18 +77,42 @@
         </label>
       </div>
 
-      <div v-if="mode === 'set_keyframe'" class="flex items-center gap-2">
-        <span class="text-base-content/50 shrink-0">{{ $t('live_photo.keyframe_sec') }}</span>
-        <input
-          v-model.number="keyframeSec"
-          type="number"
-          min="0"
-          step="0.1"
-          class="input input-xs input-bordered w-24 bg-base-100/40"
-        />
+      <div v-if="mode === 'set_keyframe'" class="flex flex-col gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-base-content/50 shrink-0">{{ $t('live_photo.keyframe_sec') }}</span>
+          <input
+            v-model.number="keyframeSec"
+            type="number"
+            min="0"
+            step="0.1"
+            class="input input-xs input-bordered w-24 bg-base-100/40"
+          />
+        </div>
+        <label
+          class="flex items-start gap-2 cursor-pointer text-base-content/70"
+          :class="{ 'opacity-40 cursor-not-allowed': !canOverwriteKeyframe }"
+        >
+          <input
+            v-model="overwriteOriginal"
+            type="checkbox"
+            class="checkbox checkbox-xs checkbox-warning mt-0.5"
+            :disabled="!canOverwriteKeyframe"
+          />
+          <span>
+            <span class="font-medium text-warning">{{ $t('live_photo.overwrite_original') }}</span>
+            <span class="block text-[11px] text-base-content/45 mt-0.5">
+              {{ canOverwriteKeyframe
+                ? $t('live_photo.overwrite_original_hint')
+                : $t('live_photo.overwrite_original_heic') }}
+            </span>
+          </span>
+        </label>
       </div>
 
-      <label class="flex items-center gap-2 cursor-pointer text-base-content/70">
+      <label
+        v-if="!overwriteOriginal || mode !== 'set_keyframe'"
+        class="flex items-center gap-2 cursor-pointer text-base-content/70"
+      >
         <input
           v-model="replaceExisting"
           type="checkbox"
@@ -123,7 +147,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { open as openDialog, save } from '@tauri-apps/plugin-dialog';
+import { ask, open as openDialog, save } from '@tauri-apps/plugin-dialog';
 import ModalDialog from '@/components/ModalDialog.vue';
 import { exportLivePhoto } from '@/common/api';
 import { useToast } from '@/common/toast';
@@ -157,9 +181,16 @@ const liveType = computed(() => Number(props.file?.live_photo_type || 0));
 // Apple image (1) or video (2) can convert to Motion if pair exists (backend checks).
 const canToMotion = computed(() => liveType.value === 1 || liveType.value === 2);
 const canToPair = computed(() => liveType.value === 3);
+// In-place keyframe replace only for JPEG stills (type 1 JPEG / type 3 Motion).
+const canOverwriteKeyframe = computed(() => {
+  const name = String(props.file?.name || '').toLowerCase();
+  const isJpeg = /\.(jpe?g)$/i.test(name);
+  return (liveType.value === 1 || liveType.value === 3) && isJpeg;
+});
 
 const mode = ref<ExportMode>('still');
 const replaceExisting = ref(false);
+const overwriteOriginal = ref(false);
 const keyframeSec = ref(0);
 const isProcessing = ref(false);
 
@@ -210,50 +241,66 @@ const doExport = async () => {
 
   isProcessing.value = true;
   try {
+    const doOverwrite =
+      mode.value === 'set_keyframe' && overwriteOriginal.value && canOverwriteKeyframe.value;
+
+    if (doOverwrite) {
+      const confirmed = await ask(t('live_photo.overwrite_confirm'), {
+        title: t('live_photo.export_title'),
+        kind: 'warning',
+      });
+      if (!confirmed) {
+        isProcessing.value = false;
+        return;
+      }
+    }
+
     const conflict = replaceExisting.value ? 'replace' : 'keep_both';
     let destPath: string | null = null;
     let destDir: string | null = null;
 
-    if (needsFolder.value) {
-      destDir = await openDialog({
-        directory: true,
-        multiple: false,
-        title: t('live_photo.export_choose_folder'),
-      });
-      if (!destDir) {
-        isProcessing.value = false;
-        return;
-      }
-    } else {
-      let filters: { name: string; extensions: string[] }[];
-      let defaultPath: string;
-      if (mode.value === 'video') {
-        filters = [
-          { name: 'Video', extensions: ['mp4', 'mov', 'm4v'] },
-          { name: 'All', extensions: ['*'] },
-        ];
-        defaultPath = defaultVideoName();
-      } else if (mode.value === 'to_motion') {
-        filters = [
-          { name: 'Motion Photo JPEG', extensions: ['jpg', 'jpeg'] },
-          { name: 'All', extensions: ['*'] },
-        ];
-        defaultPath = defaultMotionName();
+    if (!doOverwrite) {
+      if (needsFolder.value) {
+        destDir = await openDialog({
+          directory: true,
+          multiple: false,
+          title: t('live_photo.export_choose_folder'),
+        });
+        if (!destDir) {
+          isProcessing.value = false;
+          return;
+        }
       } else {
-        filters = [
-          { name: 'Image', extensions: ['jpg', 'jpeg', 'heic', 'heif', 'png', 'webp'] },
-          { name: 'All', extensions: ['*'] },
-        ];
-        defaultPath = defaultStillName();
-      }
-      destPath = await save({
-        title: t('live_photo.export_title'),
-        defaultPath,
-        filters,
-      });
-      if (!destPath) {
-        isProcessing.value = false;
-        return;
+        let filters: { name: string; extensions: string[] }[];
+        let defaultPath: string;
+        if (mode.value === 'video') {
+          filters = [
+            { name: 'Video', extensions: ['mp4', 'mov', 'm4v'] },
+            { name: 'All', extensions: ['*'] },
+          ];
+          defaultPath = defaultVideoName();
+        } else if (mode.value === 'to_motion') {
+          filters = [
+            { name: 'Motion Photo JPEG', extensions: ['jpg', 'jpeg'] },
+            { name: 'All', extensions: ['*'] },
+          ];
+          defaultPath = defaultMotionName();
+        } else {
+          filters = [
+            { name: 'Image', extensions: ['jpg', 'jpeg', 'heic', 'heif', 'png', 'webp'] },
+            { name: 'All', extensions: ['*'] },
+          ];
+          defaultPath = defaultStillName();
+        }
+        destPath = await save({
+          title: t('live_photo.export_title'),
+          defaultPath,
+          filters,
+        });
+        if (!destPath) {
+          isProcessing.value = false;
+          return;
+        }
       }
     }
 
@@ -266,6 +313,7 @@ const doExport = async () => {
         conflict,
         keyframeSec: mode.value === 'set_keyframe' ? Number(keyframeSec.value) || 0 : undefined,
         stampContentId: mode.value === 'to_pair' ? true : undefined,
+        overwriteOriginal: doOverwrite,
       },
     });
 
@@ -274,10 +322,12 @@ const doExport = async () => {
     }
 
     toast.success(
-      t('live_photo.export_success', {
-        count: result.outputs.length,
-        path: result.outputs[0],
-      })
+      result.overwroteOriginal
+        ? t('live_photo.overwrite_success', { path: result.outputs[0] })
+        : t('live_photo.export_success', {
+            count: result.outputs.length,
+            path: result.outputs[0],
+          })
     );
     emit('done', result.outputs);
   } catch (error: any) {

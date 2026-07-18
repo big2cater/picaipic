@@ -176,13 +176,17 @@ jobs:
           }
 
       - name: Upload Windows artifacts
+        # PR packaging success is the gate; artifact upload is best-effort.
+        # GitHub free/org artifact quota can fail even when the MSI built cleanly.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: picaipic-pr-windows-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 3
  
   build-linux:
     if: |
@@ -304,13 +308,16 @@ jobs:
           done
 
       - name: Upload Linux artifacts
+        # Same as Windows: build success is the gate; upload is best-effort under quota limits.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: picaipic-pr-linux-${{ matrix.arch }}-${{ github.event.pull_request.number || github.run_number }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 3
 
   publish-pr-build:
     needs: [build-windows, build-linux]
@@ -322,6 +329,8 @@ jobs:
 
     steps:
       - name: Download build artifacts
+        continue-on-error: true
+        id: download
         uses: actions/download-artifact@v4
         with:
           pattern: picaipic-pr-*
@@ -329,9 +338,15 @@ jobs:
           merge-multiple: true
 
       - name: Show release files
-        run: ls -la release-files
+        run: |
+          if [ -d release-files ]; then
+            ls -la release-files
+          else
+            echo "No PR artifacts downloaded (quota or upload skip). Skipping pr-build release publish."
+          fi
 
       - name: Upload files to GitHub Release tag pr-build
+        if: hashFiles('release-files/**') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

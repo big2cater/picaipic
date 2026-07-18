@@ -45,14 +45,15 @@ The `afiles` table (schema v6) has three columns: `content_id` (UUID, `motion:<o
 | Motion packaging | `t_xmp.rs` | `package_motion_photo_jpeg`, `read_motion_still_bytes` |
 | FFmpeg helpers | `t_video.rs` | `remux_or_transcode_to_mp4`, `remux_with_content_id`, `extract_keyframe_jpeg` |
 | HEIC internal video | `t_heif.rs` | `detect_heic_embedded_video`, `extract_heic_embedded_video_to_cache` (items → sequences/ffmpeg) |
-| Tauri commands | `t_cmds.rs` | `get_paired_video`, `extract_motion_video`, `rebuild_live_photo_pairs`, `export_live_photo` |
+| Tauri commands | `t_cmds.rs` | `get_paired_video`, `extract_motion_video`, `rebuild_live_photo_pairs`, `export_live_photo`, `rescan_live_photo_metadata` |
 | Command registration | `main.rs` | `invoke_handler` (append to `generate_handler!`) |
-| Frontend API | `src-vite/src/common/api.js` | `getPairedVideo`, `extractMotionVideo`, `rebuildLivePhotoPairs`, `exportLivePhoto` |
-| Frontend types | `src-vite/src/common/types.ts` | `PairedVideoInfo`, `ExportLivePhotoOptions`, `ExportLivePhotoResult` |
+| Frontend API | `src-vite/src/common/api.js` | `getPairedVideo`, `extractMotionVideo`, `rebuildLivePhotoPairs`, `exportLivePhoto`, `rescanLivePhotoMetadata` |
+| Frontend types | `src-vite/src/common/types.ts` | `PairedVideoInfo`, `ExportLivePhotoOptions`, `ExportLivePhotoResult`, `RescanLivePhotoResult` |
 | MediaViewer preview | `src-vite/src/components/MediaViewer.vue` | long-press handlers + `<video>` overlay + LIVE badge |
 | Thumbnail badge | `src-vite/src/components/Thumbnail.vue` | `isLivePhoto` computed + LIVE badge |
-| FileInfo label | `src-vite/src/components/FileInfo.vue` | `livePhotoLabel` computed |
-| Export UI | `LivePhotoExportDialog.vue`, `fileMenu.ts`, `Content.vue` | right-click Export Live Photo → still/video/pair |
+| FileInfo label | `src-vite/src/components/FileInfo.vue` | `livePhotoLabel` + export button |
+| Export UI | `LivePhotoExportDialog.vue`, `fileMenu.ts`, `Content.vue` | right-click / FileInfo → still/video/pair/convert/keyframe (+ optional JPEG overwrite) |
+| Metadata repair | `rescan_live_photo_metadata` + AlbumList menu | repairs type 0/4 without full reindex; then re-pairs |
 
 ## Steps
 

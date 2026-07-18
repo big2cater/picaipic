@@ -19,6 +19,7 @@ It works directly with your existing folders, keeps your library on your own dev
 - **Practical Organization**: Use favorites, ratings, tags, comments, camera and lens grouping, and duplicate detection to keep collections organized.
 - **Broad Video Support**: Open MP4, MOV, AVI, MKV, and 20+ other video formats across platforms.
 - **Built-in Editing Tools**: Quickly crop, rotate, adjust, and save changes without leaving the app.
+- **Live Photo / Motion Photo**: Preview hybrid still+motion captures with long-press, export or convert them, and repair metadata on existing albums. See [Live Photo / Motion Photo](/guide/live-photo).
 - **Folder-Based Workflow**: PicAiPic reflects your real folder structure instead of forcing an import-only library model.
 
 ## Getting Started

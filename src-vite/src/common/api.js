@@ -2071,3 +2071,8 @@ export async function exportLivePhoto({
     options: options ?? null,
   });
 }
+
+// lightweight Live Photo metadata repair for an already-indexed album
+export async function rescanLivePhotoMetadata(albumId) {
+  return await invoke('rescan_live_photo_metadata', { albumId });
+}

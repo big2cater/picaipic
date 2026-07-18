@@ -31,9 +31,15 @@ For detailed plugin runtime status, use:
 - Preview: MediaViewer 400ms long-press plays paired MOV or extracted motion video; LIVE badge
   on Thumbnail; FileInfo type labels; i18n en/zh.
 - Export/convert (`export_live_photo` + `LivePhotoExportDialog`): still / video / pair /
-  to_motion / to_pair / set_keyframe. Does **not** overwrite library originals.
+  to_motion / to_pair / set_keyframe.
 - Shared parser: `t_xmp::parse_motion_content_id` is the single source of truth for
   `motion:<offset>:<length>` (used by `t_cmds` and `t_live_photo`).
+- **Polish (same day):**
+  - Optional **confirmed** JPEG keyframe overwrite of the library still
+    (`overwrite_original`; staged promote; Motion Photo keeps trailer; HEIC not supported).
+  - Album-level `rescan_live_photo_metadata` repairs type `0`/`4` without full reindex, then
+    re-pairs; AlbumList context menu + FileInfo export entry.
+  - User guide: `docs/guide/live-photo.md`.
 
 Runbook: `.mex/patterns/change-live-photo.md`.
 
@@ -51,15 +57,20 @@ Runbook: `.mex/patterns/change-live-photo.md`.
 ### Verification (this pass)
 
 - `cargo check --manifest-path src-tauri/Cargo.toml` passed.
-- Frontend production build and full plugin-host regression not re-run in this reliability
-  pass; run `pnpm --dir src-vite build` and `scripts/check_plugin_host.ps1` before release.
+- `pnpm --dir src-vite build` passed for the Live Photo polish UI pass.
+- Full plugin-host regression not re-run in this pass; run
+  `scripts/check_plugin_host.ps1` before release.
 
 ### Still open
 
-- In-library Live Photo keyframe overwrite of the original still (export-only keyframe exists).
 - Broader HEIC sequence sample coverage; unusual sequence brands may fail ffmpeg demux.
-- One-click confirmed switch from conflicting shared runtime to plugin-private runtime.
-- Network confinement / Linux process sandboxing; signing-key rotation/revocation design.
+- One-click confirmed switch from conflicting shared runtime to plugin-private runtime
+  (conflict detection + advice + manual private binding already exist).
+- Optional bulk “import model files into plugin model dir” wizard (external **directory**
+  binding UI already shipped 2026-07-08).
+- Network confinement / Linux process sandboxing; strict OS write allow-list; zero-copy
+  large-video staging (default isolation remains input staging + optional Windows deny-ACL).
+- Signing-key rotation/revocation design.
 - Release-executable plugin regression after host/plugin changes.
 
 ## 2026-07-10 v1.0.0 stabilization pass
@@ -502,12 +513,13 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   **Completed (2026-07-08):** plugin-level external model directory binding
   landed. Manifest `modelBindings[]` declares the env var + expected files;
   Settings UI lets users pick a directory; host injects it into the plugin
-  process and validates file presence. See the 2026-07-08 section above.
+  process and validates file presence. Optional **bulk file import into the
+  plugin model directory** remains a UX nice-to-have, not a blocker.
 - Avoid concrete `export-lut` business logic until runtime binding
   confidence is stable across both SA-LUT and NAFNet.
 - Add user-confirmed one-click fallback from a conflicting shared runtime to a
-  plugin-private runtime.
+  plugin-private runtime (detect + text advice + manual private selection already work).
 - Design publisher signing-key rotation/revocation and continue release-exe
   plugin regression after host/package changes.
 - Strengthen network confinement and Linux process isolation without breaking
-  GPU/runtime compatibility.
+  GPU/runtime compatibility (beyond default input staging / opt-in Windows ACL).

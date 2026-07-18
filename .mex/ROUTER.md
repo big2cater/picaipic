@@ -38,13 +38,13 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Motion Photo extract cache: `app_cache_dir()/motion_cache/` with source-keyed reuse, size-based prune, startup purge of legacy OS-temp extracts; cleared with `clear_video_cache`.
 - Live Photo export + conversion via `export_live_photo` + `LivePhotoExportDialog`: still / video / pair / to_motion / to_pair / set_keyframe (does not modify library originals).
 - HEIC container-internal video (`live_photo_type=4`): libheif mime-item extract preferred, sequence track via ffmpeg demux fallback; long-press preview + export reuse motion_cache.
+- Live Photo polish: confirmed JPEG keyframe overwrite of original still; album-level `rescan_live_photo_metadata` (no full reindex); FileInfo export button + album context-menu repair entry.
 - GitHub Actions build documentation, app releases, plugin packages, and VitePress documentation.
 
 **Not yet built / future work:**
-- One-click confirmation-driven switch from a conflicting shared runtime to a plugin-private runtime.
-- Complete model import and external model-directory binding UX across plugin workflows.
-- Network confinement and Linux process sandboxing; strict write allow-listing and zero-copy large-video staging remain future security/performance work.
-- Live Photo keyframe overwrite of the original still (export-only keyframe is implemented; in-library replace remains optional/guarded).
+- One-click confirmation-driven switch from a conflicting shared runtime to a plugin-private runtime (detect/advice/manual private binding already exist).
+- Optional bulk model-file import wizard (external model **directory** binding UI shipped 2026-07-08).
+- Network confinement and Linux process sandboxing; strict OS write allow-listing and zero-copy large-video staging remain future security/performance work (default isolation: input staging + optional Windows deny-ACL).
 - Broader HEIC sequence sample coverage (frame-decode re-encode path not implemented; ffmpeg demux may fail on unusual sequence brands).
 - Broader automated coverage outside the plugin-host checks and current Rust unit tests.
 

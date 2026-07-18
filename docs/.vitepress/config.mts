@@ -34,6 +34,7 @@ export default defineConfig({
                 items: [
                     { text: 'Introduction', link: '/guide/introduction' },
                     { text: 'Getting Started', link: '/guide/getting-started' },
+                    { text: 'Live Photo / Motion Photo', link: '/guide/live-photo' },
                     { text: 'AI Plugin Interface', link: '/guide/ai-plugin-interface' },
                     { text: 'AI Plugin Roadmap', link: '/guide/ai-plugin-development-roadmap' },
                     { text: 'AI Runtime Status', link: '/guide/plugin-runtime-status-2026-06-20' },

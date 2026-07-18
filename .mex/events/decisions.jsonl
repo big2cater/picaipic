@@ -19,3 +19,5 @@
 {"timestamp":"2026-07-17T12:13:24.682Z","kind":"note","message":"MediaViewer: optional-chain props.file?.file_type in floating toolbar class; guard startLivePhotoPlayback when file is null","files":[],"cwd":"."}
 {"timestamp":"2026-07-17T12:35:06.396Z","kind":"note","message":"Confirmed MediaViewer props.file! already fixed; deduped parse_motion_content_id into t_xmp; corrected PairedVideoInfo type docs (1/3/4)","files":[],"cwd":"."}
 {"timestamp":"2026-07-17T13:03:22.979Z","kind":"note","message":"Docs sync 2026-07-17: picaipic-progress, 目前的开发情况, README/zh, live-photo pattern; ready to commit Live Photo + reliability fixes","files":[],"cwd":"."}
+{"timestamp":"2026-07-17T13:51:16.937Z","kind":"note","message":"Live Photo polish: set_keyframe overwrite_original (JPEG only, confirmed+staged), rescan_live_photo_metadata album repair, FileInfo export button, album menu repair entry.","files":[],"cwd":"."}
+{"timestamp":"2026-07-17T14:06:04.444Z","kind":"note","message":"Docs: live-photo user guide + progress/README/ROUTER accuracy (keyframe overwrite done; model dir binding done; one-click private runtime still open).","files":[],"cwd":"."}

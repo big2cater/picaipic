@@ -2125,3 +2125,12 @@ pub fn export_live_photo(
     )
 }
 
+/// Re-detect Live Photo / Motion Photo / HEIC-internal markers for an album
+/// without a full re-index, then rebuild pairs.
+#[tauri::command]
+pub fn rescan_live_photo_metadata(
+    album_id: i64,
+) -> Result<crate::t_live_photo::RescanLivePhotoResult, String> {
+    crate::t_live_photo::rescan_live_photo_metadata(album_id)
+}
+
