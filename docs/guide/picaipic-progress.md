@@ -1,6 +1,13 @@
 # PicAiPic Progress
 
-Updated: 2026-07-17
+Updated: 2026-07-18
+
+## 2026-07-18 merge + v1.1.0 line
+
+- Merged Live Photo polish (#1) and plugin sandbox Phase 0–2 + private runtime + model UX (#2) to `main`.
+- Windows/Linux PR builds green after Actions artifact-quota hardening (`pr-build.yml` best-effort upload).
+- App version aligned to **1.1.0** for the next signed multi-arch release draft.
+
 
 This document records the current implementation status for turning the existing
 PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight

@@ -46,6 +46,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - SA-LUT full E2E (2026-07-18): host-equivalent start (ROCm shared runtime + bearer) + stage 2 album JPGs from Downloads into the plugin task inputs dir (0 hardlink / 2 copy) + color-transfer invoke → PNG under the task outputs dir (~13MB). Task id phase0-e2e-de513e5c.
 - Plugin smoke (2026-07-18): `scripts/check_plugin_host.ps1` + package preflight green; user confirmed GUI / release-shell smoke pass for this sandbox work.
 - GitHub Actions build documentation, app releases, plugin packages, and VitePress documentation.
+- Release line: app/docs versions bumped toward **v1.1.0** (Live Photo polish + sandbox Phase 0–2 + model/runtime UX).
 
 **Not yet built / future work:**
 - Sandbox Phase 3–5 only: network OS block, Linux Landlock/seccomp, env hygiene, optional cache ref/range zero-copy — see `docs/ai-plugin-sandbox-roadmap.md`. Phase 0–2 host path control is done.
@@ -58,7 +59,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Release Rust builds can fail at local MSVC/CRT link time in native dependencies such as ONNX Runtime or LibRaw even when `cargo check` passes.
 - AI plugin compatibility now enforces min/max PicAiPic versions and plugin API major; treat version-range changes as package compatibility changes.
 - Protocol thumbnail/preview requests now resolve and cache against the library id encoded in the URL; future protocol work must preserve that isolation.
-- pnpm is the sole JavaScript package manager, and host/frontend/docs versions are aligned at `1.0.0`.
+- pnpm is the sole JavaScript package manager, and host/frontend/docs versions are aligned at `1.1.0`.
 - Historical docs, internal ABI/cache identifiers, and old source comments may still use `Lap`; user-visible active paths were corrected on 2026-07-10, while compatibility-sensitive internal identifiers are intentionally unchanged.
 - ffprobe key name for `com.apple.quicktime.content.identifier` may vary across versions; the `first_exist` helper checks both dotted and underscored variants.
 
