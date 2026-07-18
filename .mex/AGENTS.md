@@ -1,13 +1,14 @@
 ---
 name: agents
 description: Always-loaded PicAiPic project anchor. Read this first for project identity, hard rules, commands, and MEX navigation.
-last_updated: 2026-07-10
+last_updated: 2026-07-18
 ---
 
 # PicAiPic
 
 ## What This Is
 PicAiPic is a local-first Tauri desktop photo manager for browsing, indexing, searching, editing, and organizing large personal image and video libraries offline.
+Current app line is **1.1.0** (private draft multi-arch release may exist; publish is optional).
 
 ## Non-Negotiables
 - Preserve the local-first privacy model: never introduce required cloud upload or remote processing for user media.
@@ -37,3 +38,4 @@ After meaningful work, run GROW:
 
 ## Navigation
 At the start of every session, read `.mex/ROUTER.md`. It routes architecture, stack, conventions, decisions, setup, plugin-runtime, and recurring-task guidance.
+For planned built-in crop/collage/batch tools, also read `docs/guide/builtin-tools-roadmap.md` before implementing.

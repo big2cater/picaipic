@@ -12,7 +12,7 @@ edges:
     condition: when checking expected lifecycle and invariants
   - target: patterns/change-ai-plugin.md
     condition: when the diagnosis requires a contract or implementation change
-last_updated: 2026-07-10
+last_updated: 2026-07-18
 ---
 
 # Debug the Plugin Runtime

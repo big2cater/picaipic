@@ -16,7 +16,7 @@ edges:
     condition: when installing or troubleshooting toolchains
   - target: context/plugin-runtime.md
     condition: when Python, PyTorch, or plugin runtime dependencies are involved
-last_updated: 2026-07-13
+last_updated: 2026-07-18
 ---
 
 # Stack

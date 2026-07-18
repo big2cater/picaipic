@@ -16,12 +16,28 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 ---
 
 # Decisions
 
 ## Decision Log
+
+### Ship built-in crop/collage/batch as host tools, not AI plugins
+**Date:** 2026-07-18
+**Status:** Active (planned product direction; features not implemented yet)
+**Decision:** Photo-size crop presets, collage/拼图, and multi-image batch processing are **host-built-in** features. Plan and phased scope live in `docs/guide/builtin-tools-roadmap.md` (A crop → B collage → C batch). Do not route v1 of these through the AI plugin runtime.
+**Reasoning:** Geometry, export, and deterministic batch work fit the local editor/library host; plugins remain for heavy/model-specific AI. Reference UX is 光影魔术手-style, not full parity.
+**Alternatives considered:** Implementing batch only as plugins was rejected for v1 (worse offline UX and trust surface for basic resize/crop). Full “magic hand” parity in one release was rejected as scope risk.
+**Consequences:** Implementation work should start from the roadmap phases; keep originals safe (explicit overwrite); share crop presets between editor and future batch crop actions.
+
+### Prefer GitHub Release assets over Actions artifacts for installers
+**Date:** 2026-07-18
+**Status:** Active
+**Decision:** Multi-arch app installers for tagged releases upload primarily to the **GitHub Release** for that tag. Actions `upload-artifact` for PR/release builds is **best-effort** (continue-on-error, short retention) and must not fail a successful compile/bundle.
+**Reasoning:** Free-tier Actions artifact storage quota repeatedly failed CI after successful Tauri builds (`CreateArtifact: Artifact storage quota has been hit`).
+**Alternatives considered:** Only deleting old artifacts manually was insufficient as a sole fix; keeping hard-fail upload re-blocked release drafts.
+**Consequences:** `release.yml` / `release-windows.yml` / `pr-build.yml` follow this policy. `latest.json` is assembled from release assets. Operators may still prune stale Actions artifacts occasionally.
 
 ### Keep media local and use a folder-first workflow
 **Date:** 2024-08-08

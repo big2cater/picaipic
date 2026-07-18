@@ -18,7 +18,7 @@ edges:
     condition: when persistent schema or storage behavior changes
   - target: patterns/change-live-photo.md
     condition: when working on Live Photo / Motion Photo features
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 ---
 
 # Conventions

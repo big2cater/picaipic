@@ -18,7 +18,7 @@ edges:
     condition: when adding or changing a frontend-to-Rust operation
   - target: patterns/change-live-photo.md
     condition: when working on Live Photo / Motion Photo detection, pairing, or preview
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 ---
 
 # Architecture

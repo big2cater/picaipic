@@ -14,7 +14,7 @@ edges:
     condition: when reviewing cross-layer contract and verification
   - target: patterns/debug-plugin-runtime.md
     condition: when the changed lifecycle or task flow fails
-last_updated: 2026-07-10
+last_updated: 2026-07-18
 ---
 
 # Change an AI Plugin or Host Contract

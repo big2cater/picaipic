@@ -11,7 +11,7 @@ edges:
     condition: when locating the command in the application flow
   - target: context/conventions.md
     condition: when checking naming, errors, events, and verification
-last_updated: 2026-07-10
+last_updated: 2026-07-18
 ---
 
 # Add or Change a Tauri Command

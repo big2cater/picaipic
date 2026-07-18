@@ -17,7 +17,7 @@ edges:
     condition: when provisioning or testing plugin runtimes
   - target: patterns/release-build.md
     condition: when producing app or plugin artifacts
-last_updated: 2026-07-10
+last_updated: 2026-07-18
 ---
 
 # Setup
@@ -63,6 +63,9 @@ last_updated: 2026-07-10
 - `.\scripts\check_plugin_host.ps1 -IncludeStress -FastStress` — add mock async/local-HTTP plugin task stress.
 - `.\scripts\package_plugin.ps1 -All -FailOnWarnings` — validate/package all plugins; add signing options for release artifacts.
 - `.\scripts\package_windows.ps1 -CheckOnly` — Windows packaging preflight; `.\build-exe.bat` performs the build.
+- Tag release (Linux draft + assets): push an annotated `v*` tag; workflow `.github/workflows/release.yml` builds Linux and uploads packages to the tag’s GitHub Release.
+- Windows release assets: workflow_dispatch `.github/workflows/release-windows.yml` with `release_tag=vX.Y.Z` after the draft tag/release exists; updates `latest.json` with Windows entries.
+- Current line: app versions **1.1.0**; draft release **v1.1.0** may exist unpublished on a private repo.
 
 ## Common Issues
 
@@ -73,5 +76,7 @@ last_updated: 2026-07-10
 **Windows AI startup reports missing runtime:** install the correct Microsoft Visual C++ Redistributable for x64/arm64 and restart.
 
 **`cargo check` passes but release link fails:** inspect native MSVC/CRT compatibility for ONNX Runtime, LibRaw, and bundled C/C++ libraries; a check build does not prove final linker compatibility.
+
+**CI fails only on CreateArtifact / artifact quota:** build may still have succeeded. Delete old Actions artifacts and/or rely on Release-asset upload paths; PR artifact upload is best-effort. See `patterns/release-build.md`.
 
 **Plugin starts on a stale/default port or appears unmanaged:** ensure the backend honors host-injected `PICAIPIC_PLUGIN_PORT`, uses bearer auth, and terminate stale listeners before retesting.

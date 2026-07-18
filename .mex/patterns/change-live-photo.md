@@ -17,7 +17,7 @@ edges:
     condition: when following coding, IPC, or verify conventions
   - target: context/stack.md
     condition: when checking quick-xml, EXIF crate, or FFprobe dependency details
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 ---
 
 # Change Live Photo / Motion Photo Features

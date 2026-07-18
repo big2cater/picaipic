@@ -11,7 +11,7 @@ edges:
     condition: when tracing persistence and library ownership
   - target: context/conventions.md
     condition: when applying migration and safety rules
-last_updated: 2026-07-13
+last_updated: 2026-07-18
 ---
 
 # Change the SQLite Schema
