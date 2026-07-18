@@ -8,6 +8,18 @@ Updated: 2026-07-18
 - Windows/Linux PR builds green after Actions artifact-quota hardening (`pr-build.yml` best-effort upload).
 - App version aligned to **1.1.0** for the next signed multi-arch release draft.
 
+## 2026-07-18 planned: built-in crop presets · collage · batch
+
+Product backlog only (not implemented). Full plan: `docs/guide/builtin-tools-roadmap.md`.
+
+| Phase | Scope |
+|-------|--------|
+| **A** | ImageEditor **crop sub-menu**: ratios `1:1` / `3:2` / `4:3` / `16:9` + built-in photo sizes (1R–10寸, 身份证, 护照, 皮夹照, …) with px/cm/DPI table; 照片规格管理 / 添加·删除常用比例 |
+| **B** | **拼图**: 模板拼图 / 图片拼接 / 自由拼图 (MVP = template grids first) |
+| **C** | **批处理** 3-step wizard: 添加照片 → 动作设置 (resize/crop/watermark/…) → 输出设置 (path, rename, format, quality, overwrite policy) |
+
+Suggested implementation order: **A → B → C**. Local-first; not routed through AI plugins for v1.
+
 
 This document records the current implementation status for turning the existing
 PicAiPic codebase into PicAiPic: a Windows x64 local album app with lightweight

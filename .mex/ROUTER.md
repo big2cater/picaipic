@@ -19,6 +19,7 @@ edges:
 last_updated: 2026-07-18
 ---
 
+
 # Session Bootstrap
 
 Read root `AGENTS.md`, then this file, then the routed context and matching pattern before changing code.
@@ -49,6 +50,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Release line: app/docs versions bumped toward **v1.1.0** (Live Photo polish + sandbox Phase 0–2 + model/runtime UX).
 
 **Not yet built / future work:**
+- Built-in tools plan (2026-07-18): crop photo-size sub-menu + presets, collage/拼图 modes, batch wizard — see `docs/guide/builtin-tools-roadmap.md` (planned only; not implemented).
 - Sandbox Phase 3–5 only: network OS block, Linux Landlock/seccomp, env hygiene, optional cache ref/range zero-copy — see `docs/ai-plugin-sandbox-roadmap.md`. Phase 0–2 host path control is done.
 - Signing-key rotation/revocation design; keep release-executable plugin regression as a recurring check after host changes (latest sandbox smoke: 2026-07-18 pass).
 - Broader HEIC sequence sample coverage (frame-decode re-encode path not implemented; ffmpeg demux may fail on unusual sequence brands).
