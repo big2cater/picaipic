@@ -159,21 +159,46 @@ jobs:
           projectPath: .
           args: --verbose --target ${{ matrix.target }} --bundles msi
 
-      - name: Upload Build Artifact (Windows ${{ matrix.arch }})
+      - name: Upload Windows packages to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
+
+      - name: Upload Build Artifact (Windows ${{ matrix.arch }}, best-effort)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 3
 
   publish-windows:
     needs: build-windows
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Windows artifacts
+      - name: Download Windows assets from release (preferred)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.release_tag }}"
+          mkdir -p release-files
+          gh release download "$TAG" -R "$GH_REPO" -D release-files -p "*.msi" -p "*.msi.sig" || true
+          ls -la release-files || true
+
+      - name: Download Windows artifacts (fallback, best-effort)
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: windows-*

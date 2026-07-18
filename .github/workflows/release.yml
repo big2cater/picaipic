@@ -142,9 +142,26 @@ jobs:
           projectPath: .
           args: --verbose --target ${{ matrix.target }} --bundles deb,appimage
 
-      # Specific for Linux: upload .deb as artifact
-      - name: Upload Build Artifact (Linux)
+      # Prefer GitHub Release assets over Actions artifacts (Actions storage quota is
+      # often exhausted by multi-arch PR/release bundles). Actions artifact upload is
+      # best-effort only and must not fail a successful build.
+      - name: Upload Linux packages to draft GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') && (startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux'))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+
+      - name: Upload Build Artifact (Linux, best-effort)
         if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
@@ -152,56 +169,78 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 3
 
-  # Create release after all builds complete
+  # Finalize draft release after all builds complete
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare release files
+      - name: Download release assets from draft tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p release-files
-          find artifacts -name "*.deb" -exec cp {} release-files/ \;
-          find artifacts -name "*.AppImage" -exec cp {} release-files/ \;
-          find artifacts -name "*.sig" -exec cp {} release-files/ \; 2>/dev/null || true
-          ls -la release-files/
+          # Wait briefly for matrix uploads to become visible
+          for i in $(seq 1 30); do
+            count=$(gh release view "$TAG" -R "$GH_REPO" --json assets --jq '.assets | length' 2>/dev/null || echo 0)
+            echo "attempt $i: $count assets on $TAG"
+            if [ "${count:-0}" -ge 1 ]; then
+              break
+            fi
+            sleep 10
+          done
+          gh release download "$TAG" -R "$GH_REPO" -D release-files || true
+          ls -la release-files/ || true
 
       - name: Generate latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
+          TAG="v${VERSION}"
           echo "Processing version: $VERSION"
-          
-          # Find files for each architecture
-          LINUX_X86_64_DEB=$(find release-files \( -name "*amd64*.deb" -o -name "*x86_64*.deb" \) | head -n 1)
-          LINUX_AARCH64_DEB=$(find release-files \( -name "*arm64*.deb" -o -name "*aarch64*.deb" \) | head -n 1)
-          
+
+          mkdir -p release-files
+          # Prefer local downloads; fall back to listing release asset names.
+          LINUX_X86_64_DEB=$(find release-files \( -name "*amd64*.deb" -o -name "*x86_64*.deb" \) | head -n 1 || true)
+          LINUX_AARCH64_DEB=$(find release-files \( -name "*arm64*.deb" -o -name "*aarch64*.deb" \) | head -n 1 || true)
+
+          if [ -z "${LINUX_X86_64_DEB}" ]; then
+            LINUX_X86_64_DEB_NAME=$(gh release view "$TAG" -R "$GH_REPO" --json assets --jq '.assets[].name' | grep -E 'amd64|x86_64' | grep '\.deb$' | head -n 1 || true)
+          else
+            LINUX_X86_64_DEB_NAME=$(basename "$LINUX_X86_64_DEB")
+          fi
+          if [ -z "${LINUX_AARCH64_DEB}" ]; then
+            LINUX_AARCH64_DEB_NAME=$(gh release view "$TAG" -R "$GH_REPO" --json assets --jq '.assets[].name' | grep -E 'arm64|aarch64' | grep '\.deb$' | head -n 1 || true)
+          else
+            LINUX_AARCH64_DEB_NAME=$(basename "$LINUX_AARCH64_DEB")
+          fi
+
           echo "Found artifacts:"
-          echo "  LINUX_X86_64_DEB: $LINUX_X86_64_DEB"
-          echo "  LINUX_AARCH64_DEB: $LINUX_AARCH64_DEB"
-          
-          LINUX_X86_64_DEB_NAME=$(basename "$LINUX_X86_64_DEB" 2>/dev/null || echo "")
-          LINUX_AARCH64_DEB_NAME=$(basename "$LINUX_AARCH64_DEB" 2>/dev/null || echo "")
-          
-          # Get signatures from .sig files (generated by tauri signer)
+          echo "  LINUX_X86_64_DEB: ${LINUX_X86_64_DEB_NAME:-}"
+          echo "  LINUX_AARCH64_DEB: ${LINUX_AARCH64_DEB_NAME:-}"
+
           LINUX_X86_64_SIG=""
           LINUX_AARCH64_SIG=""
-          
-          [ -f "${LINUX_X86_64_DEB}.sig" ] && LINUX_X86_64_SIG=$(cat "${LINUX_X86_64_DEB}.sig")
-          [ -f "${LINUX_AARCH64_DEB}.sig" ] && LINUX_AARCH64_SIG=$(cat "${LINUX_AARCH64_DEB}.sig")
-          
+          [ -n "${LINUX_X86_64_DEB}" ] && [ -f "${LINUX_X86_64_DEB}.sig" ] && LINUX_X86_64_SIG=$(cat "${LINUX_X86_64_DEB}.sig")
+          [ -n "${LINUX_AARCH64_DEB}" ] && [ -f "${LINUX_AARCH64_DEB}.sig" ] && LINUX_AARCH64_SIG=$(cat "${LINUX_AARCH64_DEB}.sig")
+          # Also try sibling .sig assets downloaded next to the deb
+          [ -z "$LINUX_X86_64_SIG" ] && [ -n "${LINUX_X86_64_DEB_NAME:-}" ] && [ -f "release-files/${LINUX_X86_64_DEB_NAME}.sig" ] && LINUX_X86_64_SIG=$(cat "release-files/${LINUX_X86_64_DEB_NAME}.sig")
+          [ -z "$LINUX_AARCH64_SIG" ] && [ -n "${LINUX_AARCH64_DEB_NAME:-}" ] && [ -f "release-files/${LINUX_AARCH64_DEB_NAME}.sig" ] && LINUX_AARCH64_SIG=$(cat "release-files/${LINUX_AARCH64_DEB_NAME}.sig")
+
           echo "Signatures found: "
           echo "  LINUX_X86_64: ${#LINUX_X86_64_SIG} chars"
           echo "  LINUX_AARCH64: ${#LINUX_AARCH64_SIG} chars"
-          
-          # Create latest.json
+
           cat > release-files/latest.json <<EOF
           {
             "version": "${VERSION}",
@@ -219,20 +258,16 @@ jobs:
             }
           }
           EOF
-          
+
           echo "Generated latest.json:"
           cat release-files/latest.json
 
-      - name: Remove sig files before release
-        run: |
-          find release-files -name "*.sig" -delete 2>/dev/null || true
-          echo "Final release files:"
-          ls -la release-files/
-
-      - name: Create Release
+      - name: Ensure draft release + upload latest.json
         uses: softprops/action-gh-release@v2
         with:
-          files: release-files/*
+          tag_name: ${{ github.ref_name }}
+          files: release-files/latest.json
           draft: true
           prerelease: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
