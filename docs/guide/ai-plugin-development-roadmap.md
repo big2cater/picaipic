@@ -84,8 +84,9 @@ Rules:
   host compares probe-reported package versions against the plugin's
   requirements specifiers; `version_mismatch` and `missing` conflicts
   hard-block capability invocation and the UI advises switching to a
-  plugin-private runtime. Auto-switching the profile (with user confirmation)
-  is still future work.
+  plugin-private runtime. Confirmed one-click switch to a synthetic
+  plugin-private binding is implemented (2026-07-17); Setup still must be
+  re-run by the user after switching.
 - Model files live under `plugin-data\{plugin-id}\models` unless the user
   explicitly binds an external model directory later.
 - Uninstall offers a choice (implemented 2026-07-03): "code only" removes the
@@ -329,9 +330,10 @@ be solved at once.
    `torchvision`, `numpy`, `opencv-python`, `rawpy`, etc.) and surface version
    conflicts.~~ (done 2026-07-03: conflict detection compares probe versions
    against requirements specifiers and blocks invocation on mismatch)
-4. Add a UI escape hatch to use a plugin-private runtime when a shared runtime
-   is incompatible. (partially done: the host detects conflicts and advises;
-   one-click auto-switch to plugin-private is still future work)
+4. ~~Add a UI escape hatch to use a plugin-private runtime when a shared runtime
+   is incompatible.~~ (done 2026-07-17: confirmed one-click switch via
+   `switch_ai_plugin_profile_to_private_runtime` + Settings button; Setup still
+   user-driven after switch)
 5. ~~Add a Settings UI for model import/external model directory binding.~~
    (done 2026-07-08: manifest `modelBindings[]`, validation, persistence,
    Settings controls, and host environment injection)

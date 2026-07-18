@@ -720,8 +720,7 @@ fn overwrite_still_with_keyframe(
     let final_bytes = if let Some(motion) = &sources.motion {
         // Motion Photo: keep embedded video trailer, replace still portion only.
         let cache_dir = t_xmp::motion_cache_dir(app)?;
-        let extracted =
-            t_xmp::extract_motion_video_to_cache(still, motion, &cache_dir)?;
+        let extracted = t_xmp::extract_motion_video_to_cache(still, motion, &cache_dir)?;
         let video_bytes =
             fs::read(&extracted).map_err(|e| format!("Failed to read motion video: {}", e))?;
         t_xmp::package_motion_photo_jpeg(&keyframe_bytes, &video_bytes)?

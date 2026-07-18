@@ -2072,9 +2072,8 @@ pub fn extract_motion_video(app_handle: AppHandle, file_id: i64) -> Result<Optio
         let info = crate::t_xmp::parse_motion_content_id(content_id)
             .ok_or_else(|| "Invalid Motion Photo content_id".to_string())?;
 
-        let cache_path =
-            crate::t_xmp::extract_motion_video_to_cache(&file_path, &info, &cache_dir)
-                .map_err(|e| format!("Failed to extract Motion Photo video: {}", e))?;
+        let cache_path = crate::t_xmp::extract_motion_video_to_cache(&file_path, &info, &cache_dir)
+            .map_err(|e| format!("Failed to extract Motion Photo video: {}", e))?;
         return Ok(Some(cache_path));
     }
 
@@ -2089,7 +2088,8 @@ pub fn extract_motion_video(app_handle: AppHandle, file_id: i64) -> Result<Optio
         #[cfg(not(all(not(target_os = "macos"), lap_has_libheif)))]
         {
             return Err(
-                "HEIC embedded video extraction requires libheif (Windows/Linux builds)".to_string(),
+                "HEIC embedded video extraction requires libheif (Windows/Linux builds)"
+                    .to_string(),
             );
         }
     }
@@ -2133,4 +2133,3 @@ pub fn rescan_live_photo_metadata(
 ) -> Result<crate::t_live_photo::RescanLivePhotoResult, String> {
     crate::t_live_photo::rescan_live_photo_metadata(album_id)
 }
-

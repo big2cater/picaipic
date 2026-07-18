@@ -63,6 +63,15 @@ last_updated: 2026-07-17
 **Alternatives considered:** Default deny-ACL was implemented and tested but rejected as the normal path; network blocking and restricted-token approaches remain future work.
 **Consequences:** Do not describe v1 as a complete OS sandbox. Preserve stale-ACL cleanup and the development disable switch.
 
+
+### Treat sandbox hardening as a phased host design, not a UI bundle
+**Date:** 2026-07-17
+**Status:** Active
+**Decision:** Further sandbox work follows `docs/ai-plugin-sandbox-roadmap.md`: Phase 0 correctness (cross-platform staging, fail-closed staging errors), then host write allow-list clarity, then optional large-file hardlink/zero-copy, with network OS block and Linux Landlock as separate opt-in research spikes. Do not ship experimental ACL/Landlock toggles in Settings until Phase 0–1 are verified.
+**Reasoning:** OS confinement is high-risk, platform-specific, and GPU-sensitive; mixing it with product UI work caused scope and safety confusion. Host-side path control already provides the defensible default.
+**Alternatives considered:** Default OS network/process isolation was deferred because it breaks common Python/GPU stacks and needs admin/capability spikes. Env scrubbing remains deferred to preserve venv activation.
+**Consequences:** Product docs must not claim kernel network sandboxing. Linux release builds use the same input-staging default as Windows. Experimental OS modes stay behind explicit env flags.
+
 ### Support Windows and Linux releases, not macOS
 **Date:** 2026-07-07
 **Status:** Active

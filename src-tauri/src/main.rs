@@ -371,6 +371,9 @@ async fn main() {
             t_plugin::set_ai_plugin_model_dir_binding,
             t_plugin::clear_ai_plugin_model_dir_binding,
             t_plugin::check_ai_plugin_model_bindings,
+            t_plugin::check_ai_plugin_model_files,
+            t_plugin::import_ai_plugin_model_files,
+            t_plugin::switch_ai_plugin_profile_to_private_runtime,
             // person (face recognition)
             t_cmds::index_faces,
             t_cmds::cancel_face_index,

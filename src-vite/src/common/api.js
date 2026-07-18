@@ -1774,6 +1774,39 @@ export async function clearAiPluginModelDirBinding(pluginId, profileId, bindingI
   }
 }
 
+export async function switchAiPluginProfileToPrivateRuntime(pluginId, profileId) {
+  try {
+    return await invoke('switch_ai_plugin_profile_to_private_runtime', {
+      pluginId,
+      profileId,
+    });
+  } catch (error) {
+    console.error('switchAiPluginProfileToPrivateRuntime error:', error);
+    throw error;
+  }
+}
+
+export async function checkAiPluginModelFiles(pluginId) {
+  try {
+    return await invoke('check_ai_plugin_model_files', { pluginId });
+  } catch (error) {
+    console.error('checkAiPluginModelFiles error:', error);
+    throw error;
+  }
+}
+
+export async function importAiPluginModelFiles(pluginId, sourcePaths) {
+  try {
+    return await invoke('import_ai_plugin_model_files', {
+      pluginId,
+      sourcePaths,
+    });
+  } catch (error) {
+    console.error('importAiPluginModelFiles error:', error);
+    throw error;
+  }
+}
+
 export async function checkAiPluginModelBindings(pluginId, bindingId, dirPath) {
   try {
     return await invoke('check_ai_plugin_model_bindings', {

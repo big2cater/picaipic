@@ -16,7 +16,7 @@ edges:
     condition: when touching AI plugins, manifests, runtimes, permissions, tasks, packaging, or sandboxing
   - target: patterns/INDEX.md
     condition: before any implementation or diagnosis task
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 ---
 
 # Session Bootstrap
@@ -39,12 +39,17 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Live Photo export + conversion via `export_live_photo` + `LivePhotoExportDialog`: still / video / pair / to_motion / to_pair / set_keyframe (does not modify library originals).
 - HEIC container-internal video (`live_photo_type=4`): libheif mime-item extract preferred, sequence track via ffmpeg demux fallback; long-press preview + export reuse motion_cache.
 - Live Photo polish: confirmed JPEG keyframe overwrite of original still; album-level `rescan_live_photo_metadata` (no full reindex); FileInfo export button + album context-menu repair entry.
+- Confirmed shared→plugin-private runtime switch (2026-07-17): Settings conflict block offers **Use private runtime**; host persists synthetic `plugin-private:<profileId>` binding, clears that profile's probe cache, marks `needsVerify`; shared runtimes untouched; Setup still user-driven.
+- Model UX (2026-07-17): Settings storage shows managed model file presence; **Open & validate** rechecks managed model dir; **Import model files** copies selected checkpoints into `plugin-data/<id>/models` by basename; external model-dir binding also has open+validate.
+- Sandbox Phase 0–2 **done** (2026-07-17/18): cross-platform staging + fail-closed + diagnostics; `plugin_writable_roots` allow-list; same-volume hardlink then copy (`hardlinkedFiles`/`copiedFiles`); adoption still task-output only. Phase 3–4 (network OS / Landlock) **not** implemented — `docs/ai-plugin-sandbox-roadmap.md`.
+- Phase 0 Windows host-path acceptance (2026-07-18): `input_staging*` (5 tests) + `scripts/check_plugin_host.ps1` green; real-layout unit test writes the task staging report; this machine library on C: → plugin store on D: proves **copy** fallback (WinError 17 hardlink). Checklist: `docs/ai-plugin-sandbox-phase0-verify.md`.
+- SA-LUT full E2E (2026-07-18): host-equivalent start (ROCm shared runtime + bearer) + stage 2 album JPGs from Downloads into the plugin task inputs dir (0 hardlink / 2 copy) + color-transfer invoke → PNG under the task outputs dir (~13MB). Task id phase0-e2e-de513e5c.
+- Plugin smoke (2026-07-18): `scripts/check_plugin_host.ps1` + package preflight green; user confirmed GUI / release-shell smoke pass for this sandbox work.
 - GitHub Actions build documentation, app releases, plugin packages, and VitePress documentation.
 
 **Not yet built / future work:**
-- One-click confirmation-driven switch from a conflicting shared runtime to a plugin-private runtime (detect/advice/manual private binding already exist).
-- Optional bulk model-file import wizard (external model **directory** binding UI shipped 2026-07-08).
-- Network confinement and Linux process sandboxing; strict OS write allow-listing and zero-copy large-video staging remain future security/performance work (default isolation: input staging + optional Windows deny-ACL).
+- Sandbox Phase 3–5 only: network OS block, Linux Landlock/seccomp, env hygiene, optional cache ref/range zero-copy — see `docs/ai-plugin-sandbox-roadmap.md`. Phase 0–2 host path control is done.
+- Signing-key rotation/revocation design; keep release-executable plugin regression as a recurring check after host changes (latest sandbox smoke: 2026-07-18 pass).
 - Broader HEIC sequence sample coverage (frame-decode re-encode path not implemented; ffmpeg demux may fail on unusual sequence brands).
 - Broader automated coverage outside the plugin-host checks and current Rust unit tests.
 

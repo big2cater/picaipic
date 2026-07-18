@@ -336,10 +336,7 @@ pub fn extract_heic_embedded_video_to_cache(
                 .ok_or_else(|| "Missing HEIC video item id".to_string())?;
             let bytes = read_item_bytes(file_path, item_id)?;
             if (bytes.len() as u64) < HEIC_VIDEO_CACHE_MIN_BYTES {
-                return Err(format!(
-                    "HEIC video item too small ({} bytes)",
-                    bytes.len()
-                ));
+                return Err(format!("HEIC video item too small ({} bytes)", bytes.len()));
             }
             write_cache_bytes(&cache_path, &cache_name, cache_dir, &bytes)?;
             Ok(cache_path.to_string_lossy().to_string())
@@ -353,9 +350,7 @@ pub fn extract_heic_embedded_video_to_cache(
             if let Ok(meta) = fs::metadata(&cache_path) {
                 if meta.len() < HEIC_VIDEO_CACHE_MIN_BYTES {
                     let _ = fs::remove_file(&cache_path);
-                    return Err(
-                        "HEIC sequence track demux produced empty/invalid MP4".to_string()
-                    );
+                    return Err("HEIC sequence track demux produced empty/invalid MP4".to_string());
                 }
             }
             Ok(cache_path.to_string_lossy().to_string())
@@ -403,7 +398,8 @@ fn write_cache_bytes(
     bytes: &[u8],
 ) -> Result<(), String> {
     let tmp_path = cache_dir.join(format!("{}.tmp", cache_name));
-    fs::write(&tmp_path, bytes).map_err(|e| format!("Failed to write HEIC video cache temp: {}", e))?;
+    fs::write(&tmp_path, bytes)
+        .map_err(|e| format!("Failed to write HEIC video cache temp: {}", e))?;
     if cache_path.exists() {
         let _ = fs::remove_file(cache_path);
     }
@@ -418,21 +414,12 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    unsafe {
-        Some(
-            std::ffi::CStr::from_ptr(ptr)
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
+    unsafe { Some(std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()) }
 }
 
 fn is_video_mime(mime: &str) -> bool {
     let m = mime.to_ascii_lowercase();
-    m.starts_with("video/")
-        || m.contains("mp4")
-        || m.contains("quicktime")
-        || m.contains("mpeg")
+    m.starts_with("video/") || m.contains("mp4") || m.contains("quicktime") || m.contains("mpeg")
 }
 
 fn find_video_mime_item(ctx: *mut HeifContext) -> Option<HeicEmbeddedVideoInfo> {
@@ -453,21 +440,16 @@ fn find_video_mime_item(ctx: *mut HeifContext) -> Option<HeicEmbeddedVideoInfo> 
             if item_type != HEIF_ITEM_TYPE_MIME {
                 continue;
             }
-            let mime = cstr_to_string(heif_item_get_mime_item_content_type(ctx, id))
-                .unwrap_or_default();
+            let mime =
+                cstr_to_string(heif_item_get_mime_item_content_type(ctx, id)).unwrap_or_default();
             if !is_video_mime(&mime) {
                 continue;
             }
             // Cheap size check: skip empty items.
             let mut data_ptr: *mut u8 = ptr::null_mut();
             let mut data_size: usize = 0;
-            let err = heif_item_get_item_data(
-                ctx,
-                id,
-                ptr::null_mut(),
-                &mut data_ptr,
-                &mut data_size,
-            );
+            let err =
+                heif_item_get_item_data(ctx, id, ptr::null_mut(), &mut data_ptr, &mut data_size);
             if !data_ptr.is_null() {
                 heif_release_item_data(ctx, &mut data_ptr);
             }
@@ -546,13 +528,8 @@ fn read_item_bytes(file_path: &str, item_id: u32) -> Result<Vec<u8>, String> {
 
         let mut data_ptr: *mut u8 = ptr::null_mut();
         let mut data_size: usize = 0;
-        let err = heif_item_get_item_data(
-            ctx,
-            item_id,
-            ptr::null_mut(),
-            &mut data_ptr,
-            &mut data_size,
-        );
+        let err =
+            heif_item_get_item_data(ctx, item_id, ptr::null_mut(), &mut data_ptr, &mut data_size);
         if err.code != 0 || data_ptr.is_null() || data_size == 0 {
             if !data_ptr.is_null() {
                 heif_release_item_data(ctx, &mut data_ptr);
@@ -592,4 +569,3 @@ pub fn parse_heic_content_id(content_id: &str) -> Option<HeicEmbeddedVideoInfo> 
         _ => None,
     }
 }
-

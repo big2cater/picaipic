@@ -384,12 +384,16 @@ PyInstaller) was considered and rejected:
   (`scripts/sign_plugin.py`), host verification at install, user-managed
   trust store, `TRUST_REQUIRED` consent flow, developer-mode bypass.
 - **C (process confinement)**: **v1 partial** — input file staging into the
-  plugin task directory before invoke is the default path. The prior Windows
-  deny-ACL write confinement code remains in `src-tauri/src/t_sandbox.rs`,
-  but is explicit opt-in via `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1`; default
-  startup best-effort removes stale deny ACEs from older builds. Network
-  blocking, macOS Seatbelt, and Linux seccomp are future work. GPU access is
-  preserved.
+  plugin task directory before invoke is the default path on **all supported
+  platforms** (Windows + Linux; was Windows-gated until 2026-07-17). Staging
+  copy failures fail closed. The prior Windows deny-ACL write confinement
+  code remains in `src-tauri/src/t_sandbox.rs`, but is explicit opt-in via
+  `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1`; default startup best-effort removes
+  stale deny ACEs from older builds. Network blocking, macOS Seatbelt, and
+  Linux Landlock/seccomp are future work — see
+  `docs/ai-plugin-sandbox-roadmap.md`. Host path control Phase 0–2
+  (cross-platform staging, allow-list, same-volume hardlink) is done;
+  still not a complete OS sandbox. GPU access is preserved.
 
 The v1 contract freeze requires A + B + C validated with SA-LUT and
 NAFNet. A and B are validated; C's practical v1 scope (input staging, with
