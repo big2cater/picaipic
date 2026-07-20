@@ -49,7 +49,7 @@ export interface LayoutCell {
   photoId: string;
 }
 
-export type PackStrategy = 'auto' | 'h-bands' | 'v-bands';
+export type PackStrategy = 'auto' | 'h-bands' | 'v-bands' | 'magazine';
 
 export interface LayoutPlan {
   paperPxW: number;
@@ -581,6 +581,129 @@ export function packVerticalBands(options: {
   return { cells: inchCellsToPx(inchCells, options.dpi), capacity };
 }
 
+/**
+ * Magazine-style packing: free-rectangle (maxrects-ish) placement for mixed photo
+ * sizes. Places largest remaining slot first into the free rect that wastes least
+ * leftover space, then splits free space. Falls back gracefully on empty free list.
+ * Axis-aligned only (no rotation beyond per-slot orientation already resolved).
+ */
+export function packMagazine(options: {
+  paperInchW: number;
+  paperInchH: number;
+  slots: ResolvedSlot[];
+  gapXcm: number;
+  gapYcm: number;
+  dpi: number;
+}): { cells: LayoutCell[]; capacity: number } {
+  const gapX = cmToInch(Math.max(0, options.gapXcm));
+  const gapY = cmToInch(Math.max(0, options.gapYcm));
+  const margin = cmToInch(0.15);
+  const paperW = options.paperInchW;
+  const paperH = options.paperInchH;
+  const originX = margin;
+  const originY = margin;
+  const innerW = Math.max(0.01, paperW - 2 * margin);
+  const innerH = Math.max(0.01, paperH - 2 * margin);
+
+  type Free = { x: number; y: number; w: number; h: number };
+  type Placed = { x: number; y: number; w: number; h: number; photoId: string };
+
+  // Expand slots into individual photo units (count=0 → estimate a soft max).
+  const units: Array<{ photoId: string; w: number; h: number; area: number }> = [];
+  for (const slot of options.slots) {
+    if (!slot || slot.inchW <= 0 || slot.inchH <= 0) continue;
+    const maxByArea = Math.max(
+      1,
+      Math.floor((innerW * innerH) / Math.max(0.01, slot.inchW * slot.inchH)),
+    );
+    const n = slot.count > 0 ? slot.count : Math.min(64, maxByArea);
+    for (let i = 0; i < n; i++) {
+      units.push({
+        photoId: slot.photoId,
+        w: slot.inchW,
+        h: slot.inchH,
+        area: slot.inchW * slot.inchH,
+      });
+    }
+  }
+  // Largest first tends to leave better residual free space for mixed packs.
+  units.sort((a, b) => b.area - a.area || b.w - a.w);
+
+  let free: Free[] = [{ x: originX, y: originY, w: innerW, h: innerH }];
+  const placed: Placed[] = [];
+  let capacity = 0;
+
+  const fits = (f: Free, w: number, h: number) => f.w + 1e-9 >= w && f.h + 1e-9 >= h;
+
+  const waste = (f: Free, w: number, h: number) => f.w * f.h - w * h;
+
+  const splitFree = (f: Free, w: number, h: number): Free[] => {
+    // Guillotine split: right remainder + bottom remainder (prefer larger first).
+    const right: Free | null =
+      f.w - w - gapX > 1e-6
+        ? { x: f.x + w + gapX, y: f.y, w: f.w - w - gapX, h: h }
+        : null;
+    const bottom: Free | null =
+      f.h - h - gapY > 1e-6
+        ? { x: f.x, y: f.y + h + gapY, w: f.w, h: f.h - h - gapY }
+        : null;
+    const out: Free[] = [];
+    if (right && right.w > 1e-6 && right.h > 1e-6) out.push(right);
+    if (bottom && bottom.w > 1e-6 && bottom.h > 1e-6) out.push(bottom);
+    return out;
+  };
+
+  for (const unit of units) {
+    // Try natural orientation only (slot already encodes portrait/landscape).
+    let bestIdx = -1;
+    let bestWaste = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < free.length; i++) {
+      const f = free[i];
+      if (!fits(f, unit.w, unit.h)) continue;
+      const w = waste(f, unit.w, unit.h);
+      // Prefer less waste, then lower-left free rect for stable magazine look.
+      if (
+        w < bestWaste - 1e-9
+        || (Math.abs(w - bestWaste) <= 1e-9
+          && (f.y < free[bestIdx]?.y - 1e-9
+            || (Math.abs(f.y - (free[bestIdx]?.y || 0)) <= 1e-9 && f.x < (free[bestIdx]?.x || 0))))
+      ) {
+        bestWaste = w;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) continue;
+    capacity += 1;
+    const f = free[bestIdx];
+    placed.push({ x: f.x, y: f.y, w: unit.w, h: unit.h, photoId: unit.photoId });
+    const remnants = splitFree(f, unit.w, unit.h);
+    free.splice(bestIdx, 1, ...remnants);
+    // Drop free rects that are too small for any remaining unit (cheap prune).
+    free = free.filter((r) => r.w > 0.05 && r.h > 0.05);
+  }
+
+  // Capacity ≈ placed + remaining free that could take the smallest unit (approx).
+  if (units.length) {
+    const minW = Math.min(...units.map((u) => u.w));
+    const minH = Math.min(...units.map((u) => u.h));
+    for (const f of free) {
+      if (fits(f, minW, minH)) {
+        const cols = Math.max(1, Math.floor((f.w + gapX) / (minW + gapX)));
+        const rows = Math.max(1, Math.floor((f.h + gapY) / (minH + gapY)));
+        capacity += cols * rows;
+      }
+    }
+  }
+
+  return {
+    cells: inchCellsToPx(
+      placed.map((p) => ({ x: p.x, y: p.y, w: p.w, h: p.h, photoId: p.photoId })),
+      options.dpi,
+    ),
+    capacity: Math.max(capacity, placed.length),
+  };
+}
+
 function resolveSlots(slots: PhotoSlotSpec[]): ResolvedSlot[] {
   const out: ResolvedSlot[] = [];
   for (const slot of slots) {
@@ -605,10 +728,9 @@ function scorePack(cells: LayoutCell[], capacity: number, paperPxW: number, pape
 
 /**
  * Build a full layout plan from paper + one or more photo slot groups.
- * - 1 slot: centered uniform grid
- * - 2+ slots: shelf packing — try horizontal bands (上带+下带) and vertical bands (左带+右带),
- *   pick the better utilization (or honor an explicit strategy)
- * - slot.count = 0 means auto max-fit in remaining space for that band
+ * - 1 slot: centered uniform grid (or magazine if strategy forced)
+ * - 2+ slots: shelf packing (H/V bands) or magazine free-rect; `auto` scores H/V/magazine
+ * - slot.count = 0 means auto max-fit in remaining band / free space
  */
 export function buildLayoutPlan(options: {
   paper: PaperSizeSpec;
@@ -633,7 +755,9 @@ export function buildLayoutPlan(options: {
   const resolved = resolveSlots(options.slots || []);
   if (!resolved.length) return empty;
 
-  if (resolved.length === 1) {
+  const strategy = options.strategy || 'auto';
+
+  if (resolved.length === 1 && strategy !== 'magazine') {
     const slot = resolved[0];
     const packed = packUniformGrid({
       paperInchW: paperPx.inchW,
@@ -673,38 +797,46 @@ export function buildLayoutPlan(options: {
     };
   }
 
-  const strategy = options.strategy || 'auto';
-  const hPack = packHorizontalBands({
+  const packOpts = {
     paperInchW: paperPx.inchW,
     paperInchH: paperPx.inchH,
     slots: resolved,
     gapXcm: options.gapXcm,
     gapYcm: options.gapYcm,
     dpi: options.dpi,
-  });
-  const vPack = packVerticalBands({
-    paperInchW: paperPx.inchW,
-    paperInchH: paperPx.inchH,
-    slots: resolved,
-    gapXcm: options.gapXcm,
-    gapYcm: options.gapYcm,
-    dpi: options.dpi,
-  });
+  };
+  const hPack = packHorizontalBands(packOpts);
+  const vPack = packVerticalBands(packOpts);
+  const mPack = packMagazine(packOpts);
 
-  let chosen = hPack;
-  let chosenStrategy: 'h-bands' | 'v-bands' = 'h-bands';
+  type Chosen = { cells: LayoutCell[]; capacity: number };
+  let chosen: Chosen = hPack;
+  let chosenStrategy: Exclude<PackStrategy, 'auto'> | 'uniform' = 'h-bands';
+
   if (strategy === 'v-bands') {
     chosen = vPack;
     chosenStrategy = 'v-bands';
   } else if (strategy === 'h-bands') {
     chosen = hPack;
     chosenStrategy = 'h-bands';
+  } else if (strategy === 'magazine') {
+    chosen = mPack;
+    chosenStrategy = 'magazine';
   } else {
-    const hScore = scorePack(hPack.cells, hPack.capacity, paperPx.w, paperPx.h);
-    const vScore = scorePack(vPack.cells, vPack.capacity, paperPx.w, paperPx.h);
-    if (vScore > hScore) {
-      chosen = vPack;
-      chosenStrategy = 'v-bands';
+    // auto: score H / V / magazine free-rect
+    const candidates: Array<{ pack: Chosen; id: 'h-bands' | 'v-bands' | 'magazine' }> = [
+      { pack: hPack, id: 'h-bands' },
+      { pack: vPack, id: 'v-bands' },
+      { pack: mPack, id: 'magazine' },
+    ];
+    let bestScore = -1;
+    for (const c of candidates) {
+      const s = scorePack(c.pack.cells, c.pack.capacity, paperPx.w, paperPx.h);
+      if (s > bestScore) {
+        bestScore = s;
+        chosen = c.pack;
+        chosenStrategy = c.id;
+      }
     }
   }
 

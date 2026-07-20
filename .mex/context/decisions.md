@@ -23,6 +23,14 @@ last_updated: 2026-07-20
 
 ## Decision Log
 
+### Gap triage 2026-07-20: cancel G1/G7/G8/G9; ship G2/G6/G10–G13; sandbox 3–5 opt-in only
+**Date:** 2026-07-20  
+**Status:** Active  
+**Decision:** Do **not** implement G1 (collage-in-batch), G7 (`export-lut`), G8 (face GPU EP), or G9 (whole-library empty-comment backfill). Ship batch library import (G2), multi-key trust + local revoke (G6), FileInfo Live hover (G10), print magazine pack (G11), export-only DPI UI (G12), and system-print UX copy (G13) without host `print_file`. Sandbox Phase 3–5 remain **opt-in env flags**, default confinement stays Phase 0–2.  
+**Reasoning:** Owner priority is product polish and trust/security foundation without expanding AI plugin business surface (LUT export / GPU face) or expensive full-library backfill. Print device selection stays in the OS dialog for local-first simplicity.  
+**Alternatives considered:** Native printer/tray host API (rejected for v1); default-on Landlock/network sandbox (rejected until GPU matrix); whole-library prompt backfill (rejected for large-library cost).  
+**Consequences:** Docs/ROUTER list cancelled IDs explicitly; scan-time empty-only prompt import remains the only path. See `docs/guide/目前的开发情况.md`, `patterns/change-print-layout.md`, `patterns/change-live-photo.md`.
+
 ### Import AI generation prompts into empty comments only (PNG + JPEG)
 **Date:** 2026-07-19
 **Status:** Active (shipped)

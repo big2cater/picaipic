@@ -17,7 +17,7 @@ edges:
     condition: when following coding, IPC, or verify conventions
   - target: context/stack.md
     condition: when checking quick-xml, EXIF crate, or FFprobe dependency details
-last_updated: 2026-07-18
+last_updated: 2026-07-20
 ---
 
 # Change Live Photo / Motion Photo Features
@@ -51,7 +51,7 @@ The `afiles` table (schema v6) has three columns: `content_id` (UUID, `motion:<o
 | Frontend types | `src-vite/src/common/types.ts` | `PairedVideoInfo`, `ExportLivePhotoOptions`, `ExportLivePhotoResult`, `RescanLivePhotoResult` |
 | MediaViewer preview | `src-vite/src/components/MediaViewer.vue` | long-press handlers + `<video>` overlay + LIVE badge |
 | Thumbnail badge | `src-vite/src/components/Thumbnail.vue` | `isLivePhoto` computed + LIVE badge |
-| FileInfo label | `src-vite/src/components/FileInfo.vue` | `livePhotoLabel` + export button |
+| FileInfo label + hover preview | `src-vite/src/components/FileInfo.vue` | i18n `livePhotoLabel`; preview hover (~280ms) / long-press (400ms) plays paired/extracted motion |
 | Export UI | `LivePhotoExportDialog.vue`, `fileMenu.ts`, `Content.vue` | right-click / FileInfo → still/video/pair/convert/keyframe (+ optional JPEG overwrite) |
 | Metadata repair | `rescan_live_photo_metadata` + AlbumList menu | repairs type 0/4 without full reindex; then re-pairs |
 

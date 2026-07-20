@@ -2,7 +2,7 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-20 (Lap 0.3 UX patterns: prompt import, media badges, viewer background, AI search filters)._
+_Last reviewed: 2026-07-20 (G2–G13 polish; G1/G7–G9 cancelled)._
 
 | Pattern | Use when |
 |---------|----------|

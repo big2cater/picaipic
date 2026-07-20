@@ -1,11 +1,6 @@
 ---
 name: change-viewer-background
 description: Image/quick viewer canvas background modes and cycle shortcut.
-edges:
-  - target: change-compare-viewer.md
-    condition: when multi-pane viewer chrome interacts with canvas styling
-  - target: ../ROUTER.md
-    condition: after shipping viewer chrome behavior
 last_updated: 2026-07-20
 ---
 

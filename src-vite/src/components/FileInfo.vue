@@ -71,7 +71,11 @@
               v-if="!isHistogramPreview"
               class="relative w-full overflow-hidden rounded-box border border-base-content/5 shadow-sm transition-[padding-top] duration-200 ease-out"
               :style="{ paddingTop: `${75 * previewScale}%` }"
-              @pointerleave="stopPreviewVideo"
+              @pointerenter="onPreviewPointerEnter"
+              @pointerleave="onPreviewPointerLeave"
+              @pointerdown="onPreviewPointerDown"
+              @pointerup="onPreviewPointerUp"
+              @pointercancel="onPreviewPointerUp"
             >
               <div
                 class="absolute top-2 left-2 flex bg-base-100/30 hover:bg-base-100/70 rounded-box z-20 cursor-pointer opacity-0 pointer-events-none transition-opacity duration-150 group-hover/thumbnail:opacity-100 group-hover/thumbnail:pointer-events-auto"
@@ -120,7 +124,7 @@
                 </div>
               </div>
               <button
-                v-if="canPreviewVideo && !showVideoPreview"
+                v-if="(canPreviewVideo || canPreviewLiveMotion) && !showVideoPreview"
                 type="button"
                 class="absolute inset-0 z-10 flex items-center justify-center text-base-content/70 cursor-pointer"
                 @click.stop="playPreviewVideo"
@@ -129,6 +133,12 @@
                   <IconVideoPlay class="h-7 w-7" />
                 </span>
               </button>
+              <span
+                v-if="canPreviewLiveMotion && !showVideoPreview"
+                class="pointer-events-none absolute bottom-2 left-2 rounded-box bg-base-100/75 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-base-content/60"
+              >
+                {{ $t('live_photo.hover_preview_hint') }}
+              </span>
 
               <!-- <div
                 v-if="fileInfo?.is_favorite"
@@ -482,7 +492,7 @@ import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
-import { renameFile, editImage, getAlbum, revealPath } from '@/common/api';
+import { renameFile, editImage, getAlbum, revealPath, getPairedVideo, extractMotionVideo } from '@/common/api';
 import { isWebViewVideoPlaybackDisabled } from '@/common/video';
 import { 
   extractFileName, 
@@ -527,7 +537,7 @@ const props = defineProps({
   },
 });
 
-const { locale, messages } = useI18n();
+const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
@@ -564,11 +574,18 @@ const canPreviewVideo = computed(() => (
   && !!props.fileInfo?.file_path
   && !isWebViewVideoPlaybackDisabled(String(props.fileInfo.file_path || ''))
 ));
+const livePhotoType = computed(() => Number(props.fileInfo?.live_photo_type || 0));
+/** Still that has motion (Apple still / Motion / HEIC-internal). */
+const canPreviewLiveMotion = computed(() => {
+  const t = livePhotoType.value;
+  const ft = Number(props.fileInfo?.file_type || 0);
+  return (t === 1 || t === 3 || t === 4) && (ft === 1 || ft === 3);
+});
 const livePhotoLabel = computed(() => {
-  const type = Number(props.fileInfo?.live_photo_type || 0);
-  if (type === 1 || type === 2) return 'Live Photo';
-  if (type === 3) return 'Motion Photo';
-  if (type === 4) return 'HEIC Live';
+  const type = livePhotoType.value;
+  if (type === 1 || type === 2) return t('live_photo.label_live');
+  if (type === 3) return t('live_photo.label_motion');
+  if (type === 4) return t('live_photo.label_heic');
   return '';
 });
 const canShowHistogram = computed(() => !isVideoFile.value);
@@ -593,6 +610,10 @@ const histogramChannelLabel = computed(() => {
 const previewVideoRef = ref<HTMLVideoElement | null>(null);
 const showVideoPreview = ref(false);
 const isVideoPreviewReady = ref(false);
+const pairedVideoInfo = ref<any>(null);
+let liveHoverTimer: ReturnType<typeof setTimeout> | null = null;
+let livePressTimer: ReturnType<typeof setTimeout> | null = null;
+let liveVideoUrl = '';
 const normalizedRotate = computed(() => {
   const rotate = Number(props.fileInfo?.rotate || 0) % 360;
   return rotate < 0 ? rotate + 360 : rotate;
@@ -630,26 +651,115 @@ function setPreviewMode(mode: 'thumbnail' | 'histogram') {
   config.infoPanel.previewMode = mode;
 }
 
+async function resolveLiveMotionSrc(): Promise<string | null> {
+  const fileId = props.fileInfo?.id;
+  if (fileId == null) return null;
+  let info = pairedVideoInfo.value;
+  if (!info || Number(info.file_id || info.id || 0) !== Number(fileId)) {
+    info = await getPairedVideo(fileId);
+    if (props.fileInfo?.id !== fileId) return null;
+    pairedVideoInfo.value = info;
+  }
+  if (!info) return null;
+  const type = Number(info.live_photo_type || livePhotoType.value || 0);
+  if (type === 1 && info.file_path) {
+    return getAssetSrc(String(info.file_path));
+  }
+  if (type === 3 || type === 4) {
+    const tempPath = await extractMotionVideo(fileId);
+    if (tempPath) return getAssetSrc(String(tempPath));
+  }
+  return null;
+}
+
 async function playPreviewVideo() {
-  if (!canPreviewVideo.value || !props.fileInfo?.file_path || showVideoPreview.value) return;
+  if (showVideoPreview.value) return;
+
+  // Real video files: play the file path.
+  if (canPreviewVideo.value && props.fileInfo?.file_path) {
+    isVideoPreviewReady.value = false;
+    showVideoPreview.value = true;
+    await nextTick();
+    const video = previewVideoRef.value;
+    if (!video) return;
+    liveVideoUrl = '';
+    video.src = getAssetSrc(props.fileInfo.file_path);
+    video.muted = true;
+    try {
+      await video.play();
+    } catch {
+      stopPreviewVideo();
+    }
+    return;
+  }
+
+  // Live / Motion still: paired or extracted motion.
+  if (!canPreviewLiveMotion.value) return;
   isVideoPreviewReady.value = false;
   showVideoPreview.value = true;
   await nextTick();
-
   const video = previewVideoRef.value;
   if (!video) return;
-
-  video.src = getAssetSrc(props.fileInfo.file_path);
-  video.muted = true;
-
   try {
+    const src = await resolveLiveMotionSrc();
+    if (!src || props.fileInfo?.id == null) {
+      stopPreviewVideo();
+      return;
+    }
+    liveVideoUrl = src;
+    video.src = src;
+    video.muted = true;
     await video.play();
   } catch {
     stopPreviewVideo();
   }
 }
 
+function clearLiveTimers() {
+  if (liveHoverTimer) {
+    clearTimeout(liveHoverTimer);
+    liveHoverTimer = null;
+  }
+  if (livePressTimer) {
+    clearTimeout(livePressTimer);
+    livePressTimer = null;
+  }
+}
+
+function onPreviewPointerEnter() {
+  if (!canPreviewLiveMotion.value || showVideoPreview.value || isHistogramPreview.value) return;
+  clearLiveTimers();
+  // Short hover delay so quick cursor passes do not thrash extract/play.
+  liveHoverTimer = setTimeout(() => {
+    liveHoverTimer = null;
+    void playPreviewVideo();
+  }, 280);
+}
+
+function onPreviewPointerLeave() {
+  clearLiveTimers();
+  stopPreviewVideo();
+}
+
+function onPreviewPointerDown() {
+  if (!canPreviewLiveMotion.value || showVideoPreview.value) return;
+  clearLiveTimers();
+  livePressTimer = setTimeout(() => {
+    livePressTimer = null;
+    void playPreviewVideo();
+  }, 400);
+}
+
+function onPreviewPointerUp() {
+  if (livePressTimer) {
+    clearTimeout(livePressTimer);
+    livePressTimer = null;
+  }
+  // Keep hover-started playback until pointer leaves the tile.
+}
+
 function stopPreviewVideo() {
+  clearLiveTimers();
   const video = previewVideoRef.value;
   if (video) {
     video.pause();
@@ -659,11 +769,30 @@ function stopPreviewVideo() {
 
   isVideoPreviewReady.value = false;
   showVideoPreview.value = false;
+  liveVideoUrl = '';
 }
 
 watch(
+  () => props.fileInfo?.id,
+  async (fileId) => {
+    stopPreviewVideo();
+    pairedVideoInfo.value = null;
+    if (!fileId || !canPreviewLiveMotion.value) return;
+    try {
+      const info = await getPairedVideo(fileId);
+      if (props.fileInfo?.id === fileId) pairedVideoInfo.value = info;
+    } catch {
+      pairedVideoInfo.value = null;
+    }
+  },
+  { immediate: true }
+);
+
+watch(
   () => [props.fileInfo?.id, props.fileInfo?.file_path, showPreviewPanel.value, isHistogramPreview.value],
-  stopPreviewVideo
+  () => {
+    if (!showPreviewPanel.value || isHistogramPreview.value) stopPreviewVideo();
+  }
 );
 
 onBeforeUnmount(stopPreviewVideo);

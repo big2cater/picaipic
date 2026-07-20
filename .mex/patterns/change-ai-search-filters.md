@@ -1,13 +1,6 @@
 ---
 name: change-ai-search-filters
 description: File-type filters and result grouping for AI / similar / filename search.
-edges:
-  - target: change-library-perf.md
-    condition: when changing vector search SQL or hydrate batching
-  - target: change-smart-albums.md
-    condition: when smart-tag search reuses ImageSearchParams
-  - target: ../ROUTER.md
-    condition: after shipping search UX filters
 last_updated: 2026-07-20
 ---
 

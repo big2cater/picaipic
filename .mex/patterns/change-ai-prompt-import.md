@@ -1,11 +1,6 @@
 ---
 name: change-ai-prompt-import
 description: AI PNG/JPEG prompt import into empty comments during library scan.
-edges:
-  - target: change-database-schema.md
-    condition: if comments storage or afiles columns change
-  - target: ../ROUTER.md
-    condition: after shipping scan metadata import behavior
 last_updated: 2026-07-20
 ---
 

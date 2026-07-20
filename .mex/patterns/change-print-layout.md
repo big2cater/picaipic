@@ -1,7 +1,7 @@
 ---
 name: change-print-layout
 description: Runbook for 冲印排版 (fill packing, A4, export vs print-sized print, temp cache, cell-sized decode).
-last_updated: 2026-07-19
+last_updated: 2026-07-20
 ---
 
 # Change print layout / 冲印排版
@@ -35,7 +35,7 @@ last_updated: 2026-07-19
 - Paper/photo sizes are physical inches; **export** raster = inch × DPI for the sheet.
 - **Fill packing (光影-style):** cells scale to nearly fill the paper (preserve photo aspect).
 - Built-in papers: 3R–8R + A4/A6. Layouts include 1R/2R/ID/passport/wallet mixes + **A4** packs.
-- Mixed layouts: `h-bands` / `v-bands` / `auto`. Slot `count = 0` = max-fit in remaining band.
+- Mixed layouts: `h-bands` / `v-bands` / `magazine` (free-rect) / `auto` (scores H/V/magazine). Slot `count = 0` = max-fit in remaining band / free space.
 
 ## Export vs print (critical)
 
@@ -46,7 +46,8 @@ last_updated: 2026-07-19
 
 - Print flow: print-sized composite → temp JPEG → prefer **blob URL** (avoid asset-protocol re-read) → hidden `.print-only` img → `window.print()`.
 - Do **not** reintroduce host `print_file` for layout.
-- UI DPI = **export** density only, not OS printer DPI.
+- UI DPI = **export** density only, not OS printer DPI. Lives under collapsible **Export options**; label is Export DPI.
+- Print uses system dialog for printer/tray/copies — no in-app device picker and no host `print_file`.
 
 ## Temp / print cache cleanup
 

@@ -287,10 +287,13 @@ Status: **shipped + refined** (2026-07-19).
 - System print dialog still controls printer quality/paper.
 
 ### Still optional later
-- Magazine-style irregular packing beyond band shelves
-- Relabel/hide DPI as export-only advanced option
-- Explicit printer/tray selection UI beyond OS print dialog
-- Batch wizard re-import of batch outputs (C3); print import already available
+- Richer native printer/tray API (v1 keeps OS dialog only; G13 clarifies UX)
+- Batch wizard collage-as-action (G1 cancelled); batch re-import shipped as G2
+
+### Shipped polish (2026-07-20)
+- Magazine free-rect packing (`magazine` / auto) — G11
+- Export DPI under advanced export options — G12
+- System-print hint (no host print_file) — G13
 
 ### Touchpoints
 - `src-vite/src/common/printLayout.ts`, `PrintLayoutDialog.vue`, `AddCustomPaperDialog.vue`

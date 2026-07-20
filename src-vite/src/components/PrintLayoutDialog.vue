@@ -67,7 +67,7 @@
           </div>
         </div>
         <div class="text-[11px] text-base-content/40 text-center">
-          {{ plan.paperPxW }}×{{ plan.paperPxH }}px · {{ dpi }} DPI · {{ plan.placed }}/{{ plan.capacity }}
+          {{ plan.paperPxW }}×{{ plan.paperPxH }}px · {{ plan.placed }}/{{ plan.capacity }}
           <span v-if="plan.utilization != null"> · {{ Math.round((plan.utilization || 0) * 100) }}%</span>
           <span v-if="plan.strategy && plan.strategy !== 'uniform'"> · {{ strategyLabel(plan.strategy) }}</span>
         </div>
@@ -99,10 +99,6 @@
           </button>
         </div>
         <label class="form-control">
-          <span class="label-text text-xs opacity-70 mb-1">{{ $t('print_layout.dpi') }}</span>
-          <input v-model.number="dpi" type="number" min="72" max="600" class="input input-bordered input-sm" />
-        </label>
-        <label class="form-control">
           <span class="label-text text-xs opacity-70 mb-1">{{ $t('print_layout.background') }}</span>
           <div class="flex gap-2 items-center">
             <input v-model="background" type="color" class="h-8 w-12 cursor-pointer rounded border border-base-content/15 bg-transparent" />
@@ -120,18 +116,43 @@
           <input v-model="importToLibrary" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
           {{ $t('print_layout.import_to_library') }}
         </label>
+
+        <div class="rounded-box border border-base-content/10 p-2 space-y-2">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between text-xs font-medium text-base-content/70 hover:text-base-content"
+            @click="showExportAdvanced = !showExportAdvanced"
+          >
+            <span>{{ $t('print_layout.export_advanced') }}</span>
+            <span class="opacity-50">{{ showExportAdvanced ? '▾' : '▸' }}</span>
+          </button>
+          <div v-if="showExportAdvanced" class="space-y-2">
+            <label class="form-control">
+              <span class="label-text text-xs opacity-70 mb-1">{{ $t('print_layout.dpi') }}</span>
+              <input v-model.number="dpi" type="number" min="72" max="600" class="input input-bordered input-sm" />
+              <span class="text-[10px] text-base-content/40 mt-1 leading-snug">{{ $t('print_layout.dpi_hint') }}</span>
+            </label>
+            <p class="text-[10px] text-base-content/40 leading-snug">
+              {{ $t('print_layout.export_px_hint', { w: plan.paperPxW, h: plan.paperPxH, dpi }) }}
+            </p>
+          </div>
+        </div>
+
         <p v-if="errorMessage" class="text-error text-xs">{{ errorMessage }}</p>
       </div>
     </div>
 
-    <div class="flex justify-end gap-2 pt-3 shrink-0">
-      <button class="t-button-default" :disabled="isProcessing" @click="onCancel">{{ $t('msgbox.cancel') }}</button>
-      <button class="t-button-default" :disabled="isProcessing || !plan.cells.length" @click="doPrint">
-        {{ isProcessing && processingMode === 'print' ? $t('print_layout.printing') : $t('print_layout.print') }}
-      </button>
-      <button class="t-button-primary" :disabled="isProcessing || !plan.cells.length" @click="doExport">
-        {{ isProcessing && processingMode === 'export' ? $t('print_layout.exporting') : $t('print_layout.export') }}
-      </button>
+    <div class="flex flex-col gap-1.5 pt-3 shrink-0">
+      <p class="text-[10px] text-base-content/40 leading-snug">{{ $t('print_layout.print_system_hint') }}</p>
+      <div class="flex justify-end gap-2">
+        <button class="t-button-default" :disabled="isProcessing" @click="onCancel">{{ $t('msgbox.cancel') }}</button>
+        <button class="t-button-default" :disabled="isProcessing || !plan.cells.length" @click="doPrint">
+          {{ isProcessing && processingMode === 'print' ? $t('print_layout.printing') : $t('print_layout.print') }}
+        </button>
+        <button class="t-button-primary" :disabled="isProcessing || !plan.cells.length" @click="doExport">
+          {{ isProcessing && processingMode === 'export' ? $t('print_layout.exporting') : $t('print_layout.export') }}
+        </button>
+      </div>
     </div>
   </ModalDialog>
 
@@ -258,6 +279,7 @@
           <option value="auto">{{ $t('print_layout.strategy_auto') }}</option>
           <option value="h-bands">{{ $t('print_layout.strategy_h') }}</option>
           <option value="v-bands">{{ $t('print_layout.strategy_v') }}</option>
+          <option value="magazine">{{ $t('print_layout.strategy_magazine') }}</option>
         </select>
 
         <label class="form-control w-full">
@@ -378,6 +400,7 @@ const errorMessage = ref('');
 const showPaperManage = ref(false);
 const showAddPaperDialog = ref(false);
 const showCustomDialog = ref(false);
+const showExportAdvanced = ref(false);
 const selectedPaperId = ref('');
 const activePhotoId = ref('');
 
@@ -492,6 +515,7 @@ function layoutLabel(layout: PrintLayoutPreset) {
 function strategyLabel(strategy?: string) {
   if (strategy === 'v-bands') return t('print_layout.strategy_v_short');
   if (strategy === 'h-bands') return t('print_layout.strategy_h_short');
+  if (strategy === 'magazine') return t('print_layout.strategy_magazine_short');
   return '';
 }
 

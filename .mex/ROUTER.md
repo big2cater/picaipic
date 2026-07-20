@@ -40,7 +40,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Confirmed shared→plugin-private runtime switch + managed model open/validate/import (Settings).
 - Merged to main (2026-07-18): Live Photo polish (#1), sandbox Phase 0–2 + runtime/model UX (#2).
 - Built-in **Phase A crop presets** (2026-07-18): ImageEditor ratios + photo-size catalog + custom favorites — `photoSizePresets.ts`, `patterns/change-crop-presets.md`.
-- Built-in **Phase B collage** (refined 2026-07-19): multi-select 拼图 — equal + magazine freeform cells (`2/2v/3a/3b/4/4m/6/6m/9`, NeoImaging-style), strip, free canvas + free drafts; host `export_collage` with `template: "cells"` + cell-sized source downscale — `patterns/change-collage.md`.
+- Built-in **Phase B collage** (refined 2026-07-19): multi-select 拼图 — equal + magazine freeform cells (ids 2, 2v, 3a, 3b, 4, 4m, 6, 6m, 9; NeoImaging-style), strip, free canvas + free drafts; host `export_collage` with `template: "cells"` + cell-sized source downscale — `patterns/change-collage.md`.
 - Built-in **Phase C1–C2 batch** (2026-07-18): multi-select 批处理 wizard — composable actions including border/expand/watermark/text; templates; progress/cancel; host `batch_process_images` — `patterns/change-batch-process.md`.
 - Dialog safety (2026-07-19): collage draft save/delete + batch template save/delete/overwrite use `MessageBox` / plugin-dialog `ask` only — no `window.prompt`/`window.confirm` (WebView no-op risk). Free collage rotate source headroom uses true AABB.
 - Batch process **parallel workers** (2026-07-19): serial dest planning + JoinSet concurrency (2–8); GridView VirtualScroll buffer 4→8. SearchBox submits on Enter only (no per-key SQLite). Face index **CPU parallel** (2026-07-19): 2–4 worker engines + batched SQLite writes; GPU EP still future.
@@ -59,14 +59,23 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **Signing multi-key + local revoke / G6** (2026-07-20): registry `keys[]` + `revokedKeys`; `trust_publisher` adds keys; `revoke_publisher_key` / `list_revoked_keys`; install fails closed on revoked keys — `docs/ai-plugin-security-hardening.md` Q3 closed.
 - **Sandbox Phase 3–5** (2026-07-20): **Phase 3** opt-in Windows netsh outbound + policy env. **Phase 4** opt-in Linux Landlock (ABI probe + path rules + pre_exec; soft-fail). **Phase 5** env hygiene opt-in. Default confinement remains Phase 0–2 — `docs/ai-plugin-sandbox-roadmap.md`, `t_sandbox.rs`.
 
+- **G10 FileInfo Live hover** (2026-07-20): info-panel preview hover/long-press plays Live/Motion; i18n labels — `FileInfo.vue`, `patterns/change-live-photo.md`.
+- **G11 print magazine pack** (2026-07-20): free-rect `magazine` strategy + auto scoring — `printLayout.ts`.
+- **G12 export-only DPI** (2026-07-20): DPI under Export options; Export DPI copy — `PrintLayoutDialog.vue`.
+- **G13 system print UX** (2026-07-20): hint that printer/tray is system dialog only; no host `print_file`.
+
+**Cancelled / deferred (owner 2026-07-20):**
+- **G1** collage-as-batch-action (C3 insert) — cancelled.
+- **G7** SA-LUT `export-lut` — cancelled / not doing.
+- **G8** face index GPU EP — cancelled / not doing.
+- **G9** optional whole-library empty-comment AI-prompt backfill — not doing (scan-time empty-only remains).
+
 **Not yet built / future work:**
-- Built-in tools Phase C3: insert collage template as batch action (product cancelled for now / G1) — **`docs/guide/builtin-tools-roadmap.md`**.
-- Magazine-style irregular packing for print beyond band shelves; hide/relabel DPI as export-only; richer printer/tray picker (system dialog is enough for v1).
-- Sandbox: Linux netns / real WFP; seccomp; Landlock matrix on ROCm; optional cache ref/range.
+- Sandbox deeper enforcement: Linux netns / real WFP; seccomp; Landlock×ROCm matrix; optional cache ref-range (Phase 3–5 flags exist, default off).
 - Remote signing CRL / dual-sign key-transition artifacts; recurring release-exe plugin regression after host changes.
 - Broader HEIC sequence sample coverage; broader automated coverage outside plugin-host + current Rust unit tests.
 - Publish v1.1.0 draft release (owner decision; repo remains private for now).
-- Lap 0.3 remaining polish: FileInfo/Live hover playback refinement; optional empty-comment library backfill.
+- Commit remaining G10–G13 + docs if not yet on `main` tip.
 
 **Known issues / active risks:**
 - Packaged-plugin behavior must be checked in the release executable; dev-mode success alone does not prove installer/resource/runtime correctness.

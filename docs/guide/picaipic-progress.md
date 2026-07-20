@@ -2,6 +2,23 @@
 
 Updated: 2026-07-20
 
+## Status board (2026-07-20)
+
+| Track | Status |
+|-------|--------|
+| Built-in A/B/C1/C2 + print layout | Shipped |
+| Batch import to library (G2) | Shipped |
+| Lap 0.3 UX (prompt/badges/bg/search) | Shipped |
+| Multi-key trust + local revoke (G6) | Shipped |
+| Sandbox Phase 0–2 | Default on |
+| Sandbox Phase 3–5 | Opt-in spikes (default off) |
+| G10 FileInfo Live hover | Shipped |
+| G11 magazine pack / G12 export DPI / G13 system-print UX | Shipped |
+| G1 / G7 / G8 / G9 | **Not doing** (owner) |
+| Publish v1.1.0 draft | Owner decision |
+
+Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+
 ## 2026-07-19 Lap 0.3 UX pack (prompt import · media badges · viewer bg · search filters)
 
 Aligned further with upstream lap v0.3.0 browsing/metadata UX while keeping PicAiPic plugin/built-in-tool differentiation.
@@ -47,9 +64,18 @@ Aligned further with upstream lap v0.3.0 browsing/metadata UX while keeping PicA
 
 ### Still open after this pack
 
-- FileInfo / Live Photo hover-preview polish.
-- Optional one-shot empty-comment library backfill.
-- Built-in C3 collage-in-batch (G1 cancelled for now) / publish v1.1.0 draft / sandbox Phase 3–5 **enforcement**.
+- Publish v1.1.0 draft / sandbox deeper enforcement (netns/WFP/seccomp) — optional.
+
+### Explicitly not doing (2026-07-20)
+
+- **G1** collage-in-batch, **G7** export-lut, **G8** face GPU EP, **G9** whole-library empty-comment backfill.
+
+### G10–G13 polish (2026-07-20)
+
+- **G10:** FileInfo preview hover (~280ms) / long-press (400ms) plays Live/Motion motion; labels i18n.
+- **G11:** `packMagazine` free-rect strategy; custom layout + auto scoring includes magazine.
+- **G12:** DPI moved under Export options; “Export DPI” + hints (not OS printer DPI).
+- **G13:** Print footer explains system dialog for printer/tray; still `window.print`, no host device picker.
 
 ## 2026-07-20 G2 · G6 · sandbox scaffold
 

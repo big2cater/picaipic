@@ -1,11 +1,6 @@
 ---
 name: change-media-badges
 description: Configurable thumbnail media-info badges (format, ISO, shutter, aperture, focal, exposure).
-edges:
-  - target: change-library-shortcuts.md
-    condition: when changing grid/view presentation defaults
-  - target: ../ROUTER.md
-    condition: after shipping thumbnail overlay behavior
 last_updated: 2026-07-20
 ---
 
