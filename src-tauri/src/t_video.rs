@@ -27,6 +27,10 @@ use tokio::sync::Mutex;
 
 static SIDE_CAR_DIR: OnceCell<PathBuf> = OnceCell::new();
 const PROCESS_TIMEOUT_SECS: u64 = 30;
+const PROBE_TIMEOUT_SECS: u64 = 5;
+const INDEX_PROBE_TIMEOUT_SECS: u64 = 20;
+const PROBE_SIZE_BYTES: &str = "5000000";
+const ANALYZE_DURATION_MICROSECONDS: &str = "5000000";
 const EXTERNAL_PLAYER_REQUIRED_ERROR: &str = "video_requires_external_player";
 
 fn thumbnail_ffmpeg_threads() -> usize {
@@ -184,14 +188,44 @@ fn debug_stderr() -> std::process::Stdio {
     }
 }
 
-/// Internal: Get probe JSON via async command with 30s hard timeout.
-/// This prevents malformed headers from hanging the backend.
-async fn probe_json_async(file_path: &str) -> Result<Value, String> {
+fn is_mpeg_program_stream(file_path: &str) -> bool {
+    PathBuf::from(file_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mpg" | "mpeg" | "vob"
+            )
+        })
+}
+
+fn should_skip_duration_probe(file_path: &str) -> bool {
+    is_mpeg_program_stream(file_path)
+        || PathBuf::from(file_path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "ts" | "mts" | "m2ts"
+                )
+            })
+}
+
+/// Internal: Run ffprobe with bounded resource limits and configurable timeout.
+async fn probe_json_with_timeout(file_path: &str, timeout_secs: u64) -> Result<Value, String> {
     let mut cmd = ffprobe_command();
 
+    cmd.args(["-v", "quiet"]);
+    if should_skip_duration_probe(file_path) {
+        cmd.args(["-skip_estimate_duration_from_pts", "1"]);
+    }
     cmd.args([
-        "-v",
-        "quiet",
+        "-probesize",
+        PROBE_SIZE_BYTES,
+        "-analyzeduration",
+        ANALYZE_DURATION_MICROSECONDS,
         "-show_format",
         "-show_streams",
         "-of",
@@ -215,9 +249,10 @@ async fn probe_json_async(file_path: &str) -> Result<Value, String> {
         .spawn()
         .map_err(|e| format!("ffprobe failed to spawn: {}", e))?;
 
-    // Hard timeout for probe stage.
+    // Dropping wait_with_output also drops the kill_on_drop child, so timeout
+    // and request cancellation both terminate ffprobe instead of orphaning it.
     match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(timeout_secs),
         probe_child.wait_with_output(),
     )
     .await
@@ -235,14 +270,20 @@ async fn probe_json_async(file_path: &str) -> Result<Value, String> {
             }
         }
         Ok(Err(e)) => Err(format!("ffprobe execution failed: {}", e)),
-        Err(_) => Err("ffprobe timed out after 30s".to_string()),
+        Err(_) => Err(format!("ffprobe timed out after {}s", timeout_secs)),
     }
+}
+
+/// Internal: Get bounded probe JSON. MPEG program/transport streams must not
+/// seek toward EOF merely to estimate duration.
+async fn probe_json_async(file_path: &str) -> Result<Value, String> {
+    probe_json_with_timeout(file_path, PROBE_TIMEOUT_SECS).await
 }
 
 /// Get video duration asynchronously.
 #[allow(dead_code)]
 pub async fn get_video_duration(file_path: &str) -> Result<u64, String> {
-    let json = probe_json_async(file_path).await?;
+    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
     Ok(json["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
@@ -536,7 +577,7 @@ pub struct VideoMetadata {
 }
 
 pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, String> {
-    let json = probe_json_async(file_path).await?;
+    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
 
     // Extract stream info
     let streams = json["streams"]

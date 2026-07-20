@@ -359,8 +359,23 @@ PyInstaller) was considered and rejected:
    staged copies. Chosen for simplicity (no ACE manipulation, no broker
    protocol change). Perf cost is acceptable for typical photos; large
    videos are a future optimization.
-3. For approach B, what is the key rotation story if an author's private key
-   is compromised?
+3. ~~For approach B, what is the key rotation story if an author's private key
+   is compromised?~~ **RESOLVED (2026-07-20)**:
+   - **Trust unit = public key** (publisher name is grouping/display only).
+   - Registry stores **multi-key** per publisher (`keys[]` with `active|retired`)
+     plus a local **`revokedKeys`** denylist.
+   - Install accepts any **active** trusted key for that publisher after crypto
+     verify; **revoked keys fail closed** even if still listed as trusted.
+   - Planned rotation: author ships packages signed with a new key → user gets
+     `TRUST_REQUIRED` for the new key (existing keys stay) → trust new key →
+     optionally revoke/retire the old key. Compromise: put old pubkey on the
+     local revoke list immediately (no grace). Re-sign releases with the new key.
+   - Already-installed plugins are not killed at runtime in this phase; document
+     uninstall/reinstall if a key is compromised.
+   - Dev bypass unchanged: `PICAIPIC_ALLOW_UNSIGNED_PLUGINS` for **unsigned**
+     packages only. Remote CRL / dual-sign transition artifacts = future.
+   - Commands: `trust_publisher` (adds a key), `revoke_publisher_key`,
+     `list_revoked_keys`; legacy single-key registry entries migrate on load.
 4. ~~For approach B, does the trust store live in the plugin registry JSON,
    or in a separate OS keychain/credential store?~~ **RESOLVED
    (2026-07-04)**: the trust store lives in the plugin registry JSON
@@ -371,10 +386,11 @@ PyInstaller) was considered and rejected:
    store bindings).
 5. Should the host strip inherited environment variables (`PATH`,
    `USERPROFILE`, etc.) from plugin processes in approach C, or construct a
-   minimal env from scratch (which would break venv activation)? **v1
-   decision: leave env inherited** — stripping `PATH`/`USERPROFILE` breaks
-   venv activation and runtime probing. Input staging confines normal task
-   source-file access; env sanitization is deferred.
+   minimal env from scratch (which would break venv activation)? **v1 default
+   remains inherit.** **Opt-in (2026-07-20):** `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE=1`
+   clears ambient env and re-injects an allowlist (`PATH`, system roots, Python
+   venv, CUDA/ROCm discovery, all `PICAIPIC_*`) before host plugin vars. Not a
+   Settings toggle; experimental until GPU matrix is signed off.
 
 ## Implementation status (2026-07-10)
 

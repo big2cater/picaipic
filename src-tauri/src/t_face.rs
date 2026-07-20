@@ -80,20 +80,17 @@ impl FaceEngine {
     }
 
     pub fn load_models(&mut self, app: &AppHandle) -> Result<(), String> {
-        if self.detection_model.is_some() {
-            return Ok(());
-        }
+        self.load_models_with_threads(app, 4)
+    }
 
-        // Resolve paths
+    /// Resolve ONNX model paths under the app resource `models/` directory.
+    pub fn resolve_model_paths(app: &AppHandle) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
         let resource_dir = app
             .path()
             .resolve("models", tauri::path::BaseDirectory::Resource)
             .map_err(|e| format!("Failed to resolve resource path: {}", e))?;
-
         let detection_model_path = resource_dir.join(t_common::DETECTION_MODEL);
         let embedding_model_path = resource_dir.join(t_common::EMBEDDING_MODEL);
-
-        // Check if models exist
         if !detection_model_path.exists() {
             return Err(format!(
                 "Detection model not found at {:?}",
@@ -106,15 +103,35 @@ impl FaceEngine {
                 embedding_model_path
             ));
         }
+        Ok((detection_model_path, embedding_model_path))
+    }
+
+    pub fn load_models_with_threads(&mut self, app: &AppHandle, intra_threads: usize) -> Result<(), String> {
+        let (detection_model_path, embedding_model_path) = Self::resolve_model_paths(app)?;
+        self.load_models_from_paths(&detection_model_path, &embedding_model_path, intra_threads)
+    }
+
+    /// Load sessions from explicit paths (used by parallel index workers).
+    pub fn load_models_from_paths(
+        &mut self,
+        detection_model_path: &std::path::Path,
+        embedding_model_path: &std::path::Path,
+        intra_threads: usize,
+    ) -> Result<(), String> {
+        if self.detection_model.is_some() && self.embedding_model.is_some() {
+            return Ok(());
+        }
+
+        let threads = intra_threads.max(1);
 
         // Load Detection Model (RetinaFace)
         let detection_model = Session::builder()
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
-            .with_intra_threads(4)
+            .with_intra_threads(threads)
             .map_err(|e| e.to_string())?
-            .commit_from_file(&detection_model_path)
+            .commit_from_file(detection_model_path)
             .map_err(|e| format!("Failed to load detection model: {}", e))?;
 
         self.detection_model = Some(detection_model);
@@ -124,9 +141,9 @@ impl FaceEngine {
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
-            .with_intra_threads(4)
+            .with_intra_threads(threads)
             .map_err(|e| e.to_string())?
-            .commit_from_file(&embedding_model_path)
+            .commit_from_file(embedding_model_path)
             .map_err(|e| format!("Failed to load embedding model: {}", e))?;
 
         self.embedding_model = Some(embedding_model);
@@ -607,6 +624,78 @@ impl FaceEngine {
 #[derive(Clone)]
 pub struct FaceState(pub std::sync::Arc<Mutex<FaceEngine>>);
 
+/// Parallel face-index worker count: ~half of logical cores, clamped 2–4.
+/// Keeps per-session intra-threads low so total ONNX threads stay bounded.
+fn face_index_worker_count() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 2).clamp(2, 4)
+}
+
+type FaceIndexJob = (i64, String, i64, i64);
+
+/// Multi-consumer job queue (std mpsc Receiver is not Clone / multi-consumer).
+struct FaceJobQueue {
+    inner: Mutex<FaceJobQueueInner>,
+    cvar: std::sync::Condvar,
+}
+
+struct FaceJobQueueInner {
+    jobs: std::collections::VecDeque<FaceIndexJob>,
+    closed: bool,
+}
+
+impl FaceJobQueue {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(FaceJobQueueInner {
+                jobs: std::collections::VecDeque::new(),
+                closed: false,
+            }),
+            cvar: std::sync::Condvar::new(),
+        }
+    }
+
+    fn push(&self, job: FaceIndexJob) {
+        let mut g = self.inner.lock().unwrap();
+        if g.closed {
+            return;
+        }
+        g.jobs.push_back(job);
+        self.cvar.notify_one();
+    }
+
+    fn close(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.closed = true;
+        self.cvar.notify_all();
+    }
+
+    /// Block until a job is available, or return None when closed and drained.
+    fn pop(&self) -> Option<FaceIndexJob> {
+        let mut g = self.inner.lock().unwrap();
+        loop {
+            if let Some(job) = g.jobs.pop_front() {
+                return Some(job);
+            }
+            if g.closed {
+                return None;
+            }
+            g = self.cvar.wait(g).unwrap();
+        }
+    }
+}
+
+struct FaceIndexWorkerResult {
+    #[allow(dead_code)]
+    file_id: i64,
+    #[allow(dead_code)]
+    file_path: String,
+    /// None = inference failed (leave unscanned for retry).
+    write: Option<(i64, i32, Vec<(String, Vec<f32>)>)>,
+}
+
 pub fn run_face_indexing(
     app_handle: AppHandle,
     face_state: FaceState,
@@ -721,7 +810,9 @@ pub fn run_face_indexing(
             }),
         );
 
-        // 3. Image Processing Loop
+        // 3. Image Processing Loop — bounded worker pool + batched SQLite writes.
+        // Each worker owns its own ONNX sessions (ort Session is not Sync).
+        // FaceState engine is only used for the initial shared load probe.
         let mut cancelled = false;
         let db_conn = match t_sqlite::open_conn() {
             Ok(conn) => conn,
@@ -741,89 +832,170 @@ pub fn run_face_indexing(
             }
         };
 
-        for (file_id, file_path, width, height) in files {
+        // Keep FaceState loaded for other callers; workers clone paths + own sessions.
+        let model_paths = match FaceEngine::resolve_model_paths(&app_handle) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to resolve face models: {}", e);
+                let _ = app_handle.emit(
+                    "face_index_finished",
+                    serde_json::json!({
+                        "total_faces": 0,
+                        "total_persons": 0,
+                        "cancelled": false,
+                        "error": e
+                    }),
+                );
+                reset_status();
+                return;
+            }
+        };
+        let _ = face_state; // managed state retained for process-lifetime; workers use local engines
+
+        let worker_count = face_index_worker_count();
+        let write_batch_size = 32usize;
+        let job_queue = Arc::new(FaceJobQueue::new());
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<FaceIndexWorkerResult>();
+
+        let mut worker_handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let job_queue = Arc::clone(&job_queue);
+            let result_tx = result_tx.clone();
+            let det_path = model_paths.0.clone();
+            let emb_path = model_paths.1.clone();
+            let cancel = cancel_token.clone();
+            worker_handles.push(std::thread::spawn(move || {
+                let mut engine = FaceEngine::new();
+                // Fewer intra-threads per session when multiple workers share the CPU.
+                let per_session_threads = if worker_count >= 4 { 1 } else { 2 };
+                if let Err(e) =
+                    engine.load_models_from_paths(&det_path, &emb_path, per_session_threads)
+                {
+                    eprintln!("Face worker failed to load models: {}", e);
+                    return;
+                }
+
+                while let Some((file_id, file_path, width, height)) = job_queue.pop() {
+                    if *cancel.lock().unwrap() {
+                        // Discard remaining queued jobs without inference (retryable).
+                        continue;
+                    }
+
+                    // Thumbnail first (same optimization as serial path).
+                    let (process_result, used_thumb) = match t_sqlite::AThumb::fetch(file_id) {
+                        Ok(Some(thumb)) if thumb.thumb_data.is_some() => {
+                            let thumb_bytes = thumb.thumb_data.as_ref().unwrap();
+                            match engine.process_image_from_bytes(thumb_bytes) {
+                                Ok(res) => (Ok(res), true),
+                                Err(_) => (engine.process_image(&file_path), false),
+                            }
+                        }
+                        _ => (engine.process_image(&file_path), false),
+                    };
+
+                    let write = match process_result {
+                        Ok((mut faces, (proc_w, proc_h))) => {
+                            if used_thumb {
+                                let scale_x = width as f32 / proc_w as f32;
+                                let scale_y = height as f32 / proc_h as f32;
+                                for face in &mut faces {
+                                    face.bbox.x *= scale_x;
+                                    face.bbox.y *= scale_y;
+                                    face.bbox.width *= scale_x;
+                                    face.bbox.height *= scale_y;
+                                }
+                            }
+                            let has_faces = !faces.is_empty();
+                            let status = if has_faces { 1 } else { 2 };
+                            let face_rows: Vec<(String, Vec<f32>)> = faces
+                                .into_iter()
+                                .map(|face_data| {
+                                    let bbox_json = serde_json::json!({
+                                        "x": face_data.bbox.x,
+                                        "y": face_data.bbox.y,
+                                        "width": face_data.bbox.width,
+                                        "height": face_data.bbox.height,
+                                        "confidence": face_data.bbox.confidence,
+                                    })
+                                    .to_string();
+                                    (bbox_json, face_data.embedding)
+                                })
+                                .collect();
+                            Some((file_id, status, face_rows))
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to process image {}: {}", file_path, e);
+                            // Leave has_faces untouched so a later run can retry.
+                            None
+                        }
+                    };
+
+                    if result_tx
+                        .send(FaceIndexWorkerResult {
+                            file_id,
+                            file_path,
+                            write,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(result_tx);
+
+        // Feed jobs from a dedicated thread so this async task can flush DB writes.
+        let feed_cancel = cancel_token.clone();
+        let feed_queue = Arc::clone(&job_queue);
+        let feed_handle = std::thread::spawn(move || {
+            for item in files {
+                if *feed_cancel.lock().unwrap() {
+                    break;
+                }
+                feed_queue.push(item);
+            }
+            feed_queue.close();
+        });
+
+        let mut write_batch: Vec<(i64, i32, Vec<(String, Vec<f32>)>)> =
+            Vec::with_capacity(write_batch_size);
+        let flush_writes = |batch: &mut Vec<(i64, i32, Vec<(String, Vec<f32>)>)>,
+                            total_faces: &mut usize| {
+            if batch.is_empty() {
+                return;
+            }
+            match t_sqlite::Face::apply_scan_batch_with_conn(&db_conn, batch) {
+                Ok(n) => *total_faces += n,
+                Err(e) => eprintln!("Failed to apply face scan batch: {}", e),
+            }
+            batch.clear();
+        };
+
+        loop {
+            let result = match result_rx.recv() {
+                Ok(r) => r,
+                Err(_) => break, // all workers finished and dropped senders
+            };
+
             if *cancel_token.lock().unwrap() {
                 cancelled = true;
-                break;
             }
 
             current += 1;
-
-            let mut engine = face_state.0.lock().unwrap();
-
-            // Optimization: Try to use thumbnail first
-            // We need to know if we used a thumbnail to scale the bbox
-            let (process_result, used_thumb) = match t_sqlite::AThumb::fetch(file_id) {
-                Ok(Some(thumb)) if thumb.thumb_data.is_some() => {
-                    let thumb_bytes = thumb.thumb_data.as_ref().unwrap();
-                    match engine.process_image_from_bytes(thumb_bytes) {
-                        Ok(res) => (Ok(res), true),
-                        Err(_) => (engine.process_image(&file_path), false),
-                    }
-                }
-                _ => (engine.process_image(&file_path), false),
-            };
-
-            match process_result {
-                Ok((mut faces, (proc_w, proc_h))) => {
-                    // If we used a thumbnail, scale bbox to original size
-                    if used_thumb {
-                        let scale_x = width as f32 / proc_w as f32;
-                        let scale_y = height as f32 / proc_h as f32;
-
-                        for face in &mut faces {
-                            face.bbox.x *= scale_x;
-                            face.bbox.y *= scale_y;
-                            face.bbox.width *= scale_x;
-                            face.bbox.height *= scale_y;
-                        }
-                    }
-
-                    let has_faces = !faces.is_empty();
-                    let status = if has_faces { 1 } else { 2 };
-
-                    if let Err(e) =
-                        t_sqlite::Face::mark_scanned_with_conn(&db_conn, file_id, status)
-                    {
-                        eprintln!("Failed to mark file {} as scanned: {}", file_id, e);
-                    }
-
-                    if has_faces {
-                        for face_data in &faces {
-                            let bbox_json = serde_json::json!({
-                                "x": face_data.bbox.x,
-                                "y": face_data.bbox.y,
-                                "width": face_data.bbox.width,
-                                "height": face_data.bbox.height,
-                                "confidence": face_data.bbox.confidence,
-                            })
-                            .to_string();
-
-                            match t_sqlite::Face::add_with_conn(
-                                &db_conn,
-                                file_id,
-                                &bbox_json,
-                                &face_data.embedding,
-                            ) {
-                                Ok(_) => total_faces += 1,
-                                Err(e) => eprintln!("Failed to store face: {}", e),
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Failed to process image {}: {}", file_path, e);
+            if let Some(write) = result.write {
+                write_batch.push(write);
+                if write_batch.len() >= write_batch_size {
+                    flush_writes(&mut write_batch, &mut total_faces);
                 }
             }
 
-            // Periodic progress update (every 10 files or at end)
-            if current % 10 == 0 || current == total_files {
+            if current % 10 == 0 || current == total_files || cancelled {
                 {
                     let mut progress = progress_token.lock().unwrap();
                     progress.current = current;
                     progress.faces_found = total_faces;
                 }
-
                 let _ = app_handle.emit(
                     "face_index_progress",
                     serde_json::json!({
@@ -834,6 +1006,33 @@ pub fn run_face_indexing(
                     }),
                 );
             }
+
+            if cancelled {
+                // Keep draining until workers exit so completed work is not lost.
+                // Do not break: feeder stops; workers see cancel and exit; channel closes.
+            }
+        }
+
+        let _ = feed_handle.join();
+        for h in worker_handles {
+            let _ = h.join();
+        }
+        while let Ok(result) = result_rx.try_recv() {
+            current += 1;
+            if let Some(write) = result.write {
+                write_batch.push(write);
+            }
+        }
+        flush_writes(&mut write_batch, &mut total_faces);
+
+        {
+            let mut progress = progress_token.lock().unwrap();
+            progress.current = current.min(total_files);
+            progress.faces_found = total_faces;
+        }
+
+        if *cancel_token.lock().unwrap() {
+            cancelled = true;
         }
 
         if cancelled {

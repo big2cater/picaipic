@@ -157,6 +157,34 @@
           >
             {{ $t('menu.file.move_to_trash') }}
           </PanelActionButton>
+          <PanelActionButton
+            :icon="IconExternal"
+            :disabled="selectedCount === 0"
+            @click="$emit('openExternal')"
+          >
+            {{ openExternalLabel }}
+          </PanelActionButton>
+          <PanelActionButton
+            :icon="IconTile"
+            :disabled="!canCollage"
+            @click="$emit('collage')"
+          >
+            {{ $t('info_panel.collage') }}
+          </PanelActionButton>
+          <PanelActionButton
+            :icon="IconStack"
+            :disabled="!canBatch"
+            @click="$emit('batch')"
+          >
+            {{ $t('info_panel.batch') }}
+          </PanelActionButton>
+          <PanelActionButton
+            :icon="IconFiles"
+            :disabled="!canBatch"
+            @click="$emit('printLayout')"
+          >
+            {{ $t('info_panel.print_layout') }}
+          </PanelActionButton>
         </div>
 
       </div>
@@ -173,11 +201,18 @@ import {
   IconCheckNone,
   IconClose,
   IconComment,
+  IconExternal,
   IconMove,
   IconRotate,
   IconTag,
+  IconFiles,
+  IconStack,
+  IconTile,
   IconTrash,
 } from '@/common/icons';
+import { filterCollageSourceFiles } from '@/common/collageTemplates';
+import { filterBatchImageFiles } from '@/common/batchProcess';
+import { config } from '@/common/config';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
 import PanelActionButton from '@/components/PanelActionButton.vue';
@@ -210,6 +245,10 @@ defineEmits([
   'moveToFolder',
   'copyToFolder',
   'trash',
+  'openExternal',
+  'collage',
+  'batch',
+  'printLayout',
   'favoriteAll',
   'unfavoriteAll',
   'setRatingAll',
@@ -222,6 +261,35 @@ defineEmits([
 const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const SELECTED_THUMBNAIL_LIMIT = 19;
+const canCollage = computed(() => filterCollageSourceFiles(props.selectedFiles as any[]).length >= 1);
+const canBatch = computed(() => filterBatchImageFiles(props.selectedFiles as any[]).length >= 1);
+
+const openExternalLabel = computed(() => {
+  const count = Number(props.selectedCount || 0);
+  const files = (props.selectedFiles || []) as any[];
+  let hasImage = false;
+  let hasVideo = false;
+  for (const item of files) {
+    if (item?.file_type === 1 || item?.file_type === 3) hasImage = true;
+    else if (item?.file_type === 2) hasVideo = true;
+    if (hasImage && hasVideo) break;
+  }
+  const imageApp = String(config.settings.externalImageAppName || '').trim();
+  const videoApp = String(config.settings.externalVideoAppName || '').trim();
+  const menu = localeMsg.value.menu?.file || {};
+  if (hasImage && !hasVideo) {
+    const template = menu.open_selected_images_in_app || menu.open_image_in_app || 'Open selected images in {app}...';
+    return String(template).replace('{app}', imageApp || 'app');
+  }
+  if (hasVideo && !hasImage) {
+    const template = menu.open_selected_videos_in_app || menu.open_video_in_app || 'Open selected videos in {app}...';
+    return String(template).replace('{app}', videoApp || 'app');
+  }
+  if (count > 1) {
+    return menu.open_in_app || localeMsg.value.tooltip?.open_external?.mixed_selection || 'Open in external app...';
+  }
+  return menu.open_in_app || 'Open in external app...';
+});
 
 const visibleSelectedFiles = computed(() => props.selectedFiles.slice(0, SELECTED_THUMBNAIL_LIMIT));
 const hiddenSelectedCount = computed(() => Math.max(0, props.selectedCount - visibleSelectedFiles.value.length));

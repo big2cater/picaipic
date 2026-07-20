@@ -770,7 +770,7 @@ impl AFolder {
 }
 
 /// Define the album file struct
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AFile {
     pub id: Option<i64>, // unique id (autoincrement by db)
     pub folder_id: i64,  // folder id (from folders table)
@@ -889,10 +889,13 @@ pub struct QueryParams {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageSearchParams {
-    pub search_text: String,  // search image text (for AI search)
+    pub search_text: String, // search image text (for AI search)
     pub file_id: Option<i64>, // file id (for similar image search)
-    pub threshold: f32,       // search threshold
-    pub limit: i64,           // search limit
+    pub threshold: f32,      // search threshold
+    pub limit: i64,          // search limit
+    /// Bitmask matching QueryParams.search_file_type (0 all, 1 image, 2 video, 4 raw).
+    #[serde(default)]
+    pub search_file_type: i64,
 }
 
 impl AFile {
@@ -945,6 +948,8 @@ impl AFile {
         // Live Photo / Motion Photo pairing
         let mut content_id: Option<String> = None;
         let mut live_photo_type: i64 = 0;
+        // Optional EXIF UserComment for AI prompt import (JPEG etc.)
+        let mut exif_user_comment: Option<String> = None;
 
         // Pre-read file header once for images (saves 3-4 redundant File::open per file).
         let file_header: Option<Vec<u8>> = if file_type == 1 || file_type == 3 {
@@ -1004,9 +1009,16 @@ impl AFile {
         };
 
         if file_type == 1 || file_type == 3 {
-            // Image file — reuse pre-read header
+            // Image file — reuse the pre-read header when it contains EXIF.
+            // Some older JPEGs place EXIF after large APP segments (such as an
+            // ICC profile), beyond this header buffer. Fall back to scanning
+            // the full JPEG so their capture settings are indexed as well.
             let exif = if let Some(hdr) = file_header_deref {
-                t_image::read_exif_from_bytes_permissive(hdr)
+                t_image::read_exif_from_bytes_permissive(hdr).or_else(|| {
+                    (file_type == 1 && t_image::is_jpeg_path(file_path))
+                        .then(|| t_image::read_exif_permissive(file_path))
+                        .flatten()
+                })
             } else {
                 t_image::read_exif_permissive(file_path)
             };
@@ -1072,6 +1084,11 @@ impl AFile {
             e_artist = Self::get_exif_field(&exif, Tag::Artist);
             e_copyright = Self::get_exif_field(&exif, Tag::Copyright);
             e_description = Self::get_exif_field(&exif, Tag::ImageDescription);
+            // Prefer raw UserComment decode (charset header) over display_value stripping.
+            exif_user_comment = exif
+                .as_ref()
+                .and_then(crate::t_ai_prompt::extract_user_comment_from_exif)
+                .or_else(|| Self::get_exif_field(&exif, Tag::UserComment));
             e_lens_make = Self::get_exif_field(&exif, Tag::LensMake);
             e_lens_model = Self::get_exif_field(&exif, Tag::LensModel);
             e_exposure_bias = Self::get_exif_field(&exif, Tag::ExposureBiasValue);
@@ -1079,6 +1096,25 @@ impl AFile {
             e_f_number = Self::get_exif_field(&exif, Tag::FNumber);
             e_focal_length = Self::get_exif_field(&exif, Tag::FocalLength);
             e_iso_speed = Self::get_exif_field(&exif, Tag::PhotographicSensitivity);
+
+            // The editor uses little_exif to preserve metadata. Some legacy
+            // JPEGs are accepted by that reader but rejected by kamadak-exif,
+            // which previously made capture settings appear only after an edit
+            // was saved as a new image. Only use the same reader when
+            // kamadak-exif found none of the capture settings, so a record
+            // never combines partial values from two parsers.
+            if t_image::is_jpeg_path(file_path)
+                && e_exposure_time.is_none()
+                && e_f_number.is_none()
+                && e_focal_length.is_none()
+                && e_iso_speed.is_none()
+            {
+                let capture_settings = t_image::read_capture_settings_with_little_exif(file_path);
+                e_exposure_time = e_exposure_time.or(capture_settings.exposure_time);
+                e_f_number = e_f_number.or(capture_settings.f_number);
+                e_focal_length = e_focal_length.or(capture_settings.focal_length);
+                e_iso_speed = e_iso_speed.or(capture_settings.iso_speed);
+            }
 
             // Fallback: infer lens make from lens model prefix when LensMake is missing.
             if e_lens_make.is_none() {
@@ -1290,6 +1326,18 @@ impl AFile {
         let should_swap_dimensions_for_orientation =
             file_type != 3 && !t_image::is_heic_path(file_path);
 
+        // Optional AI PNG/JPEG prompt → comments (empty-only fill on insert / change rescan).
+        let comments = if file_type == 1 {
+            crate::t_ai_prompt::extract_prompt_for_path(
+                file_path,
+                file_header_deref,
+                exif_user_comment.as_deref(),
+                e_description.as_deref(),
+            )
+        } else {
+            None
+        };
+
         let file = Self {
             id: None,
             folder_id,
@@ -1329,7 +1377,7 @@ impl AFile {
             is_favorite: None,
             rating: Some(0),
             rotate: None,
-            comments: None,
+            comments,
             has_tags: Some(false),
             has_faces: Some(0),
 
@@ -1467,61 +1515,9 @@ impl AFile {
                 }
                 String::from_utf8_lossy(&bytes).into_owned()
             }
-            _ => {
-                let displayed_value = field.display_value().with_unit(exif.as_ref()?).to_string();
-                if displayed_value.starts_with("1/") {
-                    let parts: Vec<&str> = displayed_value.split(' ').collect();
-                    let fraction_part = &parts[0][2..];
-
-                    let new_fraction_part = if fraction_part.contains('.') {
-                        let decimal_part = fraction_part.split('.').nth(1).unwrap_or("");
-                        if decimal_part.len() > 2 {
-                            if let Ok(num) = fraction_part.parse::<f64>() {
-                                format!("{:.2}", num)
-                            } else {
-                                fraction_part.to_string()
-                            }
-                        } else {
-                            fraction_part.to_string()
-                        }
-                    } else {
-                        fraction_part.to_string()
-                    };
-
-                    let mut result = format!("1/{}", new_fraction_part);
-                    if parts.len() > 1 {
-                        result.push(' ');
-                        result.push_str(parts[1]);
-                    }
-                    result
-                } else {
-                    let parts: Vec<&str> = displayed_value.split(' ').collect();
-                    if parts.is_empty() {
-                        return None;
-                    }
-                    if let Ok(num) = parts[0].parse::<f64>() {
-                        let result = if parts[0].contains('.') {
-                            let decimal_part = parts[0].split('.').nth(1).unwrap_or("");
-                            if decimal_part.len() > 2 {
-                                format!("{:.2}", num)
-                            } else {
-                                parts[0].to_string()
-                            }
-                        } else {
-                            parts[0].to_string()
-                        };
-
-                        let mut final_result = result;
-                        if parts.len() > 1 {
-                            final_result.push(' ');
-                            final_result.push_str(parts[1]);
-                        }
-                        final_result
-                    } else {
-                        displayed_value
-                    }
-                }
-            }
+            // Keep unit spacing from the EXIF crate (e.g. "24 mm", "1/30 s")
+            // so JPG and RAW display consistently after LibRaw spacing fixes.
+            _ => field.display_value().with_unit(exif.as_ref()?).to_string(),
         };
 
         let cleaned = raw
@@ -1634,7 +1630,8 @@ impl AFile {
                 content_id, paired_file_id, live_photo_type,
                 last_scan_time
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45)
+            ON CONFLICT(folder_id, name) DO NOTHING",
             params![
                 self.folder_id,
 
@@ -2132,7 +2129,15 @@ impl AFile {
         // insert the new file into the database
         let mut new_file_struct = Self::new(folder_id, file_path, file_type)?;
         new_file_struct.last_scan_time = Some(last_scan_time);
-        new_file_struct.insert()?;
+        let inserted = new_file_struct.insert()?;
+
+        // A concurrent folder sync or album scan may have inserted the same
+        // path after the SELECT above. Re-enter the existing-file path so the
+        // winning row is marked as seen by this scan and receives any required
+        // metadata or thumbnail refresh.
+        if inserted == 0 {
+            return Self::add_to_db(folder_id, file_path, file_type, last_scan_time);
+        }
 
         // return the newly inserted file
         let new_file = Self::fetch(folder_id, file_path)?;
@@ -2191,7 +2196,18 @@ impl AFile {
         new_file_info.is_favorite = old_file_info.is_favorite;
         new_file_info.rating = old_file_info.rating;
         new_file_info.rotate = old_file_info.rotate;
-        new_file_info.comments = old_file_info.comments;
+        // Preserve non-empty user comments; allow AI prompt fill only when empty.
+        let old_comments_empty = old_file_info
+            .comments
+            .as_ref()
+            .map(|c| c.trim().is_empty())
+            .unwrap_or(true);
+        let imported_comments = new_file_info.comments.clone();
+        new_file_info.comments = if old_comments_empty {
+            imported_comments.clone()
+        } else {
+            old_file_info.comments.clone()
+        };
         new_file_info.has_tags = old_file_info.has_tags;
         new_file_info.has_thumbnail = old_file_info.has_thumbnail;
         new_file_info.has_embedding = old_file_info.has_embedding;
@@ -2199,6 +2215,15 @@ impl AFile {
 
         // update the file info
         Self::update(file_id, &new_file_info)?;
+
+        // `update()` does not write comments; fill empty comments via column update.
+        if old_comments_empty {
+            if let Some(ref prompt) = imported_comments {
+                if !prompt.trim().is_empty() {
+                    let _ = Self::update_column(file_id, "comments", prompt);
+                }
+            }
+        }
 
         Self::get_file_info(file_id)
     }
@@ -2969,7 +2994,14 @@ impl AFile {
         let embedding =
             embedding_opt.ok_or_else(|| "No file_id or search_text provided".to_string())?;
 
-        // 2. Perform Vector Search
+        // Precompute query norm once for blob cosine (avoids per-candidate sqrt on query).
+        let query_norm_sq: f32 = embedding.iter().map(|x| x * x).sum();
+        if query_norm_sq <= 0.0 {
+            return Ok(Vec::new());
+        }
+        let query_norm = query_norm_sq.sqrt();
+
+        // 2. Perform Vector Search — only id + embeds blob (no full row hydrate yet)
         let conn = open_conn()?;
 
         let mut query = "SELECT a.id, a.embeds 
@@ -2980,6 +3012,13 @@ impl AFile {
 
         query.push_str(" AND ");
         query.push_str(&Self::search_exclusion_condition("b"));
+
+        // Optional Image / RAW / Video filter (same mask as library queries).
+        if let Some(file_type_condition) = Self::build_file_type_condition(params.search_file_type) {
+            query.push_str(" AND (");
+            query.push_str(&file_type_condition);
+            query.push(')');
+        }
 
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
 
@@ -3000,18 +3039,10 @@ impl AFile {
             params.threshold
         };
 
-        // Calculate similarity
+        // Stream cosine over LE f32 blobs without allocating a Vec per candidate.
         for row in rows {
             let (id, embeds_blob) = row.map_err(|e| e.to_string())?;
-
-            // Convert blob back to Vec<f32>
-            let file_embedding: Vec<f32> = embeds_blob
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-
-            let score = Self::cosine_similarity(&embedding, &file_embedding);
-
+            let score = Self::cosine_similarity_blob(&embedding, query_norm, &embeds_blob);
             if score > threshold {
                 scores.push((id, score));
             }
@@ -3027,17 +3058,17 @@ impl AFile {
             scores.len()
         };
 
-        let final_scores = if limit < scores.len() {
-            &scores[..limit]
-        } else {
-            &scores[..]
-        };
+        let final_ids: Vec<i64> = scores.iter().take(limit).map(|(id, _)| *id).collect();
+        if final_ids.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        // Fetch full file info
-        let mut results = Vec::new();
-        for (id, _) in final_scores {
-            if let Ok(Some(file)) = Self::get_file_info(*id) {
-                results.push(file);
+        // 3. Batch hydrate full rows (preserve score order)
+        let by_id = Self::get_files_by_ids(&final_ids)?;
+        let mut results = Vec::with_capacity(final_ids.len());
+        for id in final_ids {
+            if let Some(file) = by_id.get(&id) {
+                results.push(file.clone());
             }
         }
 
@@ -3046,6 +3077,73 @@ impl AFile {
         Ok(results)
     }
 
+    /// Fetch full file rows for a list of ids, chunked IN-lists (≤500).
+    /// Returned map is unordered; callers should re-order by their id list.
+    pub fn get_files_by_ids(ids: &[i64]) -> Result<HashMap<i64, Self>, String> {
+        let mut out: HashMap<i64, Self> = HashMap::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        const CHUNK: usize = 500;
+        let conn = open_conn()?;
+        let base = Self::build_base_query();
+
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders = chunk
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("{} WHERE a.id IN ({})", base, placeholders);
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(params.as_slice(), Self::from_row)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let file = row.map_err(|e| e.to_string())?;
+                if let Some(id) = file.id {
+                    out.insert(id, file);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Cosine similarity against a little-endian f32 embedding blob.
+    /// Avoids allocating a full `Vec<f32>` per candidate (large-library win).
+    fn cosine_similarity_blob(query: &[f32], query_norm: f32, blob: &[u8]) -> f32 {
+        if query_norm <= 0.0 || blob.is_empty() {
+            return 0.0;
+        }
+        let mut dot = 0.0f32;
+        let mut file_norm_sq = 0.0f32;
+        let mut i = 0usize;
+        for chunk in blob.chunks_exact(4) {
+            if i >= query.len() {
+                break;
+            }
+            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            dot += query[i] * v;
+            file_norm_sq += v * v;
+            i += 1;
+        }
+        // Dimension mismatch or empty file vector.
+        if i == 0 || i != query.len() || file_norm_sq <= 0.0 {
+            return 0.0;
+        }
+        let file_norm = file_norm_sq.sqrt();
+        if file_norm <= 0.0 {
+            0.0
+        } else {
+            dot / (query_norm * file_norm)
+        }
+    }
+
+    #[allow(dead_code)]
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let dot_product: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -4777,6 +4875,7 @@ pub struct Face {
 
 impl Face {
     /// Add a new face using an existing connection (avoids repeated open_conn during batch indexing)
+    #[allow(dead_code)]
     pub fn add_with_conn(
         conn: &Connection,
         file_id: i64,
@@ -4957,6 +5056,7 @@ impl Face {
     }
 
     /// Mark a file as scanned using an existing connection
+    #[allow(dead_code)]
     pub fn mark_scanned_with_conn(
         conn: &Connection,
         file_id: i64,
@@ -4968,6 +5068,66 @@ impl Face {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Apply a batch of scan results in one SQLite transaction.
+    /// Each item is (file_id, has_faces_status, faces[(bbox_json, embedding)]).
+    /// Returns total faces inserted in this batch.
+    pub fn apply_scan_batch_with_conn(
+        conn: &Connection,
+        items: &[(i64, i32, Vec<(String, Vec<f32>)>)],
+    ) -> Result<usize, String> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        // Match existing Face helpers that use BEGIN/COMMIT on &Connection
+        // (rusqlite Transaction requires &mut Connection).
+        conn.execute("BEGIN IMMEDIATE", params![])
+            .map_err(|e| e.to_string())?;
+
+        let mut faces_inserted = 0usize;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let result = (|| {
+            let mut mark_stmt = conn
+                .prepare("UPDATE afiles SET has_faces = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            let mut insert_stmt = conn
+                .prepare(
+                    "INSERT INTO faces (file_id, bbox, embedding, created_at) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| e.to_string())?;
+
+            for (file_id, status, faces) in items {
+                mark_stmt
+                    .execute(params![status, file_id])
+                    .map_err(|e| e.to_string())?;
+                for (bbox, embedding) in faces {
+                    let embedding_bytes: Vec<u8> =
+                        embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+                    insert_stmt
+                        .execute(params![file_id, bbox, embedding_bytes, now])
+                        .map_err(|e| e.to_string())?;
+                    faces_inserted += 1;
+                }
+            }
+            Ok::<(), String>(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", params![])
+                    .map_err(|e| e.to_string())?;
+                Ok(faces_inserted)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", params![]);
+                Err(e)
+            }
+        }
     }
 
     /// Get statistics for face indexing
@@ -5025,6 +5185,868 @@ impl Face {
             unprocessed as usize,
             faces as usize,
         ))
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Smart Albums (rule-based saved queries; definitions live in LibraryState)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartRule {
+    pub id: String,
+    pub field: String,
+    pub operator: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartQueryParams {
+    #[serde(default = "default_smart_query_version")]
+    pub version: i32,
+    #[serde(default = "default_smart_query_match", rename = "match")]
+    pub match_mode: String,
+    #[serde(default)]
+    pub rules: Vec<SmartRule>,
+    pub sort_type: i64,
+    pub sort_order: i64,
+    #[serde(default)]
+    pub calendar_sort: i64,
+}
+
+fn default_smart_query_version() -> i32 {
+    1
+}
+fn default_smart_query_match() -> String {
+    "all".to_string()
+}
+
+impl AFile {
+    fn sj_i64(v: &serde_json::Value) -> Option<i64> {
+        match v {
+            serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            serde_json::Value::Bool(b) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+    fn sj_bool(v: &serde_json::Value) -> Option<bool> {
+        match v {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::Number(n) => Some(n.as_i64().unwrap_or(0) != 0),
+            serde_json::Value::String(s) => match s.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn sj_str(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+
+    fn build_smart_rule_condition(
+        rule: &SmartRule,
+        joins: &mut Vec<String>,
+        needs_group: &mut bool,
+        sql_params: &mut Vec<Box<dyn ToSql>>,
+    ) -> Result<String, String> {
+        let field = rule.field.as_str();
+        let op = rule.operator.as_str();
+        let value = &rule.value;
+        match field {
+            "name" => {
+                let s = Self::sj_str(value).unwrap_or_default();
+                match op {
+                    "contains" => {
+                        sql_params.push(Box::new(format!("%{}%", s)));
+                        Ok("a.name LIKE ? COLLATE NOCASE".into())
+                    }
+                    "not_contains" => {
+                        sql_params.push(Box::new(format!("%{}%", s)));
+                        Ok("a.name NOT LIKE ? COLLATE NOCASE".into())
+                    }
+                    "is" | "eq" => {
+                        sql_params.push(Box::new(s));
+                        Ok("a.name = ? COLLATE NOCASE".into())
+                    }
+                    _ => Err(format!("Unsupported name op {}", op)),
+                }
+            }
+            "favorite" => {
+                let desired = Self::sj_bool(value).unwrap_or(true);
+                let want = if matches!(op, "is" | "eq") {
+                    desired
+                } else {
+                    !desired
+                };
+                Ok(if want {
+                    "a.is_favorite = 1".into()
+                } else {
+                    "(a.is_favorite = 0 OR a.is_favorite IS NULL)".into()
+                })
+            }
+            "rating" => match op {
+                "is" | "eq" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating = ?".into())
+                }
+                "is_not" | "neq" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating != ?".into())
+                }
+                "gt" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating > ?".into())
+                }
+                "gte" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating >= ?".into())
+                }
+                "lt" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating < ?".into())
+                }
+                "lte" => {
+                    let v = Self::sj_i64(value).ok_or("rating")?;
+                    sql_params.push(Box::new(v));
+                    Ok("a.rating <= ?".into())
+                }
+                "empty" => Ok("(a.rating IS NULL OR a.rating = 0)".into()),
+                "not_empty" => Ok("(a.rating IS NOT NULL AND a.rating > 0)".into()),
+                _ => Err(format!("Unsupported rating op {}", op)),
+            },
+            "file_type" => {
+                let mask = Self::sj_i64(value).unwrap_or(0);
+                let condition =
+                    Self::build_file_type_condition(mask).unwrap_or_else(|| "1 = 1".into());
+                Ok(if matches!(op, "is_not" | "neq") {
+                    format!("NOT ({})", condition)
+                } else {
+                    condition
+                })
+            }
+            "extension" => {
+                let ext = Self::sj_str(value)
+                    .unwrap_or_default()
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase();
+                sql_params.push(Box::new(format!("%.{}", ext)));
+                let cond = "lower(a.name) LIKE ?".to_string();
+                Ok(if matches!(op, "is_not" | "neq") {
+                    format!("NOT ({})", cond)
+                } else {
+                    cond
+                })
+            }
+            "size" => {
+                let mut n = Self::sj_i64(value).unwrap_or(0);
+                if n > 0 && n < 100_000 {
+                    n *= 1_000_000;
+                }
+                match op {
+                    "gt" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size > ?".into())
+                    }
+                    "gte" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size >= ?".into())
+                    }
+                    "lt" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size < ?".into())
+                    }
+                    "lte" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size <= ?".into())
+                    }
+                    "eq" | "is" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size = ?".into())
+                    }
+                    _ => Err(format!("Unsupported size op {}", op)),
+                }
+            }
+            "orientation" => {
+                let kind = Self::sj_str(value).unwrap_or_default().to_ascii_lowercase();
+                Ok(match kind.as_str() {
+                    "landscape" => "a.width > a.height".into(),
+                    "portrait" => "a.height > a.width".into(),
+                    "square" => "a.width = a.height".into(),
+                    _ => "1 = 1".into(),
+                })
+            }
+            "tag" => match op {
+                "has" => {
+                    let id = Self::sj_i64(value).ok_or("tag id")?;
+                    joins.push("INNER JOIN afile_tags at_smart ON a.id = at_smart.file_id".into());
+                    *needs_group = true;
+                    sql_params.push(Box::new(id));
+                    Ok("at_smart.tag_id = ?".into())
+                }
+                "not_has" => {
+                    let id = Self::sj_i64(value).ok_or("tag id")?;
+                    sql_params.push(Box::new(id));
+                    Ok(
+                        "NOT EXISTS (SELECT 1 FROM afile_tags atx WHERE atx.file_id = a.id AND atx.tag_id = ?)"
+                            .into(),
+                    )
+                }
+                "empty" => {
+                    Ok("NOT EXISTS (SELECT 1 FROM afile_tags atx WHERE atx.file_id = a.id)".into())
+                }
+                "not_empty" => {
+                    Ok("EXISTS (SELECT 1 FROM afile_tags atx WHERE atx.file_id = a.id)".into())
+                }
+                _ => Err(format!("Unsupported tag op {}", op)),
+            },
+            "person" => match op {
+                "has" => {
+                    let id = Self::sj_i64(value).ok_or("person id")?;
+                    joins.push("INNER JOIN faces f_smart ON a.id = f_smart.file_id".into());
+                    *needs_group = true;
+                    sql_params.push(Box::new(id));
+                    Ok("f_smart.person_id = ?".into())
+                }
+                "not_has" => {
+                    let id = Self::sj_i64(value).ok_or("person id")?;
+                    sql_params.push(Box::new(id));
+                    Ok(
+                        "NOT EXISTS (SELECT 1 FROM faces fx WHERE fx.file_id = a.id AND fx.person_id = ?)"
+                            .into(),
+                    )
+                }
+                "empty" => Ok(
+                    "NOT EXISTS (SELECT 1 FROM faces fx WHERE fx.file_id = a.id AND fx.person_id IS NOT NULL)"
+                        .into(),
+                ),
+                "not_empty" => Ok(
+                    "EXISTS (SELECT 1 FROM faces fx WHERE fx.file_id = a.id AND fx.person_id IS NOT NULL)"
+                        .into(),
+                ),
+                _ => Err(format!("Unsupported person op {}", op)),
+            },
+            "date_taken" | "date_created" | "date_modified" => {
+                let col = match field {
+                    "date_created" => "a.created_at",
+                    "date_modified" => "a.modified_at",
+                    _ => "a.taken_date",
+                };
+                match op {
+                    "before" => {
+                        let ts = Self::sj_i64(value).ok_or("ts")?;
+                        sql_params.push(Box::new(ts));
+                        Ok(format!("{} < ?", col))
+                    }
+                    "after" => {
+                        let ts = Self::sj_i64(value).ok_or("ts")?;
+                        sql_params.push(Box::new(ts));
+                        Ok(format!("{} >= ?", col))
+                    }
+                    "between" => {
+                        let start = value
+                            .get("start")
+                            .and_then(Self::sj_i64)
+                            .or_else(|| value.as_array().and_then(|a| a.get(0)).and_then(Self::sj_i64))
+                            .ok_or("start")?;
+                        let end = value
+                            .get("end")
+                            .and_then(Self::sj_i64)
+                            .or_else(|| value.as_array().and_then(|a| a.get(1)).and_then(Self::sj_i64))
+                            .ok_or("end")?;
+                        sql_params.push(Box::new(start));
+                        sql_params.push(Box::new(end));
+                        Ok(format!("{} >= ? AND {} < ?", col, col))
+                    }
+                    "in_last" => {
+                        let amount = value
+                            .get("amount")
+                            .and_then(Self::sj_i64)
+                            .or_else(|| Self::sj_i64(value))
+                            .unwrap_or(7)
+                            .max(1);
+                        let unit = value
+                            .get("unit")
+                            .and_then(Self::sj_str)
+                            .unwrap_or_else(|| "day".into());
+                        let secs = match unit.as_str() {
+                            "week" => amount * 7 * 86400,
+                            "month" => amount * 30 * 86400,
+                            "year" => amount * 365 * 86400,
+                            _ => amount * 86400,
+                        };
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        sql_params.push(Box::new(now - secs));
+                        Ok(format!("{} >= ?", col))
+                    }
+                    "older_than" => {
+                        let amount = value
+                            .get("amount")
+                            .and_then(Self::sj_i64)
+                            .or_else(|| Self::sj_i64(value))
+                            .unwrap_or(365)
+                            .max(1);
+                        let unit = value
+                            .get("unit")
+                            .and_then(Self::sj_str)
+                            .unwrap_or_else(|| "day".into());
+                        let secs = match unit.as_str() {
+                            "week" => amount * 7 * 86400,
+                            "month" => amount * 30 * 86400,
+                            "year" => amount * 365 * 86400,
+                            _ => amount * 86400,
+                        };
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        sql_params.push(Box::new(now - secs));
+                        Ok(format!("{} < ?", col))
+                    }
+                    "empty" => Ok(format!("({} IS NULL OR {} = 0)", col, col)),
+                    "not_empty" => Ok(format!("({} IS NOT NULL AND {} != 0)", col, col)),
+                    _ => Err(format!("Unsupported date op {}", op)),
+                }
+            }
+            "has_gps" => {
+                let desired = Self::sj_bool(value).unwrap_or(true);
+                let want = if matches!(op, "is" | "eq") {
+                    desired
+                } else {
+                    !desired
+                };
+                Ok(if want {
+                    "(a.gps_latitude IS NOT NULL AND a.gps_longitude IS NOT NULL)".into()
+                } else {
+                    "(a.gps_latitude IS NULL OR a.gps_longitude IS NULL)".into()
+                })
+            }
+            "camera" => {
+                let raw = Self::sj_str(value).unwrap_or_default();
+                let parts: Vec<&str> = raw.splitn(2, "||").collect();
+                let make = parts.first().copied().unwrap_or("").trim();
+                let model = parts.get(1).copied().unwrap_or("").trim();
+                if make.is_empty() {
+                    return Ok("1 = 1".into());
+                }
+                sql_params.push(Box::new(make.to_string()));
+                let mut cond = "UPPER(a.e_make) = UPPER(?)".to_string();
+                if !model.is_empty() {
+                    sql_params.push(Box::new(model.to_string()));
+                    cond.push_str(" AND a.e_model = ?");
+                }
+                Ok(if matches!(op, "is_not" | "neq") {
+                    format!("NOT ({})", cond)
+                } else {
+                    cond
+                })
+            }
+            "lens" => {
+                let raw = Self::sj_str(value).unwrap_or_default();
+                let parts: Vec<&str> = raw.splitn(2, "||").collect();
+                let make = parts.first().copied().unwrap_or("").trim();
+                let model = parts.get(1).copied().unwrap_or("").trim();
+                if make.is_empty() {
+                    return Ok("1 = 1".into());
+                }
+                sql_params.push(Box::new(make.to_string()));
+                let mut cond = "UPPER(a.e_lens_make) = UPPER(?)".to_string();
+                if !model.is_empty() {
+                    sql_params.push(Box::new(model.to_string()));
+                    cond.push_str(" AND a.e_lens_model = ?");
+                }
+                Ok(if matches!(op, "is_not" | "neq") {
+                    format!("NOT ({})", cond)
+                } else {
+                    cond
+                })
+            }
+            _ => Err(format!("Unsupported smart field: {}", field)),
+        }
+    }
+
+    fn build_smart_query_parts(
+        params: &SmartQueryParams,
+    ) -> Result<(String, String, Vec<Box<dyn ToSql>>, bool), String> {
+        if params.rules.is_empty() {
+            return Err("Smart query requires at least one rule".into());
+        }
+        let mut joins = Vec::new();
+        let mut conditions = Vec::new();
+        let mut sql_params: Vec<Box<dyn ToSql>> = Vec::new();
+        let mut needs_group = false;
+        for rule in &params.rules {
+            conditions.push(Self::build_smart_rule_condition(
+                rule,
+                &mut joins,
+                &mut needs_group,
+                &mut sql_params,
+            )?);
+        }
+        conditions.push(Self::search_exclusion_condition("b"));
+        conditions.push("COALESCE(a.live_photo_type, 0) != 2".into());
+        let joiner = if params.match_mode == "any" {
+            " OR "
+        } else {
+            " AND "
+        };
+        let rule_count = params.rules.len();
+        let (rule_conditions, trailing) = conditions.split_at(rule_count);
+        let mut grouped = vec![format!("({})", rule_conditions.join(joiner))];
+        grouped.extend(trailing.iter().cloned());
+        let where_clause = format!(" WHERE {}", grouped.join(" AND "));
+        let mut seen = HashSet::new();
+        let mut unique = Vec::new();
+        for j in joins {
+            if seen.insert(j.clone()) {
+                unique.push(j);
+            }
+        }
+        let joins_clause = if unique.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", unique.join(" "))
+        };
+        Ok((joins_clause, where_clause, sql_params, needs_group))
+    }
+
+    pub fn get_smart_query_count_and_sum(params: &SmartQueryParams) -> Result<(i64, i64), String> {
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let sql = if needs_group {
+            format!(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM (SELECT a.id, a.size FROM afiles a LEFT JOIN afolders b ON a.folder_id = b.id LEFT JOIN albums c ON b.album_id = c.id {}{} GROUP BY a.id)",
+                joins, where_clause
+            )
+        } else {
+            format!(
+                "SELECT COUNT(*), COALESCE(SUM(a.size), 0) FROM afiles a LEFT JOIN afolders b ON a.folder_id = b.id LEFT JOIN albums c ON b.album_id = c.id {}{}",
+                joins, where_clause
+            )
+        };
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        Self::query_count_and_sum(&sql, &final_params)
+    }
+
+    pub fn get_smart_query_files(
+        params: &SmartQueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let mut query = Self::build_base_query();
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+        if needs_group {
+            query.push_str(" GROUP BY a.id");
+        }
+        let sort_params = QueryParams {
+            search_file_name: String::new(),
+            search_file_type: 0,
+            sort_type: params.sort_type,
+            sort_order: params.sort_order,
+            search_all_subfolders: String::new(),
+            search_folder: String::new(),
+            start_date: 0,
+            end_date: 0,
+            calendar_sort: params.calendar_sort,
+            make: String::new(),
+            model: String::new(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            location_admin1: String::new(),
+            location_name: String::new(),
+            is_favorite: false,
+            rating: -1,
+            tag_id: 0,
+            person_id: 0,
+            gps_min_lat: None,
+            gps_max_lat: None,
+            gps_min_lon: None,
+            gps_max_lon: None,
+        };
+        query.push_str(&format!(
+            " ORDER BY {}",
+            Self::build_order_clause(&sort_params)
+        ));
+        query.push_str(" LIMIT ? OFFSET ?");
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+}
+
+/// Virtual collection of library files (manual sets; max 10 per library).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ACollection {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ACollectionOrder {
+    pub id: i64,
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionAddResult {
+    pub added: usize,
+    pub skipped: usize,
+}
+
+impl ACollection {
+    pub const MAX_COLLECTIONS: usize = 10;
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Count membership excluding Apple Live companion videos (type 2).
+    fn count_files_sql() -> &'static str {
+        "SELECT COUNT(*) FROM acollections_files cf
+         JOIN afiles a ON a.id = cf.file_id
+         WHERE cf.collection_id = ?1
+           AND COALESCE(a.live_photo_type, 0) != 2"
+    }
+
+    pub fn list() -> Result<Vec<Self>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, sort_order, created_at, updated_at
+                 FROM acollections
+                 ORDER BY sort_order ASC, id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, sort_order, created_at, updated_at) =
+                row.map_err(|e| e.to_string())?;
+            let count: i64 = conn
+                .query_row(Self::count_files_sql(), params![id], |r| r.get(0))
+                .unwrap_or(0);
+            out.push(Self {
+                id,
+                name,
+                sort_order,
+                count,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn create(name: &str) -> Result<Self, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Collection name is empty".to_string());
+        }
+        let conn = open_conn()?;
+        let existing: i64 = conn
+            .query_row("SELECT COUNT(*) FROM acollections", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if existing as usize >= Self::MAX_COLLECTIONS {
+            return Err(format!(
+                "Maximum of {} collections reached",
+                Self::MAX_COLLECTIONS
+            ));
+        }
+        let now = Self::now_secs();
+        let sort_order = existing;
+        conn.execute(
+            "INSERT INTO acollections (name, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![name, sort_order, now, now],
+        )
+        .map_err(|e| e.to_string())?;
+        let id = conn.last_insert_rowid();
+        Ok(Self {
+            id,
+            name: name.to_string(),
+            sort_order,
+            count: 0,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn rename(id: i64, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Collection name is empty".to_string());
+        }
+        let conn = open_conn()?;
+        let now = Self::now_secs();
+        let n = conn
+            .execute(
+                "UPDATE acollections SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![name, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err(format!("Collection not found: {}", id));
+        }
+        Ok(())
+    }
+
+    pub fn delete(id: i64) -> Result<(), String> {
+        let conn = open_conn()?;
+        conn.execute("DELETE FROM acollections WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn reorder(items: &[ACollectionOrder]) -> Result<(), String> {
+        let conn = open_conn()?;
+        let now = Self::now_secs();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare("UPDATE acollections SET sort_order = ?1, updated_at = ?2 WHERE id = ?3")
+                .map_err(|e| e.to_string())?;
+            for item in items {
+                stmt.execute(params![item.sort_order, now, item.id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn add_files(id: i64, file_ids: &[i64]) -> Result<CollectionAddResult, String> {
+        let conn = open_conn()?;
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM acollections WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if exists == 0 {
+            return Err(format!("Collection not found: {}", id));
+        }
+        let now = Self::now_secs();
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO acollections_files (collection_id, file_id, added_at)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                if *file_id <= 0 {
+                    skipped += 1;
+                    continue;
+                }
+                let n = stmt
+                    .execute(params![id, file_id, now])
+                    .map_err(|e| e.to_string())?;
+                if n > 0 {
+                    added += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+            tx.execute(
+                "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(CollectionAddResult { added, skipped })
+    }
+
+    pub fn remove_files(id: i64, file_ids: &[i64]) -> Result<usize, String> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = open_conn()?;
+        let now = Self::now_secs();
+        let placeholders = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM acollections_files WHERE collection_id = ?1 AND file_id IN ({})",
+            placeholders
+        );
+        let mut params_vec: Vec<&dyn ToSql> = Vec::with_capacity(1 + file_ids.len());
+        params_vec.push(&id);
+        for f in file_ids {
+            params_vec.push(f);
+        }
+        let n = conn
+            .execute(&sql, params_vec.as_slice())
+            .map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        );
+        Ok(n)
+    }
+
+    pub fn clear(id: i64) -> Result<(), String> {
+        let conn = open_conn()?;
+        let now = Self::now_secs();
+        conn.execute(
+            "DELETE FROM acollections_files WHERE collection_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn file_ids(id: i64) -> Result<Vec<i64>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT cf.file_id FROM acollections_files cf
+                 JOIN afiles a ON a.id = cf.file_id
+                 WHERE cf.collection_id = ?1
+                   AND COALESCE(a.live_photo_type, 0) != 2
+                 ORDER BY cf.added_at DESC, cf.file_id DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Collection membership + normal QueryParams filters (sort/type/etc.).
+    pub fn get_files(
+        id: i64,
+        params: &QueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<AFile>, String> {
+        let (joins, where_clause, sql_params) = AFile::build_search_query_parts(params);
+        let mut query = AFile::build_base_query();
+        query.push_str(
+            " INNER JOIN acollections_files cf ON cf.file_id = a.id AND cf.collection_id = ? ",
+        );
+        query.push_str(&joins);
+        // Append membership filters into WHERE
+        if where_clause.trim().is_empty() {
+            query.push_str(" WHERE COALESCE(a.live_photo_type, 0) != 2 ");
+        } else {
+            // where_clause starts with " WHERE "
+            query.push_str(&where_clause);
+            query.push_str(" AND COALESCE(a.live_photo_type, 0) != 2 ");
+        }
+        if params.person_id > 0 {
+            query.push_str(" GROUP BY a.id");
+        }
+        query.push_str(&format!(
+            " ORDER BY {}",
+            AFile::build_order_clause(params)
+        ));
+        // Prefer "date added to collection" when default date sorts would dominate:
+        // still honor user sort; only add cf.added_at as stable secondary when sort is id.
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let mut final_params: Vec<&dyn ToSql> = Vec::new();
+        final_params.push(&id);
+        for p in &sql_params {
+            final_params.push(p.as_ref());
+        }
+        final_params.push(&limit);
+        final_params.push(&offset);
+        AFile::query_files(&query, &final_params)
+    }
+
+    pub fn get_count_and_sum(id: i64, params: &QueryParams) -> Result<(i64, i64), String> {
+        let (joins, where_clause, sql_params) = AFile::build_search_query_parts(params);
+        let mut sql = String::from(
+            "SELECT COUNT(*), COALESCE(SUM(a.size), 0) FROM afiles a
+             INNER JOIN acollections_files cf ON cf.file_id = a.id AND cf.collection_id = ?
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id ",
+        );
+        // build_search_query_parts already joins folders/albums via joins string for tags etc.
+        // Prefer using joins from builder for tag/person.
+        if !joins.is_empty() {
+            // rebuild with builder joins only (avoid double left join)
+            sql = format!(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM (
+                    SELECT a.id, a.size FROM afiles a
+                    INNER JOIN acollections_files cf ON cf.file_id = a.id AND cf.collection_id = ?
+                    LEFT JOIN afolders b ON a.folder_id = b.id
+                    LEFT JOIN albums c ON b.album_id = c.id
+                    {}{} AND COALESCE(a.live_photo_type, 0) != 2
+                    GROUP BY a.id
+                 )",
+                joins,
+                if where_clause.trim().is_empty() {
+                    " WHERE 1=1 "
+                } else {
+                    where_clause.as_str()
+                }
+            );
+        } else if where_clause.trim().is_empty() {
+            sql.push_str(" WHERE COALESCE(a.live_photo_type, 0) != 2 ");
+        } else {
+            sql.push_str(&where_clause);
+            sql.push_str(" AND COALESCE(a.live_photo_type, 0) != 2 ");
+        }
+
+        let mut final_params: Vec<&dyn ToSql> = Vec::new();
+        final_params.push(&id);
+        for p in &sql_params {
+            final_params.push(p.as_ref());
+        }
+        AFile::query_count_and_sum(&sql, &final_params)
     }
 }
 
@@ -5370,6 +6392,9 @@ fn create_conn() -> Result<(String, Connection), String> {
     if let Err(e) = crate::t_migration::ensure_live_photo_columns(&conn) {
         eprintln!("ensure_live_photo_columns on open: {}", e);
     }
+    if let Err(e) = crate::t_migration::ensure_collections_tables(&conn) {
+        eprintln!("ensure_collections_tables on open: {}", e);
+    }
     Ok((path, conn))
 }
 
@@ -5379,6 +6404,9 @@ fn create_conn_for_path(path: String) -> Result<(String, Connection), String> {
     setup_conn(&conn)?;
     if let Err(e) = crate::t_migration::ensure_live_photo_columns(&conn) {
         eprintln!("ensure_live_photo_columns on open: {}", e);
+    }
+    if let Err(e) = crate::t_migration::ensure_collections_tables(&conn) {
+        eprintln!("ensure_collections_tables on open: {}", e);
     }
     Ok((path, conn))
 }
@@ -5563,7 +6591,7 @@ fn create_db_internal() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_afiles_folder_id_name ON afiles(folder_id, name)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uidx_afiles_folder_id_name ON afiles(folder_id, name)",
         [],
     )
     .map_err(|e| e.to_string())?;

@@ -150,6 +150,12 @@
             </div>
             <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.general.show_collections') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.showCollections" />
+            </div>
+            <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.general.auto_check_updates') }}</div>
               </div>
               <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.autoCheckUpdates" />
@@ -207,6 +213,38 @@
                 <option v-for="(option, index) in dateGroupingOptions" :key="index" :value="option.value">{{ option.label }}</option>
               </select>
             </div>
+            <div class="flex flex-col gap-1.5 px-1 rounded-box">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.view.media_badges') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.view.media_badges_hint') }}</div>
+              </div>
+              <div class="flex flex-wrap gap-x-3 gap-y-1.5 text-xs">
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.format" />
+                  <span>{{ $t('settings.view.media_badge_format') }}</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.iso" />
+                  <span>{{ $t('settings.view.media_badge_iso') }}</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.shutter" />
+                  <span>{{ $t('settings.view.media_badge_shutter') }}</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.aperture" />
+                  <span>{{ $t('settings.view.media_badge_aperture') }}</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.focal" />
+                  <span>{{ $t('settings.view.media_badge_focal') }}</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input type="checkbox" class="checkbox checkbox-xs checkbox-primary" v-model="gridMediaBadges.exposure" />
+                  <span>{{ $t('settings.view.media_badge_exposure') }}</span>
+                </label>
+              </div>
+            </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.filmstrip_view.preview_position') }}</div>
@@ -231,6 +269,15 @@
                 <option v-for="(item, index) in wheelOptions" :key="index" :value="item.value">
                   {{ item.label }}
                 </option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.background') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.image_view.background_hint') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model.number="config.mediaViewer.backgroundMode">
+                <option v-for="(option, index) in viewerBackgroundOptions" :key="index" :value="option.value">{{ option.label }}</option>
               </select>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -287,6 +334,20 @@
                 <div class="text-xs text-base-content/30">{{ $t('settings.library.show_subfolder_files_hint') }}</div>
               </div>
               <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.showSubfolderFiles" />
+            </div>
+          </div>
+
+          <!-- metadata import -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.library.section_metadata') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.library.import_ai_prompts_to_comments') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.library.import_ai_prompts_to_comments_hint') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.importAiPromptsToComments" />
             </div>
           </div>
 
@@ -549,22 +610,54 @@
             <div v-if="aiPluginTrustedPublishers.length === 0" class="px-1 text-xs text-base-content/30">
               {{ pluginText('noTrustedPublishers') }}
             </div>
-            <div v-else class="space-y-1">
+            <div v-else class="space-y-2">
               <div
                 v-for="tp in aiPluginTrustedPublishers"
                 :key="tp.publisher"
-                class="flex items-center justify-between gap-2 px-1 py-0.5 rounded-box bg-base-100/30"
+                class="px-1 py-1 rounded-box bg-base-100/30 space-y-1"
               >
-                <div class="min-w-0 flex flex-col">
-                  <span class="text-xs text-base-content/60 truncate">{{ tp.publisher }}</span>
-                  <span class="text-[10px] text-base-content/30 truncate" :title="tp.publicKey">{{ tp.publicKey.slice(0, 32) }}...</span>
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs text-base-content/60 truncate font-medium">{{ tp.publisher }}</span>
+                  <TButton
+                    :icon="IconTrash"
+                    :buttonSize="'small'"
+                    :tooltip="pluginText('removeTrustedPublisher')"
+                    @click="removeAiPluginTrustedPublisher(tp.publisher)"
+                  />
                 </div>
-                <TButton
-                  :icon="IconTrash"
-                  :buttonSize="'small'"
-                  :tooltip="pluginText('removeTrustedPublisher')"
-                  @click="removeAiPluginTrustedPublisher(tp.publisher)"
-                />
+                <div
+                  v-for="key in trustedPublisherKeys(tp)"
+                  :key="key.publicKey"
+                  class="flex items-center justify-between gap-2 pl-1"
+                >
+                  <div class="min-w-0 flex flex-col">
+                    <span
+                      class="text-[10px] truncate"
+                      :class="key.status === 'retired' ? 'text-base-content/25 line-through' : 'text-base-content/30'"
+                      :title="key.publicKey"
+                    >{{ key.publicKey.slice(0, 28) }}…</span>
+                    <span v-if="key.status === 'retired'" class="text-[9px] text-warning/70">{{ pluginText('keyRetired') }}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs text-[10px] text-error/80"
+                    :disabled="key.status === 'retired'"
+                    @click="revokeAiPluginPublisherKey(key.publicKey)"
+                  >
+                    {{ pluginText('revokeKey') }}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div v-if="aiPluginRevokedKeys.length > 0" class="pt-1 border-t border-base-content/5 space-y-1">
+              <div class="text-[10px] uppercase tracking-widest text-base-content/25">{{ pluginText('revokedKeys') }}</div>
+              <div
+                v-for="rk in aiPluginRevokedKeys"
+                :key="rk.publicKey"
+                class="text-[10px] text-base-content/30 truncate px-1"
+                :title="rk.publicKey"
+              >
+                {{ rk.publicKey.slice(0, 32) }}…
               </div>
             </div>
           </div>
@@ -1611,6 +1704,9 @@ import {
   listTrustedPublishers,
   trustPublisher,
   removeTrustedPublisher,
+  revokePublisherKey,
+  listRevokedKeys,
+  setImportAiPrompts,
 } from '@/common/api';
 import { formatFileSize, isLinux, isMac, setTheme, SCALE_VALUES } from '@/common/utils';
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
@@ -1668,7 +1764,13 @@ const multilingualModelTotalBytes = ref(0);
 const isMultilingualModelAvailable = ref(false);
 let unlistenImageSearchModelDownloadProgress: (() => void) | null = null;
 const aiPluginRegistryPaths = ref<string[]>([]);
-const aiPluginTrustedPublishers = ref<Array<{ publisher: string; publicKey: string; trustedAt: string }>>([]);
+const aiPluginTrustedPublishers = ref<Array<{
+  publisher: string;
+  publicKey: string;
+  trustedAt: string;
+  keys?: Array<{ publicKey: string; trustedAt?: string; status?: string }>;
+}>>([]);
+const aiPluginRevokedKeys = ref<Array<{ publicKey: string; revokedAt?: string; reason?: string }>>([]);
 const aiPlugins = ref<AiPluginSummary[]>([]);
 const aiPluginStoreInfo = ref<AiPluginStoreInfo | null>(null);
 const expandedAiPluginKeys = ref<Record<string, boolean>>({});
@@ -2202,6 +2304,14 @@ const gridLabelOptions = computed(() => {
   return result;
 });
 
+// Ensure nested mediaBadges object exists for older persisted configs.
+const gridMediaBadges = computed(() => {
+  if (!config.settings.grid.mediaBadges || typeof config.settings.grid.mediaBadges !== 'object') {
+    config.setGridMediaBadges({});
+  }
+  return config.settings.grid.mediaBadges;
+});
+
 // Define the navigator view mode options
 const navigatorViewModeOptions = computed(() => {
   const options = localeMsg.value.settings.image_view.navigator_view_options;
@@ -2235,6 +2345,11 @@ const slideShowTransitionOptions = computed(() => {
   }
 
   return result;
+});
+
+const viewerBackgroundOptions = computed(() => {
+  const options = localeMsg.value.settings.image_view.background_options || [];
+  return options.map((label: string, i: number) => ({ label, value: i }));
 });
 
 const dateGroupingOptions = computed(() => {
@@ -2336,7 +2451,11 @@ function pluginText(key: string, params?: Record<string, string | number | null 
     trustPublisherMessage: 'Publisher: {publisher}\nPublic key: {key}\n\nThis plugin is signed but the publisher is not in your trusted list. Trust this publisher to allow installation?',
     trustPublisherSuccess: 'Publisher trusted. Retrying install...',
     trustedPublishers: 'Trusted publishers',
-    removeTrustedPublisher: 'Remove',
+    removeTrustedPublisher: 'Remove publisher',
+    revokeKey: 'Revoke key',
+    keyRetired: 'Retired / revoked',
+    revokedKeys: 'Revoked keys (local)',
+    revokeKeyConfirm: 'Revoke this signing key? Packages signed with it will no longer install until you re-trust a new key.',
     noTrustedPublishers: 'No trusted publishers yet.',
     installPackageWarnings: 'Plugin package installed with warnings.',
     installPackageMissingModelsTitle: 'Model files needed',
@@ -4532,15 +4651,17 @@ async function loadAiPluginPanel(refreshStatus = false, silent = false) {
   }
 
   try {
-    const [registry, plugins, hostEnvironment, storeInfo, trustedPublishers] = await Promise.all([
+    const [registry, plugins, hostEnvironment, storeInfo, trustedPublishers, revokedKeys] = await Promise.all([
       getAiPluginRegistry(),
       listAiPlugins(),
       getAiPluginHostEnvironment(),
       getAiPluginStoreInfo(),
       listTrustedPublishers(),
+      listRevokedKeys(),
     ]);
     aiPluginRegistryPaths.value = registry?.registeredPaths || [];
     aiPluginTrustedPublishers.value = trustedPublishers || [];
+    aiPluginRevokedKeys.value = revokedKeys || [];
     aiPlugins.value = Array.isArray(plugins) ? plugins : [];
     aiPluginStoreInfo.value = storeInfo || null;
     hydrateProfileSmokeResults(aiPlugins.value);
@@ -4993,6 +5114,40 @@ async function removeAiPluginTrustedPublisher(publisher: string) {
   }
 }
 
+function trustedPublisherKeys(tp: {
+  publicKey?: string;
+  keys?: Array<{ publicKey: string; trustedAt?: string; status?: string }>;
+}) {
+  if (Array.isArray(tp.keys) && tp.keys.length > 0) {
+    return tp.keys.map((k) => ({
+      publicKey: String(k.publicKey || ''),
+      status: String(k.status || 'active'),
+    })).filter((k) => k.publicKey);
+  }
+  if (tp.publicKey) {
+    return [{ publicKey: String(tp.publicKey), status: 'active' }];
+  }
+  return [];
+}
+
+async function revokeAiPluginPublisherKey(publicKey: string) {
+  if (!publicKey) return;
+  try {
+    const confirmed = await ask(pluginText('revokeKeyConfirm'), {
+      title: pluginText('revokeKey'),
+      kind: 'warning',
+      okLabel: pluginText('revokeKey'),
+      cancelLabel: t('msgbox.cancel'),
+    });
+    if (!confirmed) return;
+    await revokePublisherKey(publicKey, 'user');
+    aiPluginTrustedPublishers.value = await listTrustedPublishers();
+    aiPluginRevokedKeys.value = await listRevokedKeys();
+  } catch (error: any) {
+    toast.error(error?.message || String(error));
+  }
+}
+
 type ShortcutDisplayItem = {
   actionId: ShortcutActionId;
   labelKey: string;
@@ -5032,6 +5187,7 @@ const shortcutDisplaySections: Array<{ key: string; items: ShortcutDisplayItem[]
       { actionId: 'view.zoomIn', labelKey: 'zoom_in' },
       { actionId: 'view.zoomOut', labelKey: 'zoom_out' },
       { actionId: 'view.zoomFit', labelKey: 'zoom_fit' },
+      { actionId: 'view.cycleBackground', labelKey: 'cycle_background' },
       { actionId: 'slideshow.toggle', labelKey: 'toggle_slideshow' },
     ],
   },
@@ -5368,6 +5524,11 @@ watch(() => config.settings.categorySort, (newValue) => {
 watch(() => config.settings.showSubfolderFiles, (newValue) => {
   emit('settings-showSubfolderFiles-changed', newValue);
 });
+watch(() => config.settings.importAiPromptsToComments, (newValue) => {
+  const enabled = newValue !== false;
+  emit('settings-importAiPromptsToComments-changed', enabled);
+  void setImportAiPrompts(enabled);
+});
 
 // grid view settings
 watch(() => config.settings.grid.size, (newValue: number) => {
@@ -5398,10 +5559,27 @@ watch(() => config.settings.grid.previewPosition, (newValue) => {
 watch(() => config.settings.grid.dateGrouping, (newValue) => {
   emit('settings-gridDateGrouping-changed', newValue);
 });
+watch(
+  () => config.settings.grid.mediaBadges,
+  (newValue) => {
+    emit('settings-gridMediaBadges-changed', {
+      format: !!newValue?.format,
+      iso: !!newValue?.iso,
+      shutter: !!newValue?.shutter,
+      aperture: !!newValue?.aperture,
+      focal: !!newValue?.focal,
+      exposure: !!newValue?.exposure,
+    });
+  },
+  { deep: true },
+);
 
 // image viewer settings
 watch(() => config.settings.mouseWheelMode, (newValue) => {
   emit('settings-mouseWheelMode-changed', newValue);
+});
+watch(() => config.mediaViewer.backgroundMode, (newValue) => {
+  emit('settings-mediaViewerBackgroundMode-changed', Number(newValue) || 0);
 });
 watch(() => config.settings.navigatorViewMode, (newValue) => {
   emit('settings-navigatorViewMode-changed', newValue);

@@ -66,10 +66,20 @@ export function useAlbumSelectionProvider(
         }
     });
 
+    const clearLibraryQuickEntry = () => {
+        if (source !== 'album') return;
+        if (!libConfig.library) {
+            (libConfig as any).library = { item: 'all-files' };
+        }
+        // Album/folder browsing leaves Favorites / On this day quick entries
+        libConfig.library.item = 'all-files';
+    };
+
     /**
      * Select an album (shows all files in the album)
      */
     const selectAlbum = (album: Album) => {
+        clearLibraryQuickEntry();
         albumId.value = album.id;
         folderPath.value = album.path;
         selected.value = true;
@@ -80,13 +90,32 @@ export function useAlbumSelectionProvider(
      * Select a folder within an album
      */
     const selectFolder = async (albumIdVal: number, folder: Folder) => {
+        clearLibraryQuickEntry();
         markAlbumActivated();
-        const result = await apiSelectFolder(albumIdVal, folder.path);
+        const selectedPath = folder.path;
+        // Folder-tree nodes are filesystem nodes and often lack the DB folder id.
+        // When AlbumList remounts and restores the already selected folder, keep
+        // the known id instead of null → resolve, which reloads Content twice.
+        const isRestoringCurrentFolder =
+            albumId.value === albumIdVal &&
+            folderPath.value === selectedPath &&
+            !selected.value;
+        albumId.value = albumIdVal;
+        if (!isRestoringCurrentFolder) {
+            folderId.value = Number(folder.id || 0) || null;
+        }
+        folderPath.value = selectedPath;
+        selected.value = false;
+
+        const result = await apiSelectFolder(albumIdVal, selectedPath);
         if (result) {
-            albumId.value = albumIdVal;
-            folderId.value = result.id;
-            folderPath.value = result.path;
-            selected.value = false;
+            // Only apply if this is still the active selection target.
+            if (albumId.value === albumIdVal && folderPath.value === selectedPath) {
+                albumId.value = albumIdVal;
+                folderId.value = result.id;
+                folderPath.value = result.path;
+                selected.value = false;
+            }
         }
     };
 

@@ -14,6 +14,7 @@ use tauri::Manager;
 use tauri_plugin_aptabase::EventTracker;
 
 mod t_ai;
+mod t_ai_prompt;
 mod t_cluster;
 mod t_cmds;
 mod t_common;
@@ -253,20 +254,43 @@ async fn main() {
             t_cmds::delete_folder,
             t_cmds::delete_folder_permanently,
             t_cmds::reveal_path,
+            t_cmds::temp_file_path,
+            t_cmds::delete_temp_file,
+            t_cmds::cleanup_stale_temp_files,
             t_cmds::open_external_url,
             t_cmds::get_external_app_display_name,
             t_cmds::open_file_with_app,
+            t_cmds::open_files_with_app,
             // file
             t_cmds::get_total_count_and_sum,
             t_cmds::get_query_count_and_sum,
             t_cmds::get_query_time_line,
             t_cmds::get_query_files,
             t_cmds::get_query_file_position,
+            // collections
+            t_cmds::list_collections,
+            t_cmds::create_collection,
+            t_cmds::rename_collection,
+            t_cmds::delete_collection,
+            t_cmds::reorder_collections,
+            t_cmds::add_files_to_collection,
+            t_cmds::remove_files_from_collection,
+            t_cmds::clear_collection,
+            t_cmds::get_collection_file_ids,
+            t_cmds::get_collection_count_and_sum,
+            t_cmds::get_collection_files,
+            // smart albums
+            t_cmds::get_smart_query_count_and_sum,
+            t_cmds::get_smart_query_files,
             t_cmds::get_folder_files,
             t_cmds::sync_album_folder_mtimes,
             t_cmds::is_directory_accessible,
             t_cmds::get_folder_thumb_count,
             t_cmds::edit_image,
+            t_cmds::export_collage,
+            t_cmds::batch_process_images,
+            t_cmds::cancel_batch_process,
+            t_cmds::export_print_layout,
             t_cmds::copy_edited_image,
             t_cmds::copy_images,
             t_cmds::rename_file,
@@ -285,6 +309,8 @@ async fn main() {
             t_cmds::delete_db_file,
             t_cmds::batch_delete_files,
             t_cmds::edit_file_comment,
+            t_cmds::set_import_ai_prompts,
+            t_cmds::get_import_ai_prompts,
             t_cmds::get_file_thumb,
             t_cmds::get_file_thumb_by_id,
             t_cmds::get_file_thumbs,
@@ -344,6 +370,8 @@ async fn main() {
             t_plugin::list_trusted_publishers,
             t_plugin::trust_publisher,
             t_plugin::remove_trusted_publisher,
+            t_plugin::revoke_publisher_key,
+            t_plugin::list_revoked_keys,
             t_plugin::get_ai_plugin_host_environment,
             t_plugin::probe_ai_plugin_python_runtime,
             t_plugin::install_ai_plugin_package,

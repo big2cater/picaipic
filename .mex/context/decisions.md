@@ -16,20 +16,52 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-18
+last_updated: 2026-07-20
 ---
 
 # Decisions
 
 ## Decision Log
 
+### Import AI generation prompts into empty comments only (PNG + JPEG)
+**Date:** 2026-07-19
+**Status:** Active (shipped)
+**Decision:** During library scan, import A1111/NovelAI/InvokeAI/ComfyUI prompts from PNG text chunks and JPEG UserComment/COM into `afiles.comments` **only when empty**. Default **on**. No full-library backfill of unchanged files in v1.
+**Reasoning:** Matches lap #197 UX and PicAiPic’s AI-oriented library without overwriting user notes; scan-time is local-first and free of cloud upload.
+**Alternatives considered:** Always overwriting comments (rejected: destroys user data); JPEG-only or PNG-only first (PNG first shipped, JPEG extended same day); mtime-unchanged rescan fill (rejected for large-library cost).
+**Consequences:** `t_ai_prompt.rs` + Settings Library toggle; re-scan merge must preserve non-empty comments and use `update_column` because `AFile::update` omits comments. Optional backfill remains future work. See `patterns/change-ai-prompt-import.md`.
+
+### Configurable thumbnail media badges default off
+**Date:** 2026-07-19
+**Status:** Active (shipped)
+**Decision:** Media-info overlays (format/ISO/shutter/aperture/focal/exposure) are **opt-in** flags under `settings.grid.mediaBadges`, cap **4** badges per thumb.
+**Reasoning:** Dense 10k–100k grids need low visual noise by default; power users can enable capture metadata like lap #174.
+**Alternatives considered:** Always-on capture strip (rejected for clutter); reusing only bottom labels without overlays (incomplete vs upstream badge UX).
+**Consequences:** Cross-window sync via settings events; older Pinia configs normalize missing `mediaBadges`. See `patterns/change-media-badges.md`.
+
+### Viewer canvas background is app chrome, not global theme
+**Date:** 2026-07-19
+**Status:** Active (shipped)
+**Decision:** Image/quick-viewer media area supports theme/black/white/gray/checker via `mediaViewer.backgroundMode`; cycle with **B**; does **not** change app-wide appearance theme.
+**Reasoning:** Checking transparency and edge contrast needs a local canvas override (lap #173) without breaking daisyUI theme preference.
+**Alternatives considered:** Only dark/light app theme (insufficient for checker/transparent review); per-window non-persisted mode (worse UX).
+**Consequences:** Paint media area only; sync Settings/toolbar/shortcut. See `patterns/change-viewer-background.md`.
+
+### AI search uses same file-type bitmask as library queries
+**Date:** 2026-07-19
+**Status:** Active (shipped)
+**Decision:** `ImageSearchParams.search_file_type` reuses library mask (0 all / 1 image / 2 video / 4 raw) and filters vector-search SQL before cosine scoring; search results show Visual/Similar/Filename section headers.
+**Reasoning:** Users expect the same Image/RAW/Video control in AI search as in albums; filtering candidates early avoids scoring irrelevant embeddings.
+**Alternatives considered:** Frontend-only post-filter (wastes embedding work / wrong limit); separate AI-only type enum (duplicate UX).
+**Consequences:** Toolbar filter enabled in search-like views; similar-from-file temp mode re-runs on filter change. See `patterns/change-ai-search-filters.md`.
+
 ### Ship built-in crop/collage/batch as host tools, not AI plugins
 **Date:** 2026-07-18
-**Status:** Active (planned product direction; features not implemented yet)
-**Decision:** Photo-size crop presets, collage/拼图, and multi-image batch processing are **host-built-in** features. Plan and phased scope live in `docs/guide/builtin-tools-roadmap.md` (A crop → B collage → C batch). Do not route v1 of these through the AI plugin runtime.
+**Status:** Active (Phase A/B/C1/C2 + print layout shipped; C3 optional)
+**Decision:** Photo-size crop presets, collage/拼图, multi-image batch processing, and print layout are **host-built-in** features. Plan and phased scope live in `docs/guide/builtin-tools-roadmap.md` (A crop → B collage → C batch → print). Do not route v1 of these through the AI plugin runtime.
 **Reasoning:** Geometry, export, and deterministic batch work fit the local editor/library host; plugins remain for heavy/model-specific AI. Reference UX is 光影魔术手-style, not full parity.
 **Alternatives considered:** Implementing batch only as plugins was rejected for v1 (worse offline UX and trust surface for basic resize/crop). Full “magic hand” parity in one release was rejected as scope risk.
-**Consequences:** Implementation work should start from the roadmap phases; keep originals safe (explicit overwrite); share crop presets between editor and future batch crop actions.
+**Consequences:** Keep originals safe (explicit overwrite); share crop presets between editor and batch; C3 collage-as-batch-step remains optional.
 
 ### Prefer GitHub Release assets over Actions artifacts for installers
 **Date:** 2026-07-18

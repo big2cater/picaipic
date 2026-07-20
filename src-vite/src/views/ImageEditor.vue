@@ -240,9 +240,33 @@
                 :tooltip="$t('msgbox.image_editor.cancel_crop')"
                 @click="clickCancelCrop"
               />
-              
-              <select v-model="config.imageEditor.cropShape" class="select select-bordered select-sm flex-1 min-w-0" :disabled="cropBoxFixed" @change="onChangeCropShape">
-                <option v-for="option in cropShapeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+
+              <select
+                :value="cropPresetSelectValue"
+                class="select select-bordered select-sm flex-1 min-w-0"
+                :disabled="cropBoxFixed"
+                @change="onCropPresetSelectChange"
+              >
+                <option :value="FREE_CROP_PRESET_ID">{{ $t('msgbox.image_editor.crop_shape_custom') }}</option>
+                <optgroup :label="$t('msgbox.image_editor.crop_ratio_group')">
+                  <option v-for="option in ratioCropOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </optgroup>
+                <optgroup v-if="customCropOptions.length" :label="$t('msgbox.image_editor.crop_custom_ratio_group')">
+                  <option v-for="option in customCropOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </optgroup>
+                <optgroup :label="$t('msgbox.image_editor.crop_photo_size_group')">
+                  <option v-for="option in photoSizeCropOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </optgroup>
+                <optgroup :label="$t('msgbox.image_editor.options')">
+                  <option :value="ADD_CUSTOM_RATIO_ID">{{ $t('msgbox.image_editor.crop_add_custom_ratio') }}</option>
+                  <option :value="MANAGE_PHOTO_SIZES_ID">{{ $t('msgbox.image_editor.crop_manage_photo_sizes') }}</option>
+                </optgroup>
               </select>
 
               <TButton
@@ -253,7 +277,7 @@
                 :iconStyle="{ transform: `rotate(${isPortrait ? 90 : 0}deg)` }"
                 @click="togglePortraitAndLandscape"
               />
-              
+
               <TButton
                 buttonSize="small"
                 :icon="cropBoxFixed ? IconZoomOut : IconZoomIn"
@@ -268,6 +292,10 @@
                 :tooltip="$t('msgbox.image_editor.confirm_crop')"
                 @click="clickDoCrop"
               />
+            </div>
+
+            <div v-if="cropTargetHint" class="text-[11px] leading-4 text-base-content/40">
+              {{ cropTargetHint }}
             </div>
           </div>
         </section>
@@ -501,6 +529,20 @@
     @cancel="handleOverwriteCancel"
   />
 
+  <PhotoSizeManageDialog
+    v-if="showPhotoSizeManageDialog"
+    :custom-ratios="customCropRatios"
+    @cancel="showPhotoSizeManageDialog = false"
+    @update:custom-ratios="onCustomCropRatiosUpdated"
+  />
+
+  <AddCustomCropRatioDialog
+    v-if="showAddCustomRatioDialog"
+    :existing="customCropRatios"
+    @cancel="showAddCustomRatioDialog = false"
+    @ok="onAddCustomCropRatio"
+  />
+
 </template>
 
 <script setup lang="ts">
@@ -519,6 +561,24 @@ import MessageBox from '@/components/MessageBox.vue';
 import TButton from '@/components/TButton.vue';
 import SliderInput from '@/components/SliderInput.vue';
 import ImageHistogram from '@/components/ImageHistogram.vue';
+import PhotoSizeManageDialog from '@/components/PhotoSizeManageDialog.vue';
+import AddCustomCropRatioDialog from '@/components/AddCustomCropRatioDialog.vue';
+import {
+  ADD_CUSTOM_RATIO_ID,
+  BUILTIN_PHOTO_SIZE_PRESETS,
+  BUILTIN_RATIO_PRESETS,
+  FREE_CROP_PRESET_ID,
+  MANAGE_PHOTO_SIZES_ID,
+  formatRatioLabel,
+  getCropAspectRatio,
+  getPhotoTargetPixels,
+  getPresetBaseRatio,
+  migrateLegacyCropShape,
+  normalizeCustomCropRatios,
+  resolveCropPreset,
+  type CustomCropRatio,
+  type ResolvedCropPreset,
+} from '@/common/photoSizePresets';
 
 import {
   IconCrop,
@@ -989,29 +1049,133 @@ const hasAdjustmentChanges = computed(() => {
   );
 });
 
-const cropShapeOptions = computed(() => {
-  if (isPortrait.value) {
-    return [
-      { value: '0', label: localeMsg.value.msgbox.image_editor.crop_shape_custom },
-      { value: '1', label: '1:1' },
-      { value: '2', label: '3:4' },
-      { value: '3', label: '2:3' },
-      { value: '4', label: '10:16' },
-      { value: '5', label: '9:16' },
-      { value: '6', label: '1:2' },
-    ];
+const showPhotoSizeManageDialog = ref(false);
+const showAddCustomRatioDialog = ref(false);
+
+function ensureCropPresetConfig() {
+  const editor = config.imageEditor as any;
+  if (!Array.isArray(editor.customCropRatios)) {
+    editor.customCropRatios = [];
+  } else {
+    editor.customCropRatios = normalizeCustomCropRatios(editor.customCropRatios);
   }
 
-  return [
-    { value: '0', label: localeMsg.value.msgbox.image_editor.crop_shape_custom },
-    { value: '1', label: '1:1' },
-    { value: '2', label: '4:3' },
-    { value: '3', label: '3:2' },
-    { value: '4', label: '16:10' },
-    { value: '5', label: '16:9' },
-    { value: '6', label: '2:1' },
-  ];
+  const hasPresetId = typeof editor.cropPresetId === 'string' && editor.cropPresetId.length > 0;
+  if (!hasPresetId) {
+    editor.cropPresetId = migrateLegacyCropShape(editor.cropShape);
+  }
+
+  const resolved = resolveCropPreset(editor.cropPresetId, editor.customCropRatios);
+  editor.cropPresetId = resolved.id;
+}
+
+ensureCropPresetConfig();
+
+// Prefer the persisted array as-is after ensure/normalize; avoid cloning on every reactive read.
+const customCropRatios = computed<CustomCropRatio[]>(() => {
+  const raw = (config.imageEditor as any).customCropRatios;
+  return Array.isArray(raw) ? (raw as CustomCropRatio[]) : [];
 });
+
+const activeCropPreset = computed<ResolvedCropPreset>(() =>
+  resolveCropPreset((config.imageEditor as any).cropPresetId, customCropRatios.value),
+);
+
+const cropPresetSelectValue = computed(() => activeCropPreset.value.id);
+
+// Cache aspect once per preset/orientation change (used heavily while dragging crop handles).
+const activeCropAspectRatio = computed<number | null>(() => {
+  const base = getPresetBaseRatio(activeCropPreset.value);
+  if (!base) return null;
+  return getCropAspectRatio(base.ratioW, base.ratioH, isPortrait.value);
+});
+
+const ratioCropOptions = computed(() => {
+  const portrait = isPortrait.value;
+  return BUILTIN_RATIO_PRESETS.map((preset) => ({
+    value: preset.id,
+    label: formatRatioLabel(preset.ratioW, preset.ratioH, portrait),
+  }));
+});
+
+const customCropOptions = computed(() => {
+  const portrait = isPortrait.value;
+  return customCropRatios.value.map((preset) => ({
+    value: preset.id,
+    label: `${preset.name} (${formatRatioLabel(preset.ratioW, preset.ratioH, portrait)})`,
+  }));
+});
+
+const photoSizeCropOptions = computed(() => {
+  const portrait = isPortrait.value;
+  const names = localeMsg.value.msgbox.image_editor.photo_sizes;
+  return BUILTIN_PHOTO_SIZE_PRESETS.map((preset) => {
+    const name = names[preset.nameKey] || preset.nameKey;
+    const ratio = formatRatioLabel(preset.pxW, preset.pxH, portrait);
+    return {
+      value: preset.id,
+      label: `${name} (${ratio})`,
+    };
+  });
+});
+
+const cropTargetHint = computed(() => {
+  const preset = activeCropPreset.value;
+  if (preset.kind !== 'photo') return '';
+  const target = getPhotoTargetPixels(preset, isPortrait.value);
+  const title = localeMsg.value.msgbox.image_editor.crop_target_size;
+  return `${title}: ${target.width} × ${target.height} px @ ${preset.dpi} DPI · ${preset.cmW}×${preset.cmH} cm`;
+});
+
+function setCropPresetId(presetId: string) {
+  const resolved = resolveCropPreset(presetId, customCropRatios.value);
+  (config.imageEditor as any).cropPresetId = resolved.id;
+  // Keep legacy field roughly aligned for older readers.
+  (config.imageEditor as any).cropShape = resolved.kind === 'free' ? 0 : 1;
+}
+
+function applyPhotoTargetResize(preset: ResolvedCropPreset) {
+  if (preset.kind !== 'photo') return;
+  const target = getPhotoTargetPixels(preset, isPortrait.value);
+  keepAspectRatio.value = true;
+  resizeWidthInput.value = String(target.width);
+  resizeHeightInput.value = String(target.height);
+}
+
+function onCropPresetSelectChange(event: Event) {
+  const value = String((event.target as HTMLSelectElement | null)?.value || FREE_CROP_PRESET_ID);
+
+  if (value === MANAGE_PHOTO_SIZES_ID) {
+    showPhotoSizeManageDialog.value = true;
+    return;
+  }
+  if (value === ADD_CUSTOM_RATIO_ID) {
+    showAddCustomRatioDialog.value = true;
+    return;
+  }
+
+  setCropPresetId(value);
+  applyPhotoTargetResize(activeCropPreset.value);
+  onChangeCropShape();
+}
+
+function onCustomCropRatiosUpdated(next: CustomCropRatio[]) {
+  (config.imageEditor as any).customCropRatios = normalizeCustomCropRatios(next);
+  // Drop selection if the active custom preset was deleted.
+  const resolved = resolveCropPreset((config.imageEditor as any).cropPresetId, customCropRatios.value);
+  setCropPresetId(resolved.id);
+  if (cropStatus.value === 1) {
+    onChangeCropShape();
+  }
+}
+
+function onAddCustomCropRatio(ratio: CustomCropRatio) {
+  const next = [...customCropRatios.value, ratio];
+  (config.imageEditor as any).customCropRatios = next;
+  showAddCustomRatioDialog.value = false;
+  setCropPresetId(ratio.id);
+  onChangeCropShape();
+}
 
 const newFileName = ref('');
 
@@ -1258,6 +1422,7 @@ watch(() => Number(config.settings.scale || 1), (newScale) => {
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
   uiStore.pushInputHandler('EditImage');
+  ensureCropPresetConfig();
   activeEditorTab.value = config.imageEditor.tab === 'adjust' ? 'adjust' : 'edit';
 
   const query = router.currentRoute.value.query;
@@ -1570,6 +1735,7 @@ const clickDoCrop = () => {
 
 const togglePortraitAndLandscape = () => {
   isPortrait.value = !isPortrait.value;
+  applyPhotoTargetResize(activeCropPreset.value);
   initCropBox();
 };
 
@@ -1582,59 +1748,67 @@ const onChangeCropShape = () => {
   initCropBox();
 };
 
-const initCropBox = () => {
+const refreshCropLayoutRects = () => {
   containerRect.value = containerRef.value?.getBoundingClientRect() || null;
   imageRect.value = imageRef.value?.getBoundingClientRect() || null;
-  if (!imageRect.value || !containerRect.value) return;
+  return !!(imageRect.value && containerRect.value);
+};
 
-  const selectedShape = cropShapeOptions.value.find(option => option.value === String(config.imageEditor.cropShape) && option.value !== '0');
-  if (selectedShape && selectedShape.label) {
-    const parts = selectedShape.label.split(':');
-    const aspectRatio = parseInt(parts[0]) / parseInt(parts[1]);
+const initCropBox = () => {
+  if (!refreshCropLayoutRects()) return;
 
+  const aspectRatio = activeCropAspectRatio.value;
+  if (aspectRatio) {
     let newWidth;
     let newHeight;
-    if (imageRect.value.width / imageRect.value.height > aspectRatio) {
-      newHeight = imageRect.value.height;
+    if (imageRect.value!.width / imageRect.value!.height > aspectRatio) {
+      newHeight = imageRect.value!.height;
       newWidth = newHeight * aspectRatio;
     } else {
-      newWidth = imageRect.value.width;
+      newWidth = imageRect.value!.width;
       newHeight = newWidth / aspectRatio;
     }
 
-    const imageLeft = imageRect.value.left - containerRect.value.left;
-    const imageTop = imageRect.value.top - containerRect.value.top;
+    const imageLeft = imageRect.value!.left - containerRect.value!.left;
+    const imageTop = imageRect.value!.top - containerRect.value!.top;
 
     cropBox.value = {
-      left: imageLeft + (imageRect.value.width - newWidth) / 2,
-      top: imageTop + (imageRect.value.height - newHeight) / 2,
+      left: imageLeft + (imageRect.value!.width - newWidth) / 2,
+      top: imageTop + (imageRect.value!.height - newHeight) / 2,
       width: newWidth,
       height: newHeight,
     };
   } else {
     cropBox.value = {
-      left: imageRect.value.left - containerRect.value.left,
-      top: imageRect.value.top - containerRect.value.top,
-      width: imageRect.value.width,
-      height: imageRect.value.height,
+      left: imageRect.value!.left - containerRect.value!.left,
+      top: imageRect.value!.top - containerRect.value!.top,
+      width: imageRect.value!.width,
+      height: imageRect.value!.height,
     };
   }
 
-  updateCropFromCropBox();
+  updateCropFromCropBox({ refreshRects: false });
 };
 
-const updateCropFromCropBox = () => {
+/**
+ * Map on-screen crop box → source image pixels.
+ * During drag, pass refreshRects:false and reuse cached image/container rects
+ * (layout does not change while resizing the box).
+ */
+const updateCropFromCropBox = (options: { refreshRects?: boolean } = {}) => {
   if (cropBox.value.width === 0 || cropBox.value.height === 0) {
     crop.value = { left: 0, top: 0, width: 0, height: 0 };
     return;
   }
 
-  containerRect.value = containerRef.value?.getBoundingClientRect() || null;
-  imageRect.value = imageRef.value?.getBoundingClientRect() || null;
+  if (options.refreshRects !== false) {
+    refreshCropLayoutRects();
+  }
   if (!imageRect.value || !containerRect.value) return;
 
   const imgWidth = rotate.value % 180 === 0 ? imageWidth.value : imageHeight.value;
   const imgHeight = rotate.value % 180 === 0 ? imageHeight.value : imageWidth.value;
+  if (imageRect.value.width <= 0 || imageRect.value.height <= 0) return;
 
   const scaleX = imgWidth / imageRect.value.width;
   const scaleY = imgHeight / imageRect.value.height;
@@ -1751,24 +1925,41 @@ const startDrag = (handle: string, event: MouseEvent) => {
     enableTransition.value = false;
   }
 
+  // Snapshot layout once: getBoundingClientRect is expensive if called every mousemove.
+  refreshCropLayoutRects();
   const initialCropBoxData = { ...cropBox.value };
   const initialImagePosition = { ...position.value };
-  const initialImageRect = imageRef.value?.getBoundingClientRect() || null;
+  const dragContainerRect = containerRect.value;
+  const dragImageRect = imageRect.value;
+  const initialImageRect = dragImageRect;
+  const aspectRatio = activeCropAspectRatio.value;
+  const imgBoundsLeft = dragImageRect && dragContainerRect
+    ? dragImageRect.left - dragContainerRect.left
+    : 0;
+  const imgBoundsTop = dragImageRect && dragContainerRect
+    ? dragImageRect.top - dragContainerRect.top
+    : 0;
+  const imgBoundsRight = dragImageRect ? imgBoundsLeft + dragImageRect.width : 0;
+  const imgBoundsBottom = dragImageRect ? imgBoundsTop + dragImageRect.height : 0;
 
-  const doDrag = (e: MouseEvent) => {
-    if (!isDragging.value || !initialImageRect || !containerRect.value) return;
+  let rafId = 0;
+  let pendingClientX = event.clientX;
+  let pendingClientY = event.clientY;
 
-    const dx = e.clientX - dragStartX.value;
-    const dy = e.clientY - dragStartY.value;
+  const applyDrag = (clientX: number, clientY: number) => {
+    if (!isDragging.value || !initialImageRect || !dragContainerRect) return;
+
+    const dx = clientX - dragStartX.value;
+    const dy = clientY - dragStartY.value;
 
     if (cropBoxFixed.value && dragHandle.value === 'move') {
-      const initialImageLeft = initialImageRect.left - containerRect.value.left;
+      const initialImageLeft = initialImageRect.left - dragContainerRect.left;
       const initialImageRight = initialImageLeft + initialImageRect.width;
       const maxDx = cropBox.value.left - initialImageLeft;
       const minDx = (cropBox.value.left + cropBox.value.width) - initialImageRight;
       const clampedDx = Math.max(minDx, Math.min(dx, maxDx));
 
-      const initialImageTop = initialImageRect.top - containerRect.value.top;
+      const initialImageTop = initialImageRect.top - dragContainerRect.top;
       const initialImageBottom = initialImageTop + initialImageRect.height;
       const maxDy = cropBox.value.top - initialImageTop;
       const minDy = (cropBox.value.top + cropBox.value.height) - initialImageBottom;
@@ -1777,79 +1968,86 @@ const startDrag = (handle: string, event: MouseEvent) => {
       position.value.left = initialImagePosition.left + clampedDx;
       position.value.top = initialImagePosition.top + clampedDy;
     } else if (dragHandle.value === 'move') {
-      if (!imageRect.value) return;
-      const imageLeft = imageRect.value.left - containerRect.value.left;
-      const imageTop = imageRect.value.top - containerRect.value.top;
-      const imageRight = imageLeft + imageRect.value.width;
-      const imageBottom = imageTop + imageRect.value.height;
-
       let newLeft = initialCropBoxData.left + dx;
       let newTop = initialCropBoxData.top + dy;
 
-      if (newLeft < imageLeft) newLeft = imageLeft;
-      if (newTop < imageTop) newTop = imageTop;
-      if (newLeft + initialCropBoxData.width > imageRight) newLeft = imageRight - initialCropBoxData.width;
-      if (newTop + initialCropBoxData.height > imageBottom) newTop = imageBottom - initialCropBoxData.height;
+      if (newLeft < imgBoundsLeft) newLeft = imgBoundsLeft;
+      if (newTop < imgBoundsTop) newTop = imgBoundsTop;
+      if (newLeft + initialCropBoxData.width > imgBoundsRight) newLeft = imgBoundsRight - initialCropBoxData.width;
+      if (newTop + initialCropBoxData.height > imgBoundsBottom) newTop = imgBoundsBottom - initialCropBoxData.height;
 
       cropBox.value.left = newLeft;
       cropBox.value.top = newTop;
     } else {
-      if (!imageRect.value) return;
-      const imageLeft = imageRect.value.left - containerRect.value.left;
-      const imageTop = imageRect.value.top - containerRect.value.top;
-      const imageRight = imageLeft + imageRect.value.width;
-      const imageBottom = imageTop + imageRect.value.height;
-      let proposedBox = { ...initialCropBoxData };
+      let left = initialCropBoxData.left;
+      let top = initialCropBoxData.top;
+      let width = initialCropBoxData.width;
+      let height = initialCropBoxData.height;
 
-      if (dragHandle.value.includes('right')) proposedBox.width += dx;
+      if (dragHandle.value.includes('right')) width += dx;
       if (dragHandle.value.includes('left')) {
-        proposedBox.width -= dx;
-        proposedBox.left += dx;
+        width -= dx;
+        left += dx;
       }
-      if (dragHandle.value.includes('bottom')) proposedBox.height += dy;
+      if (dragHandle.value.includes('bottom')) height += dy;
       if (dragHandle.value.includes('top')) {
-        proposedBox.height -= dy;
-        proposedBox.top += dy;
+        height -= dy;
+        top += dy;
       }
 
-      const shape = String(config.imageEditor.cropShape);
-      if (shape !== '0') {
-        const selectedShape = cropShapeOptions.value.find(o => o.value === shape);
-        if (selectedShape && selectedShape.label) {
-          const parts = selectedShape.label.split(':');
-          const aspectRatio = parseInt(parts[0]) / parseInt(parts[1]);
-
-          if (dragHandle.value.includes('left') || dragHandle.value.includes('right')) {
-            proposedBox.height = proposedBox.width / aspectRatio;
-          } else {
-            proposedBox.width = proposedBox.height * aspectRatio;
-          }
-          if (dragHandle.value.includes('top')) {
-            proposedBox.top = initialCropBoxData.top + (initialCropBoxData.height - proposedBox.height);
-          }
-          if (dragHandle.value.includes('left')) {
-            proposedBox.left = initialCropBoxData.left + (initialCropBoxData.width - proposedBox.width);
-          }
+      if (aspectRatio) {
+        if (dragHandle.value.includes('left') || dragHandle.value.includes('right')) {
+          height = width / aspectRatio;
+        } else {
+          width = height * aspectRatio;
+        }
+        if (dragHandle.value.includes('top')) {
+          top = initialCropBoxData.top + (initialCropBoxData.height - height);
+        }
+        if (dragHandle.value.includes('left')) {
+          left = initialCropBoxData.left + (initialCropBoxData.width - width);
         }
       }
 
       if (
-        proposedBox.width >= 10 &&
-        proposedBox.height >= 10 &&
-        proposedBox.left >= imageLeft &&
-        proposedBox.top >= imageTop &&
-        proposedBox.left + proposedBox.width <= imageRight + 0.1 &&
-        proposedBox.top + proposedBox.height <= imageBottom + 0.1
+        width >= 10 &&
+        height >= 10 &&
+        left >= imgBoundsLeft &&
+        top >= imgBoundsTop &&
+        left + width <= imgBoundsRight + 0.1 &&
+        top + height <= imgBoundsBottom + 0.1
       ) {
-        cropBox.value = proposedBox;
+        cropBox.value.left = left;
+        cropBox.value.top = top;
+        cropBox.value.width = width;
+        cropBox.value.height = height;
       }
     }
 
-    updateCropFromCropBox();
+    // Reuse cached layout rects while dragging (box moves within fixed image frame).
+    updateCropFromCropBox({ refreshRects: false });
+  };
+
+  const doDrag = (e: MouseEvent) => {
+    pendingClientX = e.clientX;
+    pendingClientY = e.clientY;
+    if (rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      applyDrag(pendingClientX, pendingClientY);
+    });
   };
 
   const stopDrag = () => {
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      applyDrag(pendingClientX, pendingClientY);
+    }
     if (cropBoxFixed.value && dragHandle.value === 'move') {
+      // Image moved under a fixed crop box — remeasure after transform settles.
+      refreshCropLayoutRects();
+      updateCropFromCropBox({ refreshRects: false });
       enableTransition.value = true;
     }
     isDragging.value = false;

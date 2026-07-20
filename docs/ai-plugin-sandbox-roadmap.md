@@ -34,11 +34,11 @@ Hard product constraints:
 | **1** | Host write allow-list `plugin_writable_roots` for staging skip + ACL exclusions | **Done** |
 | **2** | Same-volume hardlink staging, copy fallback; report hardlink/copy counts | **Done (mainline)** |
 | **2 leftovers** | Cache ref/range; smarter cross-volume policy | Open (optional) |
-| **3** | Network OS block (WFP / AppContainer / etc.) | **Not done** — research only |
-| **4** | Linux Landlock / seccomp | **Not done** — research only |
-| **5** | Env hygiene / strip | **Not done** — deferred |
+| **3** | Network OS block (WFP / AppContainer / etc.) | **Opt-in spike** (2026-07-20): flag + cooperative policy env; Windows `netsh` outbound program block when no runtime grant (soft-fail → policy_only); Linux policy_only |
+| **4** | Linux Landlock / seccomp | **Opt-in spike** (2026-07-20): `PICAIPIC_ENABLE_LINUX_LANDLOCK=1` → ABI probe + path ruleset + `pre_exec` restrict_self; soft-fail if missing; seccomp still not done |
+| **5** | Env hygiene / strip | **Opt-in allowlist** (2026-07-20): `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE=1` → `env_clear` + keep PATH/GPU/`PICAIPIC_*`; default still inherits |
 
-Do **not** describe Phase 0–2 as a complete OS sandbox. Do **not** claim network or Landlock enforcement until Phase 3–4 land behind explicit opt-in flags.
+Do **not** describe Phase 0–2 as a complete OS sandbox. Do **not** claim network or Landlock enforcement until Phase 3–4 backends land behind explicit opt-in flags. Scaffold flags must keep default behavior identical to Phase 0–2.
 
 ## Threat model (what we defend vs what we don't)
 
@@ -104,38 +104,58 @@ Must preserve: plugin never receives a path outside allow-listed roots unless st
 
 **Status (2026-07-17):** Option (1) landed in `stage_one_file`: try `fs::hard_link`, on any failure fall back to `fs::copy`. `InputStagingReport` records `hardlinkedFiles` / `copiedFiles` (and logical `stagedBytes`). Cross-volume still copies. Options (2)–(3) remain future optimizations.
 
-### Phase 3 — Network confinement (high risk, separate design spike)
+### Phase 3 — Network confinement (opt-in spike)
 
-**Status (2026-07-18):** **Not implemented.** Permission prompts + `allowedDomains` packaging review only; no kernel/process network enforcement.
+**Status (2026-07-20):** **Partial opt-in.** Permission prompts + `allowedDomains` remain primary UX policy.
 
-**Goal:** Enforce declared network permissions at OS/process level when possible.
+When `PICAIPIC_ENABLE_PLUGIN_NETWORK_SANDBOX=1` and the plugin has **no** stored `runtime_network` grant:
 
-Candidate mechanisms (Windows-first):
+| Platform | Behavior |
+|----------|----------|
+| Windows | Best-effort `netsh advfirewall` **outbound block** for the plugin start program path; rule name `PicAiPicPluginNetDeny-<pluginId>`; removed on plugin stop (handle Drop). Soft-fail if admin/API fails → `policy_only`. |
+| Linux / other | No OS block yet → `policy_only` |
 
-- Windows Filtering Platform (WFP) per-process rules (complex, admin rights questions).
-- Restricted network capability / AppContainer (breaks many Python wheels / GPU).
-- Userspace only: continue policy + no host proxy; accept that Python can still open sockets until OS layer exists.
+Always inject `PICAIPIC_PLUGIN_NETWORK_POLICY` = `unrestricted` \| `allow` \| `deny` for cooperative plugin behavior. Loopback health/invoke expected to keep working under firewall program rules (verify on target OS).
 
-**Recommendation:** treat full network block as **v2 research**. For v1.x, keep permission prompts + packaging `allowedDomains` review; do not claim kernel enforcement.
+**Not claimed:** full WFP per-PID filters, AppContainer, domain allowlists at OS level.
 
-### Phase 4 — Linux process sandbox (high risk, separate design spike)
+**Recommendation:** keep default **off**. Elevate only for explicit testing; do not advertise “kernel enforced network sandbox” in release notes until matrix-validated.
 
-**Status (2026-07-18):** **Not implemented.** No Landlock/seccomp wiring in the host.
+### Phase 4 — Linux process sandbox (opt-in Landlock spike)
+
+**Status (2026-07-20):** **Partial opt-in on Linux.** Flag `PICAIPIC_ENABLE_LINUX_LANDLOCK=1`:
+
+1. Probe Landlock ABI (`landlock_create_ruleset` version query).
+2. Create ruleset; add **RW** path-beneath rules for `plugin_writable_roots`; **RO** for plugin code root + common system prefixes (`/usr`, `/lib*`, `/dev`, `/proc`, `/sys`, `/etc`, `/tmp`, CUDA/ROCm prefixes when present).
+3. Child `pre_exec`: `PR_SET_NO_NEW_PRIVS` + `landlock_restrict_self`.
+4. Soft-fail on missing kernel/ABI/rule errors → plugin still starts; start.log records `applied` or `soft_fail`.
+
+Non-Linux: `unsupported_os`. Seccomp still not implemented.
 
 **Goal:** Optional Landlock (filesystem) and/or seccomp-bpf for plugin children on Linux.
 
 Constraints:
 
 - Must allow read of shared runtime, models, staged inputs; write only to plugin roots.
-- Must not break ROCm/CUDA device nodes (`/dev/dri`, `/dev/kfd`, etc.).
+- Must not break ROCm/CUDA device nodes (`/dev/dri`, `/dev/kfd`, etc.) — RO `/dev` is intentional for this spike.
 - Prefer **opt-in** flag first (`PICAIPIC_ENABLE_LINUX_LANDLOCK=1`), same lesson as Windows ACL.
 
-### Phase 5 — Env hygiene (deferred)
+**Verify (Linux):** flag on → start.log `landlock: applied (...)`; write outside writable roots fails; GPU/venv still start. Flag off → `not_enforced`.
 
-**Goal:** Reduce ambient credentials in plugin env without breaking venv.
+### Phase 5 — Env hygiene (opt-in allowlist)
 
-- Allowlist host-injected `PICAIPIC_*` vars + computed `PATH` for selected runtime Python.
-- Do not strip wholesale in v1; document residual risk.
+**Status (2026-07-20):** Implemented behind `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE=1`.
+Default remains **full host env inheritance**.
+
+**Behavior when enabled (start + setup spawns):**
+1. `cmd.env_clear()`
+2. Re-inject allowlisted host vars (`t_sandbox::env_hygiene_base_allowlist` + `PICAIPIC_*` / `CUDA_*` / `HIP_*` / `HSA_*` prefixes)
+3. Then inject host `PICAIPIC_*` / setup profile env (must happen **after** clear)
+
+**Allowlist inventory (kept):** `PATH`/`PATHEXT`, Windows system roots, locale, `VIRTUAL_ENV`/`PYTHON*`, CUDA/ROCm/HIP discovery, `LD_LIBRARY_PATH`.  
+**Dropped examples:** `AWS_*`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, arbitrary user shell tokens.
+
+**Verify:** start plugin with flag on → start.log `env_hygiene: allowlist applied (...)`; GPU/venv plugins still start; secrets absent from child env. Flag off → `env_hygiene: inherit`.
 
 ## Explicit non-goals (do not mix into UI work)
 
@@ -148,9 +168,12 @@ Constraints:
 
 | Variable | Effect |
 |----------|--------|
-| `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` | Skip staging and optional ACL apply; still clean stale deny ACEs on Windows start path when ACL code runs. |
+| `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` | Skip staging and optional ACL apply; still clean stale deny ACEs on Windows start path when ACL code runs. Marks Phase 3–5 scaffolds as not_enforced in start.log. |
 | `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` | Windows only: enable deny-W on sensitive dirs. |
 | `PICAIPIC_SANDBOX_DENY_PATHS` | Extra semicolon-separated deny targets for ACL mode. |
+| `PICAIPIC_ENABLE_PLUGIN_NETWORK_SANDBOX=1` | Phase 3: when no runtime network grant, try Windows outbound firewall block on start program; always set `PICAIPIC_PLUGIN_NETWORK_POLICY`; soft-fail → policy_only. |
+| `PICAIPIC_ENABLE_LINUX_LANDLOCK=1` | Phase 4: Linux Landlock FS ruleset on plugin start (soft-fail if ABI missing). |
+| `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE=1` | Phase 5: `env_clear` + allowlist rebuild on plugin start/setup. Default off (inherit). |
 
 Future opt-ins should follow the same pattern: default safe host-side control, experimental OS confinement behind explicit env flags.
 

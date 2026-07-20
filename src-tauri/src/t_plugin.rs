@@ -64,6 +64,9 @@ struct RunningPlugin {
     /// RunningPlugin's lifetime via Drop.
     #[allow(dead_code)]
     sandbox: Option<t_sandbox::SandboxHandle>,
+    /// Phase 3 network handle: Drop removes Windows firewall rule if applied.
+    #[allow(dead_code)]
+    network_sandbox: Option<t_sandbox::NetworkSandboxHandle>,
 }
 
 impl AiPluginRuntimeState {
@@ -147,6 +150,9 @@ pub struct AiPluginRegistry {
     pub task_states: HashMap<String, AiPluginTaskState>,
     #[serde(default)]
     pub trusted_publishers: HashMap<String, AiPluginTrustedPublisher>,
+    /// Local denylist of Ed25519 public keys (base64). Install fails closed if package key is listed.
+    #[serde(default)]
+    pub revoked_keys: Vec<AiPluginRevokedKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,12 +801,43 @@ pub struct AiPluginPackageSignature {
     pub value: String,
 }
 
+/// One trusted Ed25519 public key for a publisher (rotation-friendly).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginTrustedKey {
+    pub public_key: String,
+    pub trusted_at: String,
+    /// `active` | `retired` (retired keys no longer accept new installs).
+    #[serde(default = "default_trusted_key_status")]
+    pub status: String,
+}
+
+fn default_trusted_key_status() -> String {
+    "active".to_string()
+}
+
+/// Locally revoked package-signing public key.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPluginRevokedKey {
+    pub public_key: String,
+    pub revoked_at: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AiPluginTrustedPublisher {
     pub publisher: String,
+    /// Primary/display key (legacy single-key field; kept for older UI/API clients).
+    #[serde(default)]
     pub public_key: String,
+    #[serde(default)]
     pub trusted_at: String,
+    /// All trusted keys for this publisher (multi-key rotation).
+    #[serde(default)]
+    pub keys: Vec<AiPluginTrustedKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1429,8 +1466,119 @@ fn load_registry() -> Result<AiPluginRegistry, String> {
 
     let content =
         fs::read_to_string(&path).map_err(|e| format!("Failed to read plugin registry: {}", e))?;
-    serde_json::from_str::<AiPluginRegistry>(content.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("Failed to parse plugin registry: {}", e))
+    let mut registry = serde_json::from_str::<AiPluginRegistry>(content.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("Failed to parse plugin registry: {}", e))?;
+    normalize_registry_trust(&mut registry);
+    Ok(registry)
+}
+
+/// Migrate legacy single-key trust entries and keep display fields in sync.
+fn normalize_registry_trust(registry: &mut AiPluginRegistry) {
+    for tp in registry.trusted_publishers.values_mut() {
+        normalize_trusted_publisher(tp);
+    }
+    // Drop empty revoke entries.
+    registry
+        .revoked_keys
+        .retain(|k| !k.public_key.trim().is_empty());
+}
+
+fn normalize_trusted_publisher(tp: &mut AiPluginTrustedPublisher) {
+    if tp.keys.is_empty() {
+        let pk = tp.public_key.trim();
+        if !pk.is_empty() {
+            tp.keys.push(AiPluginTrustedKey {
+                public_key: pk.to_string(),
+                trusted_at: if tp.trusted_at.trim().is_empty() {
+                    Utc::now().to_rfc3339()
+                } else {
+                    tp.trusted_at.clone()
+                },
+                status: default_trusted_key_status(),
+            });
+        }
+    }
+    // Prefer first active key for legacy display fields.
+    if let Some(active) = tp
+        .keys
+        .iter()
+        .find(|k| k.status.eq_ignore_ascii_case("active") && !k.public_key.trim().is_empty())
+        .cloned()
+        .or_else(|| tp.keys.first().cloned())
+    {
+        if tp.public_key.trim().is_empty() {
+            tp.public_key = active.public_key.clone();
+        }
+        if tp.trusted_at.trim().is_empty() {
+            tp.trusted_at = active.trusted_at.clone();
+        }
+    }
+}
+
+fn is_public_key_revoked(registry: &AiPluginRegistry, public_key: &str) -> bool {
+    let pk = public_key.trim();
+    if pk.is_empty() {
+        return false;
+    }
+    registry
+        .revoked_keys
+        .iter()
+        .any(|k| k.public_key.trim() == pk)
+}
+
+fn publisher_accepts_public_key(tp: &AiPluginTrustedPublisher, public_key: &str) -> bool {
+    let pk = public_key.trim();
+    if pk.is_empty() {
+        return false;
+    }
+    if tp.keys.iter().any(|k| {
+        k.public_key.trim() == pk && k.status.eq_ignore_ascii_case("active")
+    }) {
+        return true;
+    }
+    // Legacy single-key field when keys list empty/unnormalized.
+    tp.keys.is_empty() && tp.public_key.trim() == pk
+}
+
+fn trust_publisher_key_in_registry(
+    registry: &mut AiPluginRegistry,
+    publisher: String,
+    public_key: String,
+) {
+    // Re-trusting a key removes it from the local revoke list (explicit user action).
+    registry
+        .revoked_keys
+        .retain(|k| k.public_key.trim() != public_key.trim());
+
+    let now = Utc::now().to_rfc3339();
+    let entry = registry
+        .trusted_publishers
+        .entry(publisher.clone())
+        .or_insert_with(|| AiPluginTrustedPublisher {
+            publisher: publisher.clone(),
+            public_key: public_key.clone(),
+            trusted_at: now.clone(),
+            keys: Vec::new(),
+        });
+
+    if let Some(existing) = entry
+        .keys
+        .iter_mut()
+        .find(|k| k.public_key.trim() == public_key.trim())
+    {
+        existing.status = default_trusted_key_status();
+        existing.trusted_at = now.clone();
+    } else {
+        entry.keys.push(AiPluginTrustedKey {
+            public_key: public_key.clone(),
+            trusted_at: now.clone(),
+            status: default_trusted_key_status(),
+        });
+    }
+    entry.public_key = public_key;
+    entry.trusted_at = now;
+    entry.publisher = publisher;
+    normalize_trusted_publisher(entry);
 }
 
 fn save_registry(registry: &AiPluginRegistry) -> Result<(), String> {
@@ -2779,6 +2927,13 @@ async fn run_setup_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Phase 5: clear ambient secrets first, then re-inject setup env map.
+    let hygiene = t_sandbox::apply_env_hygiene(&mut cmd);
+    if hygiene.applied {
+        job.log
+            .push(format!("env_hygiene: {}", hygiene.summary()));
+        let _ = append_setup_log(plugin_id, job);
+    }
     for (key, value) in &environment {
         cmd.env(key, value);
     }
@@ -5843,12 +5998,28 @@ pub fn revoke_ai_plugin_permissions(plugin_id: String) -> Result<AiPluginRegistr
     Ok(registry)
 }
 
+/// Whether the user has granted runtime outbound network for this plugin.
+/// Used only for Phase 3 scaffold logging today (no OS enforcement).
+fn plugin_runtime_network_granted(
+    plugin_id: &str,
+    _manifest: &AiPluginManifest,
+) -> Result<bool, String> {
+    let registry = load_registry()?;
+    Ok(registry
+        .permission_grants
+        .get(&permission_grant_key(plugin_id))
+        .map(|g| g.runtime_network)
+        .unwrap_or(false))
+}
+
 #[tauri::command]
 pub fn list_trusted_publishers() -> Result<Vec<AiPluginTrustedPublisher>, String> {
     let registry = load_registry()?;
     Ok(registry.trusted_publishers.values().cloned().collect())
 }
 
+/// Trust (or re-trust) a publisher public key. Multi-key safe: adds the key without
+/// dropping previously trusted keys for the same publisher.
 #[tauri::command]
 pub fn trust_publisher(
     publisher: String,
@@ -5860,14 +6031,7 @@ pub fn trust_publisher(
         return Err("Publisher and public key are required".to_string());
     }
     let mut registry = load_registry()?;
-    registry.trusted_publishers.insert(
-        publisher.clone(),
-        AiPluginTrustedPublisher {
-            publisher,
-            public_key,
-            trusted_at: Utc::now().to_rfc3339(),
-        },
-    );
+    trust_publisher_key_in_registry(&mut registry, publisher, public_key);
     save_registry(&registry)?;
     Ok(registry.trusted_publishers.values().cloned().collect())
 }
@@ -5881,6 +6045,56 @@ pub fn remove_trusted_publisher(
     registry.trusted_publishers.remove(&publisher);
     save_registry(&registry)?;
     Ok(registry.trusted_publishers.values().cloned().collect())
+}
+
+/// Revoke a package-signing public key locally. Future installs signed with this key fail closed.
+/// Also retires the key inside any trusted publisher entry (does not remove other keys).
+#[tauri::command]
+pub fn revoke_publisher_key(
+    public_key: String,
+    reason: Option<String>,
+) -> Result<AiPluginRegistry, String> {
+    let public_key = public_key.trim().to_string();
+    if public_key.is_empty() {
+        return Err("public_key is required".to_string());
+    }
+    let mut registry = load_registry()?;
+    if !is_public_key_revoked(&registry, &public_key) {
+        registry.revoked_keys.push(AiPluginRevokedKey {
+            public_key: public_key.clone(),
+            revoked_at: Utc::now().to_rfc3339(),
+            reason: reason
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        });
+    }
+    for tp in registry.trusted_publishers.values_mut() {
+        for key in tp.keys.iter_mut() {
+            if key.public_key.trim() == public_key {
+                key.status = "retired".to_string();
+            }
+        }
+        // If primary display key was revoked, point at another active key if any.
+        if tp.public_key.trim() == public_key {
+            if let Some(active) = tp
+                .keys
+                .iter()
+                .find(|k| k.status.eq_ignore_ascii_case("active"))
+            {
+                tp.public_key = active.public_key.clone();
+                tp.trusted_at = active.trusted_at.clone();
+            }
+        }
+        normalize_trusted_publisher(tp);
+    }
+    save_registry(&registry)?;
+    Ok(registry)
+}
+
+#[tauri::command]
+pub fn list_revoked_keys() -> Result<Vec<AiPluginRevokedKey>, String> {
+    let registry = load_registry()?;
+    Ok(registry.revoked_keys)
 }
 
 #[tauri::command]
@@ -6251,6 +6465,7 @@ fn read_plugin_package_file(zip_path: &Path, entry_path: &str) -> Result<String,
 }
 
 /// Result of checking a package's signature against the trust store.
+#[derive(Debug)]
 enum SignatureVerifyResult {
     /// Signature is valid and the publisher is already trusted.
     Verified,
@@ -6356,14 +6571,24 @@ fn verify_package_signature(
         .verify(&signed_bytes, &sig)
         .map_err(|e| format!("Package signature verification failed: {}", e))?;
 
-    // Signature is valid. Check trust store.
+    // Signature is valid. Local revoke list fails closed (even if still "trusted").
+    if is_public_key_revoked(registry, &signature.public_key) {
+        return Err(format!(
+            "Package signing key has been revoked locally. Re-sign with a trusted key or remove the key from the revoke list. Key: {}",
+            signature.public_key
+        ));
+    }
+
+    // Trust store: any *active* key for this publisher may install.
     let publisher_name = publisher
         .as_deref()
         .filter(|p| !p.trim().is_empty())
         .unwrap_or("unknown");
     let trusted = registry.trusted_publishers.get(publisher_name);
     match trusted {
-        Some(tp) if tp.public_key == signature.public_key => Ok(SignatureVerifyResult::Verified),
+        Some(tp) if publisher_accepts_public_key(tp, &signature.public_key) => {
+            Ok(SignatureVerifyResult::Verified)
+        }
         _ => Ok(SignatureVerifyResult::NeedsTrust {
             publisher: publisher_name.to_string(),
             public_key: signature.public_key.clone(),
@@ -8346,13 +8571,47 @@ pub async fn start_ai_plugin(
         let _ = writeln!(start_log, "sandbox: {}", sandbox.summary());
     }
 
+    // Phase 3–5: network decision/apply + landlock/env log lines.
+    // Default true so plugins without a stored grant are not over-blocked when
+    // the experimental flag is on without explicit user deny.
+    let runtime_network_granted =
+        plugin_runtime_network_granted(&plugin_id, &manifest).unwrap_or(true);
+    let network_sandbox = t_sandbox::apply_network_sandbox(
+        &plugin_id,
+        &command_path,
+        runtime_network_granted,
+    );
+    let _ = writeln!(start_log, "{}", network_sandbox.summary());
+    for line in t_sandbox::experimental_confinement_log_lines(runtime_network_granted) {
+        // Final network/landlock status is logged from apply_* helpers.
+        if line.starts_with("network_os:") || line.starts_with("landlock:") {
+            continue;
+        }
+        let _ = writeln!(start_log, "{}", line);
+    }
+    let network_policy = network_sandbox
+        .status()
+        .map(|s| s.policy_env_value())
+        .unwrap_or("unrestricted");
+
     let mut cmd = Command::new(&command_path);
     cmd.current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(start_log_stdout))
         .stderr(Stdio::from(start_log_stderr))
-        .kill_on_drop(false)
-        .env("PICAIPIC_PLUGIN_ID", &plugin_id)
+        .kill_on_drop(false);
+
+    // Phase 5: rebuild ambient env from allowlist BEFORE injecting PICAIPIC_*.
+    // env_clear after injection would wipe host-provided plugin vars.
+    let hygiene = t_sandbox::apply_env_hygiene(&mut cmd);
+    let _ = writeln!(start_log, "env_hygiene: {}", hygiene.summary());
+    // Phase 4: Linux Landlock (opt-in). RO plugin root + system prefixes; RW writable roots.
+    // Writable roots already include shared/plugin runtimes; add plugin code root as RO extra.
+    let landlock_ro = vec![root.to_path_buf()];
+    let landlock = t_sandbox::apply_linux_landlock(&mut cmd, &writable_dirs, &landlock_ro);
+    let _ = writeln!(start_log, "{}", landlock.summary());
+
+    cmd.env("PICAIPIC_PLUGIN_ID", &plugin_id)
         .env("PICAIPIC_PLUGIN_ROOT", root)
         .env("PICAIPIC_PLUGIN_DATA_DIR", &data_dir)
         .env("PICAIPIC_PLUGIN_CACHE_DIR", &cache_dir)
@@ -8361,7 +8620,8 @@ pub async fn start_ai_plugin(
         .env("PICAIPIC_PLUGIN_CONFIG_PATH", &config_path)
         .env("PICAIPIC_PLUGIN_RUNTIME_DIR", &runtime_dir)
         .env("PICAIPIC_TASK_TEMP_DIR", &task_dir)
-        .env("PICAIPIC_OUTPUT_DIR", &output_dir);
+        .env("PICAIPIC_OUTPUT_DIR", &output_dir)
+        .env("PICAIPIC_PLUGIN_NETWORK_POLICY", network_policy);
 
     cmd.env("PICAIPIC_PLUGIN_PORT", port.to_string())
         .env("PICAIPIC_PLUGIN_BASE_URL", &base_url)
@@ -8395,6 +8655,7 @@ pub async fn start_ai_plugin(
                 start_signature: desired_signature,
                 auth_token: auth_token.clone(),
                 sandbox,
+                network_sandbox: Some(network_sandbox),
             },
         );
     }
@@ -9723,6 +9984,102 @@ mod tests {
         let publisher = Some("test-author".to_string());
         let result = verify_package_signature(&manifest, &publisher, &empty_registry());
         assert!(matches!(result, Err(_)), "tampered signature should fail");
+    }
+
+    #[test]
+    fn multi_key_trust_accepts_any_active_key() {
+        let mut manifest = fixture_manifest();
+        let sig = fixture_signature();
+        let package_key = sig.public_key.clone();
+        manifest.signature = Some(sig);
+        let publisher = Some("test-author".to_string());
+
+        let mut registry = empty_registry();
+        trust_publisher_key_in_registry(
+            &mut registry,
+            "test-author".to_string(),
+            "other-key-not-used=".to_string(),
+        );
+        trust_publisher_key_in_registry(
+            &mut registry,
+            "test-author".to_string(),
+            package_key.clone(),
+        );
+        let tp = registry.trusted_publishers.get("test-author").unwrap();
+        assert!(tp.keys.len() >= 2);
+        assert!(publisher_accepts_public_key(tp, &package_key));
+
+        let result = verify_package_signature(&manifest, &publisher, &registry);
+        assert!(
+            matches!(result, Ok(SignatureVerifyResult::Verified)),
+            "expected Verified with multi-key trust, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn revoked_key_is_rejected_even_if_trusted() {
+        let mut manifest = fixture_manifest();
+        let sig = fixture_signature();
+        let package_key = sig.public_key.clone();
+        manifest.signature = Some(sig);
+        let publisher = Some("test-author".to_string());
+
+        let mut registry = empty_registry();
+        trust_publisher_key_in_registry(
+            &mut registry,
+            "test-author".to_string(),
+            package_key.clone(),
+        );
+        registry.revoked_keys.push(AiPluginRevokedKey {
+            public_key: package_key,
+            revoked_at: "2026-07-20T00:00:00Z".to_string(),
+            reason: Some("test".to_string()),
+        });
+
+        let result = verify_package_signature(&manifest, &publisher, &registry);
+        assert!(
+            matches!(result, Err(_)),
+            "revoked key must fail closed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn legacy_single_key_publisher_normalizes() {
+        let mut tp = AiPluginTrustedPublisher {
+            publisher: "legacy".to_string(),
+            public_key: "abcKey".to_string(),
+            trusted_at: "t0".to_string(),
+            keys: vec![],
+        };
+        normalize_trusted_publisher(&mut tp);
+        assert_eq!(tp.keys.len(), 1);
+        assert_eq!(tp.keys[0].public_key, "abcKey");
+        assert!(publisher_accepts_public_key(&tp, "abcKey"));
+        assert!(!publisher_accepts_public_key(&tp, "other"));
+    }
+
+    #[test]
+    fn second_key_of_known_publisher_needs_trust() {
+        let mut manifest = fixture_manifest();
+        let sig = fixture_signature();
+        manifest.signature = Some(sig);
+        let publisher = Some("test-author".to_string());
+
+        let mut registry = empty_registry();
+        // Only trust a different key — package key still NeedsTrust.
+        trust_publisher_key_in_registry(
+            &mut registry,
+            "test-author".to_string(),
+            "old-key-only=".to_string(),
+        );
+        let result = verify_package_signature(&manifest, &publisher, &registry);
+        assert!(
+            matches!(result, Ok(SignatureVerifyResult::NeedsTrust { .. })),
+            "new key of known publisher should need trust, got {:?}",
+            result
+        );
     }
 
     /// End-to-end verification of the real signed plugin zip packages in

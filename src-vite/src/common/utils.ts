@@ -280,14 +280,51 @@ export function formatCameraInfo(make: string, model: string): string {
   return `${make} ${model}`;
 }
 
+/// Format EXIF numeric values for display without reducing the precision stored in the database.
+export function formatCaptureSettingValue(value: string | null | undefined): string {
+  if (!value) return '';
+
+  return String(value).replace(/-?\d+(?:\.\d+)?/g, (numberText) => {
+    const number = Number(numberText);
+    if (!Number.isFinite(number)) return numberText;
+    return Number(number.toFixed(2)).toString();
+  });
+}
+
+/** Viewer canvas background: 0 theme, 1 black, 2 white, 3 gray, 4 checker */
+export function normalizeViewerBackgroundMode(mode: unknown): number {
+  const n = Number(mode);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(4, Math.trunc(n)));
+}
+
+export function cycleViewerBackgroundMode(mode: unknown): number {
+  return (normalizeViewerBackgroundMode(mode) + 1) % 5;
+}
+
+export function getViewerBackgroundClass(mode: unknown): string {
+  switch (normalizeViewerBackgroundMode(mode)) {
+    case 1:
+      return 'bg-black text-white';
+    case 2:
+      return 'bg-white text-neutral-800';
+    case 3:
+      return 'bg-neutral-500 text-white';
+    case 4:
+      return 'viewer-bg-checker text-neutral-900';
+    default:
+      return '';
+  }
+}
+
 /// format capture settings to string
 export function formatCaptureSettings(focal_length: string, exposure_time: string, f_number: string, iso_speed: string, exposure_bias: string): string {
   let result = '';
-  result += focal_length ? `${focal_length}` : '';
-  result += exposure_time ? `, ${exposure_time}` : '';
-  result += f_number ? `, ${f_number}` : '';
-  result += iso_speed ? `, ISO ${iso_speed}` : '';
-  result += exposure_bias ? `, ${exposure_bias}` : '';
+  result += focal_length ? formatCaptureSettingValue(focal_length) : '';
+  result += exposure_time ? `, ${formatCaptureSettingValue(exposure_time)}` : '';
+  result += f_number ? `, ${formatCaptureSettingValue(f_number)}` : '';
+  result += iso_speed ? `, ISO ${formatCaptureSettingValue(iso_speed)}` : '';
+  result += exposure_bias ? `, ${formatCaptureSettingValue(exposure_bias)}` : '';
 
   // remove the first ',' if it exists
   if (result[0] === ',' && result.length > 1) {

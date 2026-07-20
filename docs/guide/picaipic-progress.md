@@ -1,6 +1,74 @@
 # PicAiPic Progress
 
-Updated: 2026-07-18
+Updated: 2026-07-20
+
+## 2026-07-19 Lap 0.3 UX pack (prompt import · media badges · viewer bg · search filters)
+
+Aligned further with upstream lap v0.3.0 browsing/metadata UX while keeping PicAiPic plugin/built-in-tool differentiation.
+
+### AI PNG/JPEG prompt → empty comments
+
+- Scan-time import of generation prompts into **empty** `afiles.comments` only (never overwrite user notes).
+- **PNG**: `tEXt` / `iTXt` / `zTXt` — Automatic1111 `parameters`, NovelAI/Invoke JSON, ComfyUI workflow text.
+- **JPEG**: EXIF `UserComment` (charset-aware), `COM` markers, heuristic `ImageDescription` fallback.
+- Default **on** (`importAiPromptsToComments` + Rust `AtomicBool`); Settings → Library → Metadata import.
+- Applies on **new insert** and **changed-file rescan** only (no full-library empty-comment backfill).
+- Module: `src-tauri/src/t_ai_prompt.rs` (+ `flate2` for zTXt); hook in `AFile::new` / `update_file_info`.
+- Unit tests: `cargo test --manifest-path src-tauri/Cargo.toml t_ai_prompt`.
+- Runbook: `.mex/patterns/change-ai-prompt-import.md`.
+
+### Thumbnail media-info badges
+
+- Settings → View → per-flag overlays: format, ISO, shutter, aperture, focal length, exposure.
+- Default **all off**; max **4** badges per thumb; bottom-left layout (status badges stay top-left).
+- State: `config.settings.grid.mediaBadges`; render: `Thumbnail.vue`.
+- Runbook: `.mex/patterns/change-media-badges.md`.
+
+### Viewer background modes
+
+- Canvas modes: theme / black / white / gray / checkerboard.
+- Shortcut **B** cycles; toolbar palette button; Settings → Viewer select.
+- State: `mediaViewer.backgroundMode`; helpers in `utils.ts`; checker CSS in `app.css`.
+- Applies to standalone ImageViewer and in-app quick view / filmstrip preview.
+- Runbook: `.mex/patterns/change-viewer-background.md`.
+
+### AI search file-type filter + result grouping
+
+- `ImageSearchParams.search_file_type` (same bitmask as library: image/video/raw).
+- Vector search SQL filters before cosine scoring; filename search already used query mask.
+- Toolbar type filter enabled in search sidebar and similar-from-file temp view; changing filter re-runs active search.
+- Grid section headers: Visual matches / Similar images / Filename matches (`GridView` `sectionLabel`).
+- Runbook: `.mex/patterns/change-ai-search-filters.md`.
+
+### Verification (this pack)
+
+- `cargo check` / `cargo test … t_ai_prompt` / `pnpm --dir src-vite build` passed for the relevant slices.
+- Docs/MEX: `docs/guide/目前的开发情况.md`, `.mex/ROUTER.md`, patterns INDEX, decision log.
+
+### Still open after this pack
+
+- FileInfo / Live Photo hover-preview polish.
+- Optional one-shot empty-comment library backfill.
+- Built-in C3 collage-in-batch (G1 cancelled for now) / publish v1.1.0 draft / sandbox Phase 3–5 **enforcement**.
+
+## 2026-07-20 G2 · G6 · sandbox scaffold
+
+### G2 — Batch outputs → optional library import (MVP)
+- Host `BatchProcessResult.outputPaths` lists successful write paths.
+- Wizard checkbox `batchProcess.importToLibrary` (default off); saveAs copies into current album via `importFile`; overwrite refreshes `updateFileInfo` only.
+- Pattern: `.mex/patterns/change-batch-process.md`.
+
+### G6 — Signing multi-key + local revoke
+- Registry: per-publisher `keys[]` (`active|retired`) + top-level `revokedKeys`.
+- `trust_publisher` adds keys; `revoke_publisher_key` / `list_revoked_keys`; Settings shows keys + revoke.
+- Unit tests: multi-key accept, revoked reject, legacy normalize, NeedsTrust for second key.
+- Docs: open Q3 resolved in `docs/ai-plugin-security-hardening.md`.
+
+### Sandbox Phase 3–5
+- **Phase 3 opt-in spike:** `PICAIPIC_ENABLE_PLUGIN_NETWORK_SANDBOX=1` + no runtime network grant → Windows `netsh` outbound program block (soft-fail → policy_only) + `PICAIPIC_PLUGIN_NETWORK_POLICY`; rule dropped on stop.
+- **Phase 4 opt-in spike:** `PICAIPIC_ENABLE_LINUX_LANDLOCK=1` → Landlock ABI probe + RO/RW path rules + child `pre_exec` restrict_self; soft-fail if kernel/ABI missing.
+- **Phase 5 env hygiene (opt-in real):** `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE=1` → `env_clear` + allowlist on plugin start/setup; default still inherits host env.
+- `docs/ai-plugin-sandbox-roadmap.md` phase board updated.
 
 ## 2026-07-18 merge + v1.1.0 line
 
@@ -8,17 +76,39 @@ Updated: 2026-07-18
 - Windows/Linux PR builds green after Actions artifact-quota hardening (`pr-build.yml` best-effort upload).
 - App version aligned to **1.1.0** for the next signed multi-arch release draft.
 
-## 2026-07-18 planned: built-in crop presets · collage · batch
+## 2026-07-18 Phase A shipped: crop presets + photo sizes
 
-Product backlog only (not implemented). Full plan: `docs/guide/builtin-tools-roadmap.md`.
+- ImageEditor crop dropdown: free crop, common ratios (`1:1` / `3:2` / `4:3` / `16:9`), 12 built-in print/ID sizes, user custom ratios.
+- Catalog module: `src-vite/src/common/photoSizePresets.ts`; config: `cropPresetId` + `customCropRatios` (persisted).
+- Manage dialog (built-in table + delete custom) and add-ratio dialog; portrait/landscape still swaps aspect; photo presets prefill resize target px.
+- Frontend build verified: `pnpm --dir src-vite build`.
 
-| Phase | Scope |
-|-------|--------|
-| **A** | ImageEditor **crop sub-menu**: ratios `1:1` / `3:2` / `4:3` / `16:9` + built-in photo sizes (1R–10寸, 身份证, 护照, 皮夹照, …) with px/cm/DPI table; 照片规格管理 / 添加·删除常用比例 |
-| **B** | **拼图**: 模板拼图 / 图片拼接 / 自由拼图 (MVP = template grids first) |
-| **C** | **批处理** 3-step wizard: 添加照片 → 动作设置 (resize/crop/watermark/…) → 输出设置 (path, rename, format, quality, overwrite policy) |
+## 2026-07-18 Phase B1–B3 shipped: collage / 拼图 complete for plan
 
-Suggested implementation order: **A → B → C**. Local-first; not routed through AI plugins for v1.
+- Multi-select right panel **拼图** → `CollageDialog`.
+- B1: grids 2/4/9, gap/margin/background, JPEG/PNG save-as.
+- B2: grids 3/6; strip H/V (≤12); fill cover/contain; cell radius + stroke.
+- B3: free canvas — drag/resize/rotate/z-order/snap; host free items export.
+- Free drafts: save/load/delete layouts in app config (`collage.freeDrafts`), path-matched restore.
+- Host: `export_collage` (template/strip/free).
+
+## 2026-07-18 Phase C1 shipped: batch wizard + composable actions
+
+- Multi-select → **批处理** three-step wizard: files → ordered action chain → output.
+- Action palette (built-in tools): resize, crop (ratios/photo/custom), rotate, flip, brightness/contrast/saturation/hue/blur, filters.
+- One-click templates: save/load action chains in `config.batchProcess.templates`.
+- Host `batch_process_images` + `cancel_batch_process`; progress event; save-as default; overwrite confirms.
+## 2026-07-18 Phase C2 shipped: border / expand / watermark / text
+
+- Batch palette adds border, canvas expand, image watermark, text overlay (anchor/opacity/margin).
+- Host raster ops + `ab_glyph` system-font text; still local-only, save-as default.
+- Optional later C3: insert collage template as a batch step.
+
+## 2026-07-18 Photo print layout / 冲印排版
+
+- Multi-select → **冲印排版**: paper templates (3R–8R/A4/A6), built-in packs (1R/2R/ID/passport/wallet mixes), custom layout builder.
+- Paper size manager (inch/cm); custom papers/layouts in `config.printLayout`.
+- Preview + export high-res sheet via `export_print_layout` (cover-fit cells, optional gray guides).
 
 
 This document records the current implementation status for turning the existing
@@ -590,3 +680,41 @@ python scripts\stress_nafnet_http.py --tasks 4 --duration-ms 120 --cancel-every 
   plugin regression after host/package changes.
 - Strengthen network confinement and Linux process isolation without breaking
   GPU/runtime compatibility (beyond default input staging / opt-in Windows ACL).
+
+## 2026-07-18 — 冲印排版后续 (A/B/C/D)
+
+- 混排：上/下带与左/右带 + auto 利用率选择；预览显示利用率与策略
+- 自定义相纸：完整表单（英寸/厘米切换），不再用 prompt
+- 冲印排版打印：print-sized 临时图 + `window.print`（与单图右键一致；非 host print_file；导出仍全 DPI）
+- 导入图库：可选勾选，导出后可选写入当前相册
+
+## 2026-07-19 — 冲印/拼图对照光影魔术手修正
+
+- 冲印：按相纸“铺满”缩放格位（不再大白边居中），补 A4 内置样式，打印走 window.print（与单图右键一致）
+- 拼图：引入杂志式模板 cells（2v/3a/3b/4m/6m 等，源自 NeoImaging PatternJigsaw），预览/导出按归一化格子
+
+## 2026-07-19 — 冲印/拼图性能与文档收口
+
+### 冲印排版
+- 铺满相纸排版 + A4 内置样式；**导出**全 DPI，**打印**用约 1800px 长边快路径 + `window.print`
+- 源图按**格位目标像素**下采样（非无谓全分辨率解码）；同源并行解码
+- 会话内 temp 缓存 + 后台预热；切换版式/关对话框删除 temp；24h 陈旧清理
+- 安全删除：仅系统 temp 且 `print_layout_*` / `picaipic_*` 前缀
+- 可选导出/打印后导入当前图库
+- 打开卡死修复：禁止在 computed 内写 pinia
+
+### 拼图
+- 杂志式模板 cells（NeoImaging 归一化）：2/2v/3a/3b/4/4m/6/6m/9
+- 网格/cells/自由导出均按格位下采样源图
+- free drafts 辅助函数保留在 `collageTemplates.ts`
+
+### 验证
+- `pnpm --dir src-vite build`
+- `cargo check --manifest-path src-tauri/Cargo.toml`
+
+## 2026-07-19 — 冲印打印快路径（print vs export）
+
+- **导出**：仍为 plan DPI 全分辨率（冲印店/存档）
+- **打印**：相纸比例 + 长边约 1800px 合成，再 `window.print`（避免等全 DPI 才弹系统打印框）
+- 源图仍按**当前画布格位**下采样；打印缓存独立（blob URL + 浅 fingerprint）；切换/关闭清理 temp
+- 验证：`pnpm --dir src-vite build`；手测同一版式二次打印应明显更快

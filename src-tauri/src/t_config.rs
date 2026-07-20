@@ -204,11 +204,75 @@ pub struct PersonState {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionState {
+    /// Currently selected collection id (UI), if any.
+    pub selected_id: Option<i64>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartAlbumSelection {
+    /// "system" | "custom"
+    #[serde(default)]
+    pub r#type: Option<String>,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomSmartAlbumState {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: String,
+    /// Opaque rule payload: { version, match, rules: [...] }
+    #[serde(default)]
+    pub query: serde_json::Value,
+    #[serde(default)]
+    pub group: serde_json::Value,
+    #[serde(default)]
+    pub sort: serde_json::Value,
+    pub cover_file_id: Option<i64>,
+    pub count: Option<i64>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Library panel quick entry (All / Favorites / On this day)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryQuickState {
+    /// "all-files" | "favorites" | "on-this-day"
+    #[serde(default = "default_library_item")]
+    pub item: String,
+}
+
+fn default_library_item() -> String {
+    "all-files".to_string()
+}
+
+impl Default for LibraryQuickState {
+    fn default() -> Self {
+        Self {
+            item: default_library_item(),
+        }
+    }
+}
+
 /// Per-library state that persists across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryState {
     pub album: AlbumState,
+    #[serde(default)]
+    pub library: LibraryQuickState,
     pub favorite: FavoriteState,
     pub tag: TagState,
     pub calendar: CalendarState,
@@ -220,6 +284,12 @@ pub struct LibraryState {
     #[serde(alias = "dest_folder")]
     pub dest_folder: DestFolderState,
     pub index: IndexState,
+    #[serde(default)]
+    pub collection: CollectionState,
+    #[serde(default)]
+    pub smart_albums: Vec<CustomSmartAlbumState>,
+    #[serde(default)]
+    pub smart_album: SmartAlbumSelection,
 }
 
 // ============================================================================

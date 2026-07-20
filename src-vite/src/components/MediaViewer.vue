@@ -169,9 +169,17 @@
             @click="$emit('item-action', { action: 'info', index: fileIndex })"
           /> -->
         </template>
-        <!-- Split/Sync Viewport Buttons (ImageViewer mode only) -->
+        <!-- Split/Sync Viewport Buttons (ImageViewer mode only): cycle 1 → 2 → 4 → 1 -->
         <template v-if="mode === 2">
           <IconSeparator class="t-icon-size-sm text-base-content/30" />
+          <TButton
+            :icon="IconPalette"
+            :selected="viewerBackgroundMode > 0"
+            :tooltip="viewerBackgroundTooltip"
+            :shortcut="shortcut('view.cycleBackground')"
+            :disabled="!canInteract"
+            @click="cycleViewerBackground"
+          />
           <TButton
             :icon="IconLink"
             :selected="isSplit && isSyncViewport"
@@ -182,10 +190,21 @@
             @click="$emit('item-action', { action: 'toggle-sync-viewport' })"
           />
           <TButton
-            :icon="IconSplitOn"
+            :icon="splitCount >= 4 ? IconSplitOn4 : IconSplitOn"
             :selected="isSplit"
-            :tooltip="isSplit ? $t('image_viewer.toolbar.split_off') : $t('image_viewer.toolbar.split_on')"
-            @click="$emit('item-action', { action: 'toggle-split' })"
+            :tooltip="splitCountTooltip"
+            @click="$emit('item-action', { action: 'cycle-split' })"
+          />
+        </template>
+        <template v-else>
+          <IconSeparator class="t-icon-size-sm text-base-content/30" />
+          <TButton
+            :icon="IconPalette"
+            :selected="viewerBackgroundMode > 0"
+            :tooltip="viewerBackgroundTooltip"
+            :shortcut="shortcut('view.cycleBackground')"
+            :disabled="fileIndex < 0 || isSlideShow || !canInteract"
+            @click="cycleViewerBackground"
           />
         </template>
         <ContextMenu v-if="mode !== 2"
@@ -274,7 +293,12 @@
       </div>
     </div>
 
-    <div ref="mediaAreaRef" class="flex-1 w-full min-h-0 relative" @dblclick="$emit('media-dblclick')">
+    <div
+      ref="mediaAreaRef"
+      class="flex-1 w-full min-h-0 relative"
+      :class="viewerBackgroundClass"
+      @dblclick="$emit('media-dblclick')"
+    >
       <!-- LIVE badge for Live Photo / Motion Photo -->
       <div
         v-if="isLivePhoto"
@@ -375,7 +399,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { config, libConfig } from '@/common/config';
 import { useToast } from '@/common/toast';
 import { usePluginStore } from '@/stores/pluginStore';
-import { isWin, isMac, isLinux, getSlideShowInterval, getAssetSrc } from '@/common/utils';
+import { isWin, isMac, isLinux, getSlideShowInterval, getAssetSrc, getViewerBackgroundClass, cycleViewerBackgroundMode, normalizeViewerBackgroundMode } from '@/common/utils';
 import { getShortcutLabel, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { getPairedVideo, extractMotionVideo } from '@/common/api';
 import type { PairedVideoInfo } from '@/common/types';
@@ -415,6 +439,7 @@ import {
   IconWinRestore,
   IconLink,
   IconSplitOn,
+  IconSplitOn4,
   IconPalette,
 } from '@/common/icons';
 import ContextMenu from '@/components/ContextMenu.vue';
@@ -493,6 +518,11 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  /** 1 | 2 | 4 — comparison grid density (ImageViewer mode). */
+  splitCount: {
+    type: Number,
+    default: 1
+  },
   isSyncViewport: {
     type: Boolean,
     default: false
@@ -535,6 +565,13 @@ const emit = defineEmits([
 ]);
 
 const { locale, messages, t } = useI18n();
+
+const splitCountTooltip = computed(() => {
+  const n = Number(props.splitCount) || 1;
+  if (n >= 4) return t('image_viewer.toolbar.split_to_1');
+  if (n >= 2) return t('image_viewer.toolbar.split_to_4');
+  return t('image_viewer.toolbar.split_to_2');
+});
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const contextMenuRef = ref<any>(null);
@@ -587,6 +624,19 @@ const ratingShortcutLabel = computed(() => {
   const last = shortcut('meta.rating.five');
   return first && last ? `${first}-${last}` : '';
 });
+const viewerBackgroundMode = computed(() => normalizeViewerBackgroundMode(config.mediaViewer?.backgroundMode));
+const viewerBackgroundClass = computed(() => getViewerBackgroundClass(viewerBackgroundMode.value));
+const viewerBackgroundTooltip = computed(() => {
+  const options = (localeMsg.value as any)?.settings?.image_view?.background_options || [];
+  const label = options[viewerBackgroundMode.value] || options[0] || '';
+  const action = (localeMsg.value as any)?.image_viewer?.toolbar?.cycle_background
+    || (localeMsg.value as any)?.settings?.shortcuts?.actions?.cycle_background
+    || 'Cycle background';
+  return label ? `${action}: ${label}` : action;
+});
+function cycleViewerBackground() {
+  config.setMediaViewerBackgroundMode(cycleViewerBackgroundMode(config.mediaViewer?.backgroundMode));
+}
 const effectiveSlideShowIntervalIndex = computed(() => {
   return props.slideShowIntervalIndex ?? config.settings.slideShowInterval;
 });

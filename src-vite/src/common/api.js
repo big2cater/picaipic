@@ -353,6 +353,17 @@ export async function openFileWithApp(filePath, appPath) {
   }
 }
 
+// open one or more files with a specific external app
+export async function openFilesWithApp(filePaths, appPath) {
+  try {
+    await invoke('open_files_with_app', { filePaths, appPath });
+    return true;
+  } catch (error) {
+    console.error('Failed to open files with app:', error);
+    throw error;
+  }
+}
+
 // get external app display name from platform metadata
 export async function getExternalAppDisplayName(appPath) {
   try {
@@ -598,6 +609,36 @@ export async function revealPath(path) {
   return null;
 };
 
+/// unique path under the system temp directory
+export async function tempFilePath(prefix = 'picaipic', extension = 'jpg') {
+  try {
+    return await invoke('temp_file_path', { prefix, extension });
+  } catch (error) {
+    console.error('tempFilePath error:', error);
+    throw error;
+  }
+};
+
+/// delete an app-owned temp file (temp dir + allowed prefix only)
+export async function deleteTempFile(path) {
+  try {
+    return await invoke('delete_temp_file', { path });
+  } catch (error) {
+    console.error('deleteTempFile error:', error);
+    throw error;
+  }
+};
+
+/// purge stale print_layout_/picaipic_ temp files (default 24h)
+export async function cleanupStaleTempFiles(maxAgeSecs = 24 * 60 * 60) {
+  try {
+    return await invoke('cleanup_stale_temp_files', { maxAgeSecs });
+  } catch (error) {
+    console.error('cleanupStaleTempFiles error:', error);
+    return 0;
+  }
+};
+
 // files
 
 // get total files count and sum
@@ -739,6 +780,46 @@ export async function editImage(params) {
   }
 }
 
+// export a template/strip/free collage (Phase B)
+// params: { sourceFilePaths, destFilePath, outputFormat, quality, template, outputWidth, outputHeight, gap, margin, background, fillMode, radius, strokeWidth, strokeColor, items? }
+export async function exportCollage(params) {
+  try {
+    return await invoke('export_collage', { params });
+  } catch (error) {
+    console.error('exportCollage error:', error);
+    throw error;
+  }
+}
+
+// batch process images (Phase C)
+export async function batchProcessImages(params) {
+  try {
+    return await invoke('batch_process_images', { params });
+  } catch (error) {
+    console.error('batchProcessImages error:', error);
+    throw error;
+  }
+}
+
+export async function cancelBatchProcess() {
+  try {
+    return await invoke('cancel_batch_process');
+  } catch (error) {
+    console.error('cancelBatchProcess error:', error);
+    throw error;
+  }
+}
+
+// export photo print layout sheet (冲印排版)
+export async function exportPrintLayout(params) {
+  try {
+    return await invoke('export_print_layout', { params });
+  } catch (error) {
+    console.error('exportPrintLayout error:', error);
+    throw error;
+  }
+}
+
 // copy an edited image to clipboard
 export async function copyEditedImage(params) {
   try {
@@ -856,6 +937,26 @@ export async function editFileComment(fileId, comment) {
     console.log('Failed to edit file comment:', error);
   }
   return null;
+}
+
+// AI PNG prompt → empty comments (scan-time flag in Rust)
+export async function setImportAiPrompts(enabled) {
+  try {
+    await invoke('set_import_ai_prompts', { enabled: enabled !== false });
+    return true;
+  } catch (error) {
+    console.error('setImportAiPrompts error:', error);
+    return false;
+  }
+}
+
+export async function getImportAiPrompts() {
+  try {
+    return await invoke('get_import_ai_prompts');
+  } catch (error) {
+    console.error('getImportAiPrompts error:', error);
+    return true;
+  }
 }
 
 // get file thumb
@@ -1576,6 +1677,24 @@ export async function removeTrustedPublisher(publisher) {
   }
 }
 
+export async function revokePublisherKey(publicKey, reason = null) {
+  try {
+    return await invoke('revoke_publisher_key', { publicKey, reason });
+  } catch (error) {
+    console.error('revokePublisherKey error:', error);
+    throw error;
+  }
+}
+
+export async function listRevokedKeys() {
+  try {
+    return await invoke('list_revoked_keys');
+  } catch (error) {
+    console.error('listRevokedKeys error:', error);
+    throw error;
+  }
+}
+
 export async function unregisterAiPluginPath(path) {
   try {
     return await invoke('unregister_ai_plugin_path', { path });
@@ -2109,3 +2228,129 @@ export async function exportLivePhoto({
 export async function rescanLivePhotoMetadata(albumId) {
   return await invoke('rescan_live_photo_metadata', { albumId });
 }
+
+// ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+export async function listCollections() {
+  try {
+    return await invoke('list_collections');
+  } catch (error) {
+    console.error('listCollections error:', error);
+    throw error;
+  }
+}
+
+export async function createCollection(name) {
+  try {
+    return await invoke('create_collection', { name });
+  } catch (error) {
+    console.error('createCollection error:', error);
+    throw error;
+  }
+}
+
+export async function renameCollection(id, name) {
+  try {
+    return await invoke('rename_collection', { id, name });
+  } catch (error) {
+    console.error('renameCollection error:', error);
+    throw error;
+  }
+}
+
+export async function deleteCollection(id) {
+  try {
+    return await invoke('delete_collection', { id });
+  } catch (error) {
+    console.error('deleteCollection error:', error);
+    throw error;
+  }
+}
+
+export async function reorderCollections(items) {
+  try {
+    return await invoke('reorder_collections', { items });
+  } catch (error) {
+    console.error('reorderCollections error:', error);
+    throw error;
+  }
+}
+
+export async function addFilesToCollection(collectionId, fileIds) {
+  try {
+    return await invoke('add_files_to_collection', { collectionId, fileIds });
+  } catch (error) {
+    console.error('addFilesToCollection error:', error);
+    throw error;
+  }
+}
+
+export async function removeFilesFromCollection(collectionId, fileIds) {
+  try {
+    return await invoke('remove_files_from_collection', { collectionId, fileIds });
+  } catch (error) {
+    console.error('removeFilesFromCollection error:', error);
+    throw error;
+  }
+}
+
+export async function clearCollection(collectionId) {
+  try {
+    return await invoke('clear_collection', { collectionId });
+  } catch (error) {
+    console.error('clearCollection error:', error);
+    throw error;
+  }
+}
+
+export async function getCollectionFileIds(collectionId) {
+  try {
+    return await invoke('get_collection_file_ids', { collectionId });
+  } catch (error) {
+    console.error('getCollectionFileIds error:', error);
+    throw error;
+  }
+}
+
+export async function getCollectionCountAndSum(collectionId, params) {
+  try {
+    return await invoke('get_collection_count_and_sum', { collectionId, params });
+  } catch (error) {
+    console.error('getCollectionCountAndSum error:', error);
+    throw error;
+  }
+}
+
+export async function getCollectionFiles(collectionId, params, offset, limit) {
+  try {
+    return await invoke('get_collection_files', { collectionId, params, offset, limit });
+  } catch (error) {
+    console.error('getCollectionFiles error:', error);
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Smart Albums
+// ---------------------------------------------------------------------------
+
+export async function getSmartQueryCountAndSum(params) {
+  try {
+    return await invoke('get_smart_query_count_and_sum', { params });
+  } catch (error) {
+    console.error('getSmartQueryCountAndSum error:', error);
+    throw error;
+  }
+}
+
+export async function getSmartQueryFiles(params, offset, limit) {
+  try {
+    return await invoke('get_smart_query_files', { params, offset, limit });
+  } catch (error) {
+    console.error('getSmartQueryFiles error:', error);
+    throw error;
+  }
+}
+

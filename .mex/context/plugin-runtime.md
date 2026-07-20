@@ -17,7 +17,7 @@ edges:
     condition: when adding or changing plugin behavior
   - target: patterns/debug-plugin-runtime.md
     condition: when setup, start, health, smoke, task, or output behavior fails
-last_updated: 2026-07-18
+last_updated: 2026-07-20
 ---
 
 
@@ -53,7 +53,8 @@ last_updated: 2026-07-18
 - Default confinement stages/copies external input paths into task storage on all supported platforms (`sandbox_enabled()` is not Windows-gated). Staging failures fail closed. Diagnostics: task message + `inputs/staging-report.json` (counts/bytes/hardlink vs copy/skips). Staging prefers same-volume hardlink, then copy. Only JSON fields named `path` are rewritten. Do not pass raw source paths as a shortcut.
 - Writable roots allow-list (Phase 1): `plugin_writable_roots` centralizes data/cache/outputs/plugin-runtimes/code + shared runtimes + bound model dirs + task extras; used for staging skip + optional ACL exclusions. Adoption still requires task-output containment only.
 - Windows deny-ACL confinement is opt-in; stale deny ACEs are cleaned best-effort.
-- Sandbox roadmap status: **Phase 0–2 done** (cross-platform staging, fail-closed, diagnostics, `plugin_writable_roots`, same-volume hardlink→copy). **Phase 3 network OS block and Phase 4 Linux Landlock are not implemented** (v1 does not claim them). Roadmap: `docs/ai-plugin-sandbox-roadmap.md`.
+- Sandbox roadmap status: **Phase 0–2 done** (cross-platform staging, fail-closed, diagnostics, `plugin_writable_roots`, same-volume hardlink→copy). **Phase 3 opt-in** (2026-07-20): Windows firewall outbound block + `PICAIPIC_PLUGIN_NETWORK_POLICY`. **Phase 4 opt-in** Linux Landlock (path ruleset + pre_exec restrict_self; soft-fail). **Phase 5** env hygiene opt-in. Default Phase 0–2. Flags: `PICAIPIC_ENABLE_PLUGIN_NETWORK_SANDBOX`, `PICAIPIC_ENABLE_LINUX_LANDLOCK`, `PICAIPIC_ENABLE_PLUGIN_ENV_HYGIENE`. Roadmap: `docs/ai-plugin-sandbox-roadmap.md`.
+- Publisher trust (2026-07-20): multi-key per publisher + local `revokedKeys`; `trust_publisher` adds a key; `revoke_publisher_key` fails closed on install. Open Q3 resolved in security-hardening doc.
 - Phase 0 verification (2026-07-18): automated `input_staging*` + plugin-host script; Windows cross-volume host-path proof; SA-LUT full start+color-transfer on staged album paths (ROCm, PNG output); user-confirmed GUI/release-shell smoke pass. Checklist: `docs/ai-plugin-sandbox-phase0-verify.md`.
 - All delete/adopt/uninstall paths require canonical containment checks. `code_and_data` may delete plugin-private data/runtimes but must retain shared runtimes.
 

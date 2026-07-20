@@ -125,6 +125,25 @@
         LIVE
       </div>
 
+      <!-- configurable media-info badges (format / capture) -->
+      <div
+        v-if="mediaInfoBadges.length > 0"
+        class="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/45 to-transparent"
+      ></div>
+      <div
+        v-if="mediaInfoBadges.length > 0"
+        class="pointer-events-none absolute bottom-0.5 left-0.5 z-10 flex max-w-[calc(100%-0.5rem)] flex-wrap gap-1"
+      >
+        <div
+          v-for="badge in mediaInfoBadges"
+          :key="badge.key"
+          class="thumb-badge thumb-badge-muted"
+          :title="badge.title || badge.label"
+        >
+          <span class="leading-none">{{ badge.label }}</span>
+        </div>
+      </div>
+
       <!-- context menu -->
       <div v-if="!selectMode" class="absolute right-0.5 top-0.5">
         <ContextMenu
@@ -172,7 +191,7 @@ import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { usePluginStore } from '@/stores/pluginStore';
 import { config } from '@/common/config';
-import { isMac, shortenFilename, formatFileSize, formatDimensionText, formatDuration, formatTimestamp, formatCaptureSettings, formatCameraInfo, getAssetSrc, getThumbUrl } from '@/common/utils';
+import { isMac, shortenFilename, formatFileSize, formatDimensionText, formatDuration, formatTimestamp, formatCaptureSettings, formatCaptureSettingValue, formatCameraInfo, getAssetSrc, getThumbUrl, getFileExtension } from '@/common/utils';
 import ContextMenu from '@/components/ContextMenu.vue';
 import { useFileMenuItems } from '@/common/fileMenu';
 
@@ -206,10 +225,11 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
-    'clicked', 
-    'dblclicked', 
-    'select-toggled', 
-    'action'
+    'clicked',
+    'dblclicked',
+    'select-toggled',
+    'action',
+    'select-contextmenu',
 ]);
 
 const isTransitionDisabled = ref(false);
@@ -231,12 +251,12 @@ const isLivePhoto = computed(() => {
 });
 const isGeometryGridStyle = computed(() => config.settings.grid.style === 2 || config.settings.grid.style === 3);
 const shouldScaleThumbnail = computed(() => config.settings.grid.style === 1 || isGeometryGridStyle.value);
-const thumbnailSrc = ref(props.file.thumbnail || '');
+const thumbnailSrc = ref(props.file?.thumbnail || '');
 const isThumbnailLoaded = ref(false);
 let thumbnailRetryCount = 0;
 
-watch(() => props.file.thumbnail, (src = '') => {
-  thumbnailSrc.value = src;
+watch(() => props.file?.thumbnail, (src = '') => {
+  thumbnailSrc.value = src || '';
   isThumbnailLoaded.value = false;
   thumbnailRetryCount = 0;
 });
@@ -348,9 +368,17 @@ function stopVideoPreview() {
 }
 
 function handleContextMenu(event: MouseEvent) {
-  if (props.selectMode) return;
   event.preventDefault();
   event.stopPropagation();
+  // Multi-select uses one shared parent menu for the whole selection.
+  if (props.selectMode) {
+    emit('select-contextmenu', {
+      x: event.clientX,
+      y: event.clientY,
+      isSelected: Boolean(props.isSelected),
+    });
+    return;
+  }
   if (!props.isSelected) {
     emit('clicked', false);
   }
@@ -459,6 +487,7 @@ type ThumbnailBadge = {
     style?: CSSProperties;
   }>;
   label?: string;
+  title?: string;
   highlight?: boolean;
   iconStyle?: CSSProperties;
 };
@@ -466,6 +495,63 @@ type ThumbnailBadge = {
 const normalizedRotate = computed(() => {
   const rotate = Number(props.file.rotate || 0) % 360;
   return rotate < 0 ? rotate + 360 : rotate;
+});
+
+function resolveFormatLabel(file: any): string {
+  const formatLabel = String(file?.format_label || file?.formatLabel || '').trim();
+  if (formatLabel) return formatLabel.toUpperCase();
+  if (Number(file?.file_type || 0) === 3) return 'RAW';
+  const ext = getFileExtension(file?.name || file?.file_path || '').trim();
+  return ext ? ext.toUpperCase() : '';
+}
+
+const mediaInfoBadges = computed<ThumbnailBadge[]>(() => {
+  const flags = config.settings.grid?.mediaBadges || {};
+  if (!flags.format && !flags.iso && !flags.shutter && !flags.aperture && !flags.focal && !flags.exposure) {
+    return [];
+  }
+
+  const file = props.file;
+  const badges: ThumbnailBadge[] = [];
+  const maxBadges = 4;
+
+  const pushBadge = (key: string, label: string, title?: string) => {
+    const text = String(label || '').trim();
+    if (!text || badges.length >= maxBadges) return;
+    badges.push({ key, label: text, title: title || text });
+  };
+
+  if (flags.format) {
+    pushBadge('format', resolveFormatLabel(file));
+  }
+  if (flags.iso) {
+    const iso = formatCaptureSettingValue(file.e_iso_speed);
+    if (iso) pushBadge('iso', `ISO ${iso}`, `ISO ${iso}`);
+  }
+  if (flags.shutter) {
+    const shutter = formatCaptureSettingValue(file.e_exposure_time);
+    if (shutter) pushBadge('shutter', shutter, `Shutter ${shutter}`);
+  }
+  if (flags.aperture) {
+    const aperture = formatCaptureSettingValue(file.e_f_number);
+    if (aperture) {
+      const label = /^f/i.test(aperture) ? aperture : `f/${aperture.replace(/^f\/?/i, '')}`;
+      pushBadge('aperture', label, `Aperture ${label}`);
+    }
+  }
+  if (flags.focal) {
+    const focal = formatCaptureSettingValue(file.e_focal_length);
+    if (focal) pushBadge('focal', focal, `Focal ${focal}`);
+  }
+  if (flags.exposure) {
+    const bias = formatCaptureSettingValue(file.e_exposure_bias);
+    if (bias) {
+      const label = /ev/i.test(bias) ? bias : `${bias} EV`;
+      pushBadge('exposure', label, `Exposure ${label}`);
+    }
+  }
+
+  return badges;
 });
 
 const statusBadges = computed<ThumbnailBadge[]>(() => {

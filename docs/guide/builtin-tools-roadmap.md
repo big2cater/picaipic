@@ -1,7 +1,7 @@
 # Built-in tools roadmap (crop presets · collage · batch)
 
-Status: **planned** (product backlog; not implemented).  
-Recorded: 2026-07-18  
+Status: **Phase A + B + C1/C2 + D shipped** (crop, collage magazine cells, batch watermark/text/border/expand, print layout).  
+Recorded: 2026-07-19  
 Reference UX: 光影魔术手-style local tools (crop preset menu, collage modes, multi-step batch).  
 Non-goal for this plan: AI plugins, cloud processing, or full “magic hand” feature parity in one release.
 
@@ -80,11 +80,19 @@ Also keep pure ratio presets: `1:1`, `3:2`, `4:3`, `16:9`.
 
 ### Acceptance (Phase A)
 
-- [ ] Crop opens sub-menu with ratios + built-in photo sizes  
-- [ ] Selecting a preset constrains crop aspect correctly (portrait/landscape)  
-- [ ] Custom favorite ratio can be added and removed  
-- [ ] Built-in list matches catalog above (labels + aspect + declared px/DPI)  
-- [ ] Existing free crop / apply / cancel still work  
+- [x] Crop opens sub-menu with ratios + built-in photo sizes  
+- [x] Selecting a preset constrains crop aspect correctly (portrait/landscape)  
+- [x] Custom favorite ratio can be added and removed  
+- [x] Built-in list matches catalog above (labels + aspect + declared px/DPI)  
+- [x] Existing free crop / apply / cancel still work  
+
+### Implementation notes (Phase A, 2026-07-18)
+
+- Shared catalog: `src-vite/src/common/photoSizePresets.ts`
+- Config (persisted, app-wide): `imageEditor.cropPresetId`, `imageEditor.customCropRatios` (legacy `cropShape` migrated on load)
+- UI: grouped crop `<select>` + manage/add dialogs in `ImageEditor.vue`
+- Photo presets show target px@DPI hint and prefill resize width/height when selected
+- Dialogs: `PhotoSizeManageDialog.vue`, `AddCustomCropRatioDialog.vue`  
 
 ---
 
@@ -110,13 +118,13 @@ Top-level tool entry **拼图** with sub-modes (aligned to reference):
 - Export one JPEG/PNG to chosen path or library album (policy TBD)
 - Background color + cell gap + outer margin
 
-**B2**
+**B2** ✅ (2026-07-18)
 
 - More templates; horizontal/vertical 拼接
 - Cell fill modes: cover / contain
 - Optional border radius / stroke
 
-**B3**
+**B3** ✅ (2026-07-18)
 
 - Free collage canvas
 - Z-order, snap, rotate
@@ -136,10 +144,41 @@ Top-level tool entry **拼图** with sub-modes (aligned to reference):
 
 ### Acceptance (Phase B1)
 
-- [ ] 拼图 entry visible and opens mode chooser  
-- [ ] Template 2/4/9 works with multi-select or picker  
-- [ ] Export produces a single image file  
-- [ ] Cancel discards work without writing library originals  
+- [x] 拼图 entry visible and opens mode chooser  
+- [x] Template 2/4/9 works with multi-select or picker  
+- [x] Export produces a single image file  
+- [x] Cancel discards work without writing library originals  
+
+### Implementation notes (Phase B1, 2026-07-18)
+
+- Entry: multi-select → right panel **拼图** (`SelectionPanel` → `CollageDialog`)
+- Templates: equal grids `2` (1×2), `4` (2×2), `9` (3×3); gap / margin / background / JPEG|PNG
+- Preview uses selection thumbnails (cover); full export via host `export_collage` (HEIC/RAW preview path + cover crop)
+- Export is **save-as** only (does not import back into library or mutate originals)
+- Frontend: `collageTemplates.ts`, `CollageDialog.vue`; API: `exportCollage`
+
+### Implementation notes (Phase B2, 2026-07-18)
+
+- Templates expanded: `2` / `3` / `4` / `6` / `9` equal grids
+- Strip mode: `strip-h` / `strip-v` (up to 12 cells from selection order)
+- Fill: `cover` | `contain` (preview + host export)
+- Cell chrome: corner radius + stroke width/color (export uses rounded-rect SDF mask)
+- Output aspect follows layout (non-square grids and elongated strips)
+
+### Implementation notes (Phase B3, 2026-07-18)
+
+- Mode **自由拼图**: free canvas with normalized item geometry (`x/y/w/h/rotate/z`)
+- Interaction: drag move, SE resize handle, ±15° rotate, bring front / send back, optional snap to edges/mid/other items
+- Host: `export_collage` with `template: "free"` + `items[]`; rotate expands cell AABB then overlays by center
+- Free project drafts: app-config `collage.freeDrafts` (name + geometry + style); load remaps by file path against current selection
+
+
+### Implementation notes (Phase B magazine + cell-sized decode, 2026-07-19)
+
+- Magazine freeform templates (NeoImaging PatternJigsaw-normalized): `2`, `2v`, `3a`, `3b`, `4`, `4m`, `6`, `6m`, `9` with `cells[]` in `collageTemplates.ts`
+- Preview uses absolute cell rects; export sends `template: "cells"` + normalized cells to host
+- Host `export_collage` / `export_collage_cells` / free: downscale sources to on-canvas cell need (`load_image_for_layout` + `downscale_image_for_fit_cells`); parallel unique decode for freeform/free
+- Free drafts helpers restored in `collageTemplates.ts` (`COLLAGE_FREE_DRAFT_LIMIT`, serialize/restore/snap)
 
 ---
 
@@ -170,14 +209,16 @@ Reference flow:
 
 | Action | Wave |
 |--------|------|
-| 调整尺寸 | C1 |
-| 裁剪（含规格预设） | C1 (simple) / C2 (full presets) |
-| 添加水印 | C2 |
-| 添加文字 | C2 |
-| 添加边框 | C2 |
-| 扩边 | C2 |
-| 一键动作（效果链） | C3 |
-| 插入模板 | C3 |
+| 调整尺寸 | C1 ✅ |
+| 裁剪（含规格预设） | C1 ✅ (ratios + photo sizes + custom favorites) |
+| 旋转 / 翻转 | C1 ✅ |
+| 亮度 / 对比度 / 饱和度 / 色相 / 模糊 / 滤镜 | C1 ✅ |
+| 一键动作（可保存动作链模板） | C1 ✅ |
+| 添加水印 | C2 ✅ (image stamp) |
+| 添加文字 | C2 ✅ (system font) |
+| 添加边框 | C2 ✅ |
+| 扩边 | C2 ✅ |
+| 插入拼图模板 | C3 |
 
 ### Engine notes
 
@@ -195,11 +236,26 @@ Reference flow:
 
 ### Acceptance (Phase C1)
 
-- [ ] Wizard opens; can add images/folder and clear list  
-- [ ] At least: resize and/or simple crop action runnable in order  
-- [ ] Output to “另存为” folder with jpg/png and quality  
-- [ ] Progress + failure summary; cancel stops further files  
-- [ ] Default path does not silently overwrite originals  
+- [x] Wizard opens; can add images and clear list  
+- [x] Ordered composable actions: resize, crop presets, rotate/flip, adjustments, filters  
+- [x] Output to “另存为” folder with jpg/png/webp and quality; overwrite needs confirm  
+- [x] Progress + failure summary; cancel stops further files  
+- [x] Default path does not silently overwrite originals  
+- [x] One-click action templates save/load in app config  
+
+### Implementation notes (Phase C1, 2026-07-18)
+
+- Entry: multi-select → **批处理** (`SelectionPanel` → `BatchProcessDialog`)
+- Frontend: `batchProcess.ts`, three-step wizard (files → action chain palette → output)
+- Host: `batch_process_images` / `cancel_batch_process`; progress event `batch-process-progress`
+- Templates: `config.batchProcess.templates` (action chains = 一键动作)
+- Explicit file list only (no whole-library scan)
+
+### Implementation notes (Phase C2, 2026-07-18)
+
+- New palette actions: `border`, `expand`, `watermark` (image path + anchor/scale/opacity), `text` (string + font size/color/opacity/anchor)
+- Host draw helpers in `t_image.rs`; text uses `ab_glyph` + OS fonts (Segoe UI/Arial/msyh on Windows, DejaVu/Noto on Linux, Arial/PingFang on macOS)
+- Still optional later: collage-template insert as a batch action (C3)
 
 ---
 
@@ -210,6 +266,36 @@ Reference flow:
 - **Safety:** trash/overwrite rules consistent with existing file ops  
 - **Testing:** unit tests for preset math (aspect, px@DPI); UI smoke for wizard steps  
 - **Docs:** update this file + progress notes when a phase ships  
+
+## D. Photo print layout / 冲印排版
+
+Status: **shipped + refined** (2026-07-19).
+
+### Shipped
+- Built-in paper sizes (3R–8R, A4/A6) + photo-size packing templates including **A4** packs
+- Fill-the-paper packing (光影-style): scale cells to sheet, preserve aspect; H/V bands + auto utilization
+- Custom paper form dialog (inch/cm) and custom layout dialog
+- **Export:** full plan-DPI sheet via host `export_print_layout`
+- **Print (fast path):** same paper aspect, long edge ~1800px (`PRINT_MAX_EDGE`) → temp JPEG → prefer blob URL → hidden `.print-only` + `window.print()` (not host `print_file`; not full export DPI before dialog)
+- Optional import of exported/printed sheet into current album (`import_file`)
+- Host: parallel unique decode; **source downscale to largest cell on the target canvas**
+- Session print-cache + ~200ms background warm; safe temp delete + 24h stale purge; shallow fingerprint (no deep-watch cache thrash)
+- Freeze fix: never mutate pinia `printLayout` from `computed`
+
+### DPI note
+- UI DPI = **export** pixel density (inch × DPI), not OS printer driver DPI and not the print-path canvas size.
+- System print dialog still controls printer quality/paper.
+
+### Still optional later
+- Magazine-style irregular packing beyond band shelves
+- Relabel/hide DPI as export-only advanced option
+- Explicit printer/tray selection UI beyond OS print dialog
+- Batch wizard re-import of batch outputs (C3); print import already available
+
+### Touchpoints
+- `src-vite/src/common/printLayout.ts`, `PrintLayoutDialog.vue`, `AddCustomPaperDialog.vue`
+- Host: `export_print_layout`, `temp_file_path`, `delete_temp_file`, `cleanup_stale_temp_files`
+- Pattern: `patterns/change-print-layout.md`
 
 ## Out of scope (for now)
 

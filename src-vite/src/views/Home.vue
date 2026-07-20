@@ -112,11 +112,20 @@
             </div>
 
             <!-- Component panel (flex-1 to fill remaining space) -->
-            <div class="flex-1 overflow-hidden">
-              <component ref="panelRef" 
-                :key="libraryVersion"
-                :is="buttons[config.main.sidebarIndex].component" 
-                :titlebar="buttons[config.main.sidebarIndex].text"
+            <div class="flex-1 min-h-0 flex flex-col overflow-hidden">
+              <div class="flex-1 min-h-0 overflow-hidden">
+                <component ref="panelRef" 
+                  :key="libraryVersion"
+                  :is="buttons[config.main.sidebarIndex].component" 
+                  :titlebar="buttons[config.main.sidebarIndex].text"
+                />
+              </div>
+              <CollectionTray
+                v-if="config.settings.showCollections"
+                class="shrink-0"
+                :style="{ maxHeight: (config.collectionTray?.height || 180) + 'px' }"
+                :expanded="!!config.collectionTray?.expanded"
+                @toggle-expanded="toggleCollectionTray"
               />
             </div>
           </div>
@@ -173,7 +182,7 @@ import { useAppUpdater } from '@/common/updater';
 import { useUIStore } from '@/stores/uiStore';
 import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
-import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex } from '@/common/api';
+import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex, setImportAiPrompts } from '@/common/api';
 
 // vue components
 import TitleBar from '@/components/TitleBar.vue';
@@ -185,6 +194,7 @@ const Library = defineAsyncComponent(() => import('@/components/Library.vue'));
 const ImageSearch = defineAsyncComponent(() => import('@/components/ImageSearch.vue'));
 const Favorite = defineAsyncComponent(() => import('@/components/Favorite.vue'));
 const Tag = defineAsyncComponent(() => import('@/components/Tag.vue'));
+const SmartAlbumList = defineAsyncComponent(() => import('@/components/SmartAlbumList.vue'));
 const Calendar = defineAsyncComponent(() => import('@/components/Calendar.vue'));
 const Location = defineAsyncComponent(() => import('@/components/Location.vue'));
 const Person = defineAsyncComponent(() => import('@/components/Person.vue'));
@@ -224,6 +234,13 @@ const checkLibraryEmpty = async () => {
     libraryEmpty.value = false;
   }
 };
+function toggleCollectionTray() {
+  if (!config.collectionTray) {
+    (config as any).collectionTray = { expanded: true, height: 180 };
+  }
+  config.collectionTray.expanded = !config.collectionTray.expanded;
+}
+
 const SETTINGS_BASE_WIDTH = 600;
 const SETTINGS_BASE_HEIGHT = 620;
 
@@ -335,6 +352,7 @@ const {
 // buttons
 const buttons = computed(() =>  [
   { icon: IconFolders, component: Library, text: localeMsg.value.sidebar.album },
+  { icon: IconTag, component: SmartAlbumList, text: localeMsg.value.sidebar.smart_albums || localeMsg.value.album?.smart_album_list || 'Smart Albums' },
   { icon: IconHeart, component: Favorite, text: localeMsg.value.sidebar.favorite },
   { icon: IconSearch, component: ImageSearch, text: localeMsg.value.sidebar.search },
   { icon: IconCalendarDay, component: Calendar, text: localeMsg.value.sidebar.calendar },
@@ -346,7 +364,7 @@ const buttons = computed(() =>  [
 ]);
 
 // dedicated full-area heatmap view, shown instead of Content
-const MAP_SIDEBAR_INDEX = 8;
+const MAP_SIDEBAR_INDEX = 9;
 
 const visibleButtons = computed(() =>
   buttons.value
@@ -355,7 +373,7 @@ const visibleButtons = computed(() =>
 );
 
 watch(() => config.settings.face.enabled, (enabled) => {
-  if (!enabled && config.main.sidebarIndex === 5) {
+  if (!enabled && config.main.sidebarIndex === 6) {
     config.main.sidebarIndex = 0;
   }
 });
@@ -441,6 +459,9 @@ onMounted(async () => {
   if (config.settings.autoCheckUpdates !== false) {
     void checkForUpdates(false);
   }
+
+  // Sync scan-time AI PNG prompt import flag with persisted UI setting (default on).
+  void setImportAiPrompts(config.settings.importAiPromptsToComments !== false);
 });
 
 onBeforeUnmount(() => {
@@ -567,6 +588,11 @@ const onManageLibrariesUpdated = async () => {
 
 // click sidebar
 function clickSidebar(index: number) {
+  if (libConfig.activePane === 'collection' || libConfig.activePane === 'smart') {
+    libConfig.activePane = 'main';
+    if (libConfig.smartAlbum) libConfig.smartAlbum = { type: null, id: null };
+  }
+
   if (libraryEmpty.value && index !== 0) return;
   if (index === MAP_SIDEBAR_INDEX) {
     // map view has no filter panel - give it the full content area

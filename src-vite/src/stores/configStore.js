@@ -51,6 +51,8 @@ export const useConfigStore = defineStore('configStore', {
     mediaViewer: {
       isZoomFit: true,      // true: zoom to fit container; false: original size(scale = 1)
       isPinned: true,       // pinned mode
+      // 0: theme, 1: black, 2: white, 3: gray, 4: checker
+      backgroundMode: 0,
     },
 
     video: {
@@ -68,19 +70,51 @@ export const useConfigStore = defineStore('configStore', {
         blur: 0,
         filter: '',
       },
-      cropShape: 0,             // image editor crop shape (0: Custom, 1: 1:1, 2: 1:2, 3: 2:3, 4: 3:4, 5: 9:16) 
+      // Legacy numeric crop shape kept for older persisted configs; prefer cropPresetId.
+      cropShape: 0,
+      // Crop preset id: 'free' | ratio-* | photo-* | custom-*
+      cropPresetId: 'free',
+      // User-defined favorite ratios (app-wide, not per-library)
+      customCropRatios: [],
       saveAs: 0,                // image editor save as (0: Overwrite existing file, 1: Save as new file)
       format: 0,                // image editor format (0: JPEG, 1: PNG, 2: WEBP)
       quality: 0,               // jpeg quality (0: High, 1: Medium, 2: Low), [90, 80, 60]
     },
 
+    // Collage free-canvas project drafts (app-wide; geometry + style only)
+    collage: {
+      freeDrafts: [],
+    },
+
+    // Batch action chain templates ("一键动作") + optional import of saveAs outputs
+    batchProcess: {
+      templates: [],
+      importToLibrary: false,
+    },
+
+    // Photo print layout (冲印排版): custom papers + custom packing styles
+    printLayout: {
+      customPapers: [],
+      customLayouts: [],
+      dpi: 300,
+      background: '#ffffff',
+      showGuides: true,
+      importToLibrary: false,
+    },
+
     imageViewer: {
-      isSplit: false,           // split view
+      isSplit: false,           // split view (legacy mirror of splitCount > 1)
+      splitCount: 1,            // 1 | 2 | 4 pane comparison
       isSyncViewport: false,    // sync viewport
       isFullScreen: false,      // native fullscreen in image viewer window
     },
 
     libraryChangedVersion: 0,
+
+    collectionTray: {
+      expanded: true,
+      height: 180,
+    },
 
     settings: {
       tabIndex: 0,               // settings tab index (0: general, 1: view, 2: library, 3: image search, 4: shortcuts, 5: about)
@@ -94,6 +128,7 @@ export const useConfigStore = defineStore('configStore', {
       showButtonText: true,       // show button text
       showToolTip: true,          // show button tooltip
       showStatusBar: true,        // show status bar
+      showCollections: true,     // show collections tray under left sidebar
       autoCheckUpdates: true,      // automatically check for updates
       debugMode: false,           // debug mode
 
@@ -102,6 +137,8 @@ export const useConfigStore = defineStore('configStore', {
       calendarSort: 0,            // 0=taken asc, 1=taken desc, 2=created asc, 3=created desc, 4=modified asc, 5=modified desc
       categorySort: 0,            // category_sort_options: 0=name asc, 1=name desc, 2=count asc, 3=count desc
       showSubfolderFiles: false,  // show subfolder files (in album folder view)
+      // Import AI generation prompts from PNG metadata into empty comments on scan
+      importAiPromptsToComments: true,
       
       // grid view settings
       thumbnailSize: 512,         // thumbnail image size (small: 128, medium: 256, large: 512, extra large: 1024)
@@ -114,6 +151,15 @@ export const useConfigStore = defineStore('configStore', {
         labelSecondary: 3,       // card view: secondary label (3: Dimension)
         previewPosition: 0,      // filmstrip view: preview position (0: top, 1: bottom, 2: left, 3: right)
         dateGrouping: 0,         // show date groups: 0: none, 1: day, 2: month
+        // Overlay media-info badges on thumbnails (format / capture settings)
+        mediaBadges: {
+          format: false,
+          iso: false,
+          shutter: false,
+          aperture: false,
+          focal: false,
+          exposure: false,
+        },
       },
       
       // image view settings
@@ -215,6 +261,9 @@ export const useConfigStore = defineStore('configStore', {
     setShowSubfolderFiles(showSubfolderFiles) {
       this.settings.showSubfolderFiles = showSubfolderFiles;
     },
+    setImportAiPromptsToComments(importAiPromptsToComments) {
+      this.settings.importAiPromptsToComments = importAiPromptsToComments !== false;
+    },
 
     // video settings
     setVideoMuted(videoMuted) {
@@ -243,6 +292,17 @@ export const useConfigStore = defineStore('configStore', {
     setGridDateGrouping(dateGrouping) {
       this.settings.grid.dateGrouping = dateGrouping;
     },
+    setGridMediaBadges(mediaBadges) {
+      const next = mediaBadges && typeof mediaBadges === 'object' ? mediaBadges : {};
+      this.settings.grid.mediaBadges = {
+        format: !!next.format,
+        iso: !!next.iso,
+        shutter: !!next.shutter,
+        aperture: !!next.aperture,
+        focal: !!next.focal,
+        exposure: !!next.exposure,
+      };
+    },
     setShowFilmStrip(showFilmStrip) {
       this.settings.grid.showFilmStrip = showFilmStrip;
     },
@@ -250,6 +310,12 @@ export const useConfigStore = defineStore('configStore', {
     // image view settings
     setFilmStripViewPreviewPosition(filmStripViewPreviewPosition) {
       this.settings.grid.previewPosition = filmStripViewPreviewPosition;
+    },
+    setMediaViewerBackgroundMode(backgroundMode) {
+      const mode = Number(backgroundMode);
+      this.mediaViewer.backgroundMode = Number.isFinite(mode)
+        ? Math.max(0, Math.min(4, Math.trunc(mode)))
+        : 0;
     },
     setMouseWheelMode(mouseWheelMode) {
       this.settings.mouseWheelMode = mouseWheelMode;

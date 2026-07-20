@@ -11,13 +11,13 @@ edges:
     condition: when tracing persistence and library ownership
   - target: context/conventions.md
     condition: when applying migration and safety rules
-last_updated: 2026-07-18
+last_updated: 2026-07-19
 ---
 
 # Change the SQLite Schema
 
 ## Context
-PicAiPic keeps a database per library. `t_migration.rs` owns forward schema evolution, `t_sqlite.rs` owns queries/models, and `t_storage.rs` owns paths, custom storage, WAL checkpointing, backup, and restore. Current schema is at migration **v6** (adds `content_id`, `paired_file_id`, `live_photo_type` for Live Photo / Motion Photo support).
+PicAiPic keeps a database per library. `t_migration.rs` owns forward schema evolution, `t_sqlite.rs` owns queries/models, and `t_storage.rs` owns paths, custom storage, WAL checkpointing, backup, and restore. Current schema is at migration **v8** (v6 Live Photo columns; v7 collections; v8 unique `afiles(folder_id, name)` after dedupe — see `fix-library-scan-selection.md`).
 
 ## Steps
 1. Inspect all reads/writes of the affected table/column and any serialized frontend shape.

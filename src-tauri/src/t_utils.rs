@@ -1488,6 +1488,129 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build a unique path under the system temp directory (for intermediate export/print).
+pub fn temp_file_path(prefix: &str, extension: &str) -> Result<String, String> {
+    let safe_prefix = prefix
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let prefix = if safe_prefix.is_empty() {
+        "picaipic".to_string()
+    } else {
+        safe_prefix
+    };
+    let ext = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let ext = if ext.is_empty() {
+        "jpg".to_string()
+    } else {
+        ext
+    };
+    let name = format!("{}_{}.{}", prefix, uuid::Uuid::new_v4().simple(), ext);
+    let path = std::env::temp_dir().join(name);
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Failed to build temp path".to_string())
+}
+
+fn is_allowed_temp_basename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("print_layout_")
+        || lower.starts_with("picaipic_")
+        || lower.starts_with("picaipic-")
+}
+
+/// Delete a file only if it is under the system temp dir and uses an app temp prefix.
+/// Prevents accidental deletion of user media / library files.
+pub fn delete_temp_file(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Missing path".to_string());
+    }
+    let target = Path::new(trimmed);
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid temp file name".to_string())?;
+    if !is_allowed_temp_basename(file_name) {
+        return Err("Refusing to delete non-temp app file".to_string());
+    }
+
+    let temp_dir = std::env::temp_dir();
+    let temp_canon = temp_dir
+        .canonicalize()
+        .unwrap_or_else(|_| temp_dir.clone());
+
+    // Prefer canonical path when the file exists; otherwise require parent under temp.
+    if target.exists() {
+        let canon = target
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve temp path: {}", e))?;
+        if !canon.starts_with(&temp_canon) {
+            return Err("Refusing to delete file outside temp directory".to_string());
+        }
+        if !canon.is_file() {
+            return Err("Temp path is not a file".to_string());
+        }
+        fs::remove_file(&canon).map_err(|e| format!("Failed to delete temp file: {}", e))?;
+        return Ok(());
+    }
+
+    // Already gone is success (idempotent cleanup).
+    if let Some(parent) = target.parent() {
+        let parent_canon = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        if parent_canon.starts_with(&temp_canon) || parent == temp_dir {
+            return Ok(());
+        }
+    }
+    Err("Refusing to delete file outside temp directory".to_string())
+}
+
+/// Remove stale print_layout_/picaipic_ temp files older than `max_age_secs`.
+pub fn cleanup_stale_temp_files(max_age_secs: u64) -> Result<u32, String> {
+    let temp_dir = std::env::temp_dir();
+    let max_age = std::time::Duration::from_secs(max_age_secs.max(60));
+    let now = std::time::SystemTime::now();
+    let mut removed = 0u32;
+    let entries = fs::read_dir(&temp_dir).map_err(|e| format!("Failed to read temp dir: {}", e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !is_allowed_temp_basename(name) {
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age >= max_age {
+            if fs::remove_file(&path).is_ok() {
+                removed = removed.saturating_add(1);
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Get all files in a folder(not include sub-folders)
 /// Returns (files, new_count, updated_count)
 pub fn get_folder_files(
@@ -1673,6 +1796,34 @@ fn remove_missing_folder(folder: &AFolder) -> Result<(), String> {
 /// starts the previous one is cancelled (its generation is invalidated).
 static FOLDER_SYNC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Albums currently running a full `index_album_worker` scan. Folder mtime sync
+/// skips these albums so concurrent TOCTOU inserts cannot race with the scan.
+static ACTIVE_ALBUM_SCANS: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+struct AlbumScanGuard {
+    album_id: i64,
+}
+
+impl AlbumScanGuard {
+    fn acquire(album_id: i64) -> Result<Self, String> {
+        let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap();
+        if !active.insert(album_id) {
+            return Err(format!("Album {} is already being scanned", album_id));
+        }
+        Ok(Self { album_id })
+    }
+}
+
+impl Drop for AlbumScanGuard {
+    fn drop(&mut self) {
+        ACTIVE_ALBUM_SCANS.lock().unwrap().remove(&self.album_id);
+    }
+}
+
+fn album_scan_active(album_id: i64) -> bool {
+    ACTIVE_ALBUM_SCANS.lock().unwrap().contains(&album_id)
+}
+
 fn sync_generation_valid(generation: u64) -> bool {
     FOLDER_SYNC_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
 }
@@ -1721,6 +1872,9 @@ fn sync_dirty_folders_by_mtime(
         if !sync_generation_valid(generation) {
             return Ok((FolderMtimeSyncResult::default(), Vec::new()));
         }
+        if album_scan_active(folder.album_id) {
+            continue;
+        }
         let root_accessible = *album_accessibility
             .entry(folder.album_id)
             .or_insert_with(|| {
@@ -1765,6 +1919,9 @@ fn sync_dirty_folders_by_mtime(
     while let Some((folder, latest_mtime)) = queue.pop() {
         if !sync_generation_valid(generation) {
             return Ok((FolderMtimeSyncResult::default(), Vec::new()));
+        }
+        if album_scan_active(folder.album_id) {
+            continue;
         }
         let folder_id = match folder.id {
             Some(id) => id,
@@ -1850,7 +2007,9 @@ fn sync_folder_direct_files(
     let mut tasks = Vec::new();
 
     // Helper to check background cancellation (generation 0 = foreground, never cancels).
-    let is_cancelled = || generation != 0 && !sync_generation_valid(generation);
+    // Also abort when a full album scan owns this album (prevents concurrent inserts).
+    let is_cancelled =
+        || generation != 0 && (!sync_generation_valid(generation) || album_scan_active(album_id));
 
     // Build a map of file_id → (db_id, db_name) for rename detection.
     // Use the stored inode from the DB record — this works even when the
@@ -2952,6 +3111,7 @@ pub async fn index_album_worker(
     thumbnail_size: u32,
     skip_file_path: Option<String>,
 ) -> Result<(), String> {
+    let _album_scan_guard = AlbumScanGuard::acquire(album_id)?;
     let scan_start = std::time::Instant::now();
     // Generate a unique scan time for this session (current timestamp)
     let current_scan_time = Utc::now().timestamp_millis();

@@ -21,6 +21,15 @@ export const useLibraryStore = defineStore('libraryStore', {
       activateTick: 0,        // increments on each album/folder click (even same target)
     },
 
+    /**
+     * Library panel quick entry (All / Favorites / On this day).
+     * When item is favorites|on-this-day, Content routes a library-wide query on the album sidebar.
+     * @type {{ item: 'all-files' | 'favorites' | 'on-this-day' }}
+     */
+    library: {
+      item: 'all-files',
+    },
+
     /** @type {{ tab: 'favorite' | 'rating', albumId: number | null, folderId: number, folderPath: string, rating: number | null }} */
     favorite: {
       tab: 'favorite',
@@ -101,6 +110,28 @@ export const useLibraryStore = defineStore('libraryStore', {
       searchTotal: 0,         // current album's searchable total
       failed: 0,              // current album's failed count
     },
+
+    /** @type {{ selectedId: number | null }} */
+    collection: {
+      selectedId: null,       // selected collection id (virtual set)
+    },
+
+    /** @type {any[]} rule-based smart albums (persisted in LibraryState) */
+    smartAlbums: [],
+
+    /** @type {{ type: 'system' | 'custom' | null, id: string | null }} */
+    smartAlbum: {
+      type: null,
+      id: null,
+    },
+
+    /**
+     * Content query source routing.
+     * - 'main' | sidebar modes use normal QueryParams
+     * - 'collection' shows files in libConfig.collection.selectedId
+     * - 'smart' shows files for libConfig.smartAlbum custom id
+     */
+    activePane: 'main',
   }),
 
   actions: {
@@ -158,6 +189,7 @@ export const useLibraryStore = defineStore('libraryStore', {
         try {
           const stateToSave = {
             album: this.album,
+            library: this.library,
             favorite: this.favorite,
             tag: this.tag,
             calendar: this.calendar,
@@ -165,6 +197,9 @@ export const useLibraryStore = defineStore('libraryStore', {
             location: this.location,
             search: this.search,
             destFolder: this.destFolder,
+            collection: this.collection,
+            smartAlbums: this.smartAlbums,
+            smartAlbum: this.smartAlbum,
             index: {
               status: this.index.status,
               albumQueue: this.index.albumQueue,

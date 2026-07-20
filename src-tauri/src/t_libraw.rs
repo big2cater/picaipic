@@ -296,7 +296,7 @@ impl RawHandle {
             iso_speed: (out.iso_speed > 0.0).then(|| format_float(out.iso_speed)),
             shutter: (out.shutter > 0.0).then(|| format_shutter_speed(out.shutter)),
             aperture: (out.aperture > 0.0).then(|| format!("f/{}", format_float(out.aperture))),
-            focal_len: (out.focal_len > 0.0).then(|| format!("{}mm", format_float(out.focal_len))),
+            focal_len: (out.focal_len > 0.0).then(|| format!("{} mm", format_float(out.focal_len))),
             flash_used: (out.flash_used != 0.0).then(|| {
                 if out.flash_used > 0.0 {
                     "Fired".to_string()
@@ -305,14 +305,10 @@ impl RawHandle {
                 }
             }),
             lens_make: c_char_array_to_string(&out.lens_make),
-            lens_model: c_char_array_to_string(&out.lens_model).or_else(|| {
-                format_lens_model_from_numbers(
-                    out.min_focal,
-                    out.max_focal,
-                    out.max_ap_min_focal,
-                    out.max_ap_max_focal,
-                )
-            }),
+            // Prefer the real lens model string from LibRaw. Synthesizing a model
+            // from focal/aperture ranges produced misleading labels that overrode
+            // the authoritative metadata.
+            lens_model: c_char_array_to_string(&out.lens_model),
         })
     }
 
@@ -455,38 +451,11 @@ fn format_float(value: f32) -> String {
 
 fn format_shutter_speed(shutter: f32) -> String {
     if shutter >= 1.0 {
-        format!("{}s", format_float(shutter))
+        format!("{} s", format_float(shutter))
     } else {
         let denom = (1.0 / shutter).round();
-        format!("1/{}s", denom)
+        format!("1/{} s", denom)
     }
-}
-
-fn format_lens_model_from_numbers(
-    min_focal: f32,
-    max_focal: f32,
-    max_ap_min_focal: f32,
-    max_ap_max_focal: f32,
-) -> Option<String> {
-    if min_focal <= 0.0 || max_focal <= 0.0 || max_ap_min_focal <= 0.0 || max_ap_max_focal <= 0.0 {
-        return None;
-    }
-
-    let focal = if (min_focal - max_focal).abs() < 0.05 {
-        format!("{}mm", format_float(min_focal))
-    } else {
-        format!("{}-{}mm", format_float(min_focal), format_float(max_focal))
-    };
-    let aperture = if (max_ap_min_focal - max_ap_max_focal).abs() < 0.05 {
-        format!("f/{}", format_float(max_ap_min_focal))
-    } else {
-        format!(
-            "f/{}-{}",
-            format_float(max_ap_min_focal),
-            format_float(max_ap_max_focal)
-        )
-    };
-    Some(format!("{} {}", focal, aperture))
 }
 
 fn render_processed_preview(file_path: &str, max_edge: u32) -> Result<Vec<u8>, String> {

@@ -18,7 +18,7 @@ edges:
     condition: when persistent schema or storage behavior changes
   - target: patterns/change-live-photo.md
     condition: when working on Live Photo / Motion Photo features
-last_updated: 2026-07-18
+last_updated: 2026-07-20
 ---
 
 # Conventions
@@ -64,6 +64,12 @@ The Rust command must be registered in `main.rs`; event listeners must return/cl
 **Plugin safety pattern:** validate normalized paths remain inside the intended store/task/output root before deletion or adoption. Preserve signature verification, trust prompts, permission gates, runtime probes/conflict checks, loopback binding, auth token, and input staging.
 
 **Live Photo / Motion Photo pattern:** Apple Live Photos pair图片+视频 by EXIF ContentIdentifier (tag 0x0011 in `Context::Tiff`); videos are matched by ffprobe's `com.apple.quicktime.content.identifier` (try both dotted and underscored key variants). Google Motion Photos are single JPEGs with XMP `GCamera:MotionPhoto=1` and `Container:Directory` items specifying embedded video offset/length; `t_xmp.rs` parses XMP with `quick-xml` and `content_id` stores `motion:<offset>:<length>`. File-name stem fallback pairing (e.g., `IMG_1234.HEIC` + `IMG_1234.MOV`) runs when ContentIdentifier is absent. The `afiles` table's `live_photo_type` field uses: 0=none, 1=Apple image, 2=Apple video, 3=Google Motion Photo. `paired_file_id` is bilateral (both sides point to each other). Frontend preview uses a 400ms long-press timer in MediaViewer; the MOV/video layer is a controlless `<video>` overlay with `getAssetSrc()` URL conversion.
+
+**AI prompt → comments pattern:** Prefer `t_ai_prompt` for PNG/JPEG generation metadata. Only fill **empty** `comments`; preserve non-empty user notes on re-scan. `AFile::update` does not write `comments`—use `update_column` when filling after change rescan. Gate with the import AtomicBool + Pinia `importAiPromptsToComments`. Bound file reads (PNG ≤4 MiB ancillary, JPEG marker walk ≤2 MiB). See `patterns/change-ai-prompt-import.md`.
+
+**Search file-type mask pattern:** Library, filename, and AI/similar search share the same bitmask (0 all, 1 image, 2 video, 4 raw). Pass as `searchFileType` / `search_file_type`; apply in SQL (`build_file_type_condition`) before ranking when possible. See `patterns/change-ai-search-filters.md`.
+
+**Viewer presentation pattern:** Thumbnail media badges and viewer canvas background are Pinia presentation flags only—no schema. Prefer helpers in `utils.ts` and existing settings event sync across main/settings windows. See `patterns/change-media-badges.md` and `patterns/change-viewer-background.md`.
 
 ## Verify Checklist
 

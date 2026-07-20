@@ -16,8 +16,9 @@ edges:
     condition: when touching AI plugins, manifests, runtimes, permissions, tasks, packaging, or sandboxing
   - target: patterns/INDEX.md
     condition: before any implementation or diagnosis task
-last_updated: 2026-07-18
+last_updated: 2026-07-20
 ---
+
 
 # Session Bootstrap
 
@@ -29,7 +30,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Tauri 2/Rust desktop host with Vue 3 frontend for Windows and Linux.
 - **v1.1.0** app/docs versions aligned; tag `v1.1.0` has a **private draft** multi-arch release (Linux deb/AppImage + Windows x64/arm64 MSI + updater latest JSON on the Release assets). Not published; keep private until the owner decides.
 - Release CI publishes installers to **GitHub Release assets** (not Actions artifact storage) after quota failures; PR builds use best-effort artifact upload — see `patterns/release-build.md`.
-- Folder-first multi-library browsing, SQLite metadata (schema v6), indexing/recovery, thumbnails, timeline/folder/location/camera/lens/tag/favorite/rating/face filters, deduplication, image editing, and broad image/RAW/video support.
+- Folder-first multi-library browsing, SQLite metadata (schema v6+; collections v7, unique afiles v8), indexing/recovery, thumbnails, timeline/folder/location/camera/lens/tag/favorite/rating/face filters, deduplication, image editing, and broad image/RAW/video support.
 - Rename/move disk↔DB consistency: `rename_file` / `rename_folder` roll back disk on DB failure (aligned with `move_file`); `edit_album` propagates name-column errors; dedup `get_files_by_sizes` reuses precomputed suspicious sizes via chunked `IN` binds.
 - Local AI search and face processing use bundled ONNX models; FFmpeg is bundled as a sidecar for video workflows.
 - AI plugin host: discovery, signed package install/trust, permissions, install profiles, shared/private/external Python runtimes, lifecycle, async tasks, output adopt/discard, runtime-conflict detection, two sample plugins.
@@ -38,13 +39,34 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Live Photo / Motion Photo: detect/pair/preview/export; HEIC-internal video; keyframe overwrite (JPEG); album rescan; user guide `docs/guide/live-photo.md`.
 - Confirmed shared→plugin-private runtime switch + managed model open/validate/import (Settings).
 - Merged to main (2026-07-18): Live Photo polish (#1), sandbox Phase 0–2 + runtime/model UX (#2).
+- Built-in **Phase A crop presets** (2026-07-18): ImageEditor ratios + photo-size catalog + custom favorites — `photoSizePresets.ts`, `patterns/change-crop-presets.md`.
+- Built-in **Phase B collage** (refined 2026-07-19): multi-select 拼图 — equal + magazine freeform cells (`2/2v/3a/3b/4/4m/6/6m/9`, NeoImaging-style), strip, free canvas + free drafts; host `export_collage` with `template: "cells"` + cell-sized source downscale — `patterns/change-collage.md`.
+- Built-in **Phase C1–C2 batch** (2026-07-18): multi-select 批处理 wizard — composable actions including border/expand/watermark/text; templates; progress/cancel; host `batch_process_images` — `patterns/change-batch-process.md`.
+- Dialog safety (2026-07-19): collage draft save/delete + batch template save/delete/overwrite use `MessageBox` / plugin-dialog `ask` only — no `window.prompt`/`window.confirm` (WebView no-op risk). Free collage rotate source headroom uses true AABB.
+- Batch process **parallel workers** (2026-07-19): serial dest planning + JoinSet concurrency (2–8); GridView VirtualScroll buffer 4→8. SearchBox submits on Enter only (no per-key SQLite). Face index **CPU parallel** (2026-07-19): 2–4 worker engines + batched SQLite writes; GPU EP still future.
+- **Smart Albums / 智能相册** (2026-07-19): rule SQL + sidebar list/editor + Content smart source — .
+- **Collections / 集合** (2026-07-19): SQLite membership + left-sidebar tray + drag-add + Content `collection` query source — `patterns/change-collections.md`.
+- Large-library **search perf** (2026-07-19): `cosine_similarity_blob` + chunked `get_files_by_ids`; semantic search defers bulk thumbs to viewport — `patterns/change-library-perf.md`.
+- **Library polish Phase 5** (2026-07-19): Library sidebar All/Favorites/On this day quick entries + Content view-adaptive date grouping (`effectiveDateGrouping` → GridView) — `patterns/change-library-shortcuts.md`.
+- **Lap 0.3 port (core + UX, 2026-07-19)**: program order perf → 4-pane → collections → smart albums → library polish **done**; bugfix wave (`patterns/fix-library-scan-selection.md`); then UX pack:
+  - **AI PNG/JPEG prompt → empty comments**: scan A1111/NovelAI/InvokeAI/ComfyUI PNG text + JPEG UserComment/COM; default on; no full-library backfill — `t_ai_prompt.rs`, `patterns/change-ai-prompt-import.md`
+  - **Thumbnail media badges**: format/ISO/shutter/aperture/focal/exposure overlays (default off) — `settings.grid.mediaBadges`, `patterns/change-media-badges.md`
+  - **Viewer background modes**: theme/black/white/gray/checker + shortcut **B** — `mediaViewer.backgroundMode`, `patterns/change-viewer-background.md`
+  - **AI search file-type + groups**: `ImageSearchParams.search_file_type`; Visual/Similar/Filename section headers — `patterns/change-ai-search-filters.md`
+- Built-in **photo print layout / 冲印排版** (refined 2026-07-19): fill-the-paper packing + A4 presets + custom paper form + optional library import; **export** = full plan DPI; **print** = print-sized sheet (long edge ~1800px) + blob URL + `window.print` (fast dialog open); host downscales sources to cell need; print-cache purge + 24h stale temp cleanup — `printLayout.ts`, `PrintLayoutDialog.vue`, `export_print_layout` — `patterns/change-print-layout.md`.
+- Dialog open freeze fixed (2026-07-18/19): never mutate pinia `printLayout` inside `computed`.
+- **Batch optional library import / G2** (2026-07-20): host `BatchProcessResult.outputPaths`; wizard `batchProcess.importToLibrary`; saveAs → sequential `importFile`; overwrite → `updateFileInfo` only — `patterns/change-batch-process.md`.
+- **Signing multi-key + local revoke / G6** (2026-07-20): registry `keys[]` + `revokedKeys`; `trust_publisher` adds keys; `revoke_publisher_key` / `list_revoked_keys`; install fails closed on revoked keys — `docs/ai-plugin-security-hardening.md` Q3 closed.
+- **Sandbox Phase 3–5** (2026-07-20): **Phase 3** opt-in Windows netsh outbound + policy env. **Phase 4** opt-in Linux Landlock (ABI probe + path rules + pre_exec; soft-fail). **Phase 5** env hygiene opt-in. Default confinement remains Phase 0–2 — `docs/ai-plugin-sandbox-roadmap.md`, `t_sandbox.rs`.
 
 **Not yet built / future work:**
-- Built-in tools plan (planned only): crop photo-size sub-menu, collage/拼图, batch wizard — **`docs/guide/builtin-tools-roadmap.md`** (order A→B→C).
-- Sandbox Phase 3–5: network OS block, Linux Landlock/seccomp, env hygiene, optional cache ref/range — roadmap doc above.
-- Signing-key rotation/revocation design; recurring release-exe plugin regression after host changes.
+- Built-in tools Phase C3: insert collage template as batch action (product cancelled for now / G1) — **`docs/guide/builtin-tools-roadmap.md`**.
+- Magazine-style irregular packing for print beyond band shelves; hide/relabel DPI as export-only; richer printer/tray picker (system dialog is enough for v1).
+- Sandbox: Linux netns / real WFP; seccomp; Landlock matrix on ROCm; optional cache ref/range.
+- Remote signing CRL / dual-sign key-transition artifacts; recurring release-exe plugin regression after host changes.
 - Broader HEIC sequence sample coverage; broader automated coverage outside plugin-host + current Rust unit tests.
 - Publish v1.1.0 draft release (owner decision; repo remains private for now).
+- Lap 0.3 remaining polish: FileInfo/Live hover playback refinement; optional empty-comment library backfill.
 
 **Known issues / active risks:**
 - Packaged-plugin behavior must be checked in the release executable; dev-mode success alone does not prove installer/resource/runtime correctness.
@@ -67,7 +89,12 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Set up, run, verify, or package | `context/setup.md` |
 | Change AI plugin host, manifest, runtime, task, trust, or sandbox | `context/plugin-runtime.md` |
 | Change Live Photo / Motion Photo detection, pairing, or preview | `patterns/change-live-photo.md` |
-| Plan or implement built-in crop presets, collage, or batch tools | `docs/guide/builtin-tools-roadmap.md` then `patterns/INDEX.md` |
+| Change face indexing performance or scan DB batching | `patterns/change-face-index.md` |
+| Change AI PNG prompt import into comments | `patterns/change-ai-prompt-import.md` |
+| Change thumbnail media-info badges | `patterns/change-media-badges.md` |
+| Change image viewer background modes | `patterns/change-viewer-background.md` |
+| Change AI search filters or result grouping | `patterns/change-ai-search-filters.md` |
+| Plan or implement built-in crop presets, collage, batch, or print layout | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` |
 | Build/release installers or plugin packages | `patterns/release-build.md` |
 | Perform any recurring task | `patterns/INDEX.md` |
 

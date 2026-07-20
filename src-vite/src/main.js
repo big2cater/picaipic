@@ -102,6 +102,13 @@ listen('settings-categorySort-changed', (event) => {
 listen('settings-showSubfolderFiles-changed', (event) => {
   config.setShowSubfolderFiles(event.payload)
 })
+listen('settings-importAiPromptsToComments-changed', (event) => {
+  config.setImportAiPromptsToComments(event.payload)
+  // Keep Rust scan flag in sync (best-effort; Home also syncs on boot).
+  import('@/common/api').then(({ setImportAiPrompts }) => {
+    void setImportAiPrompts(event.payload !== false)
+  }).catch(() => {})
+})
 listen('settings-gridSize-changed', (event) => {
   config.setGridSize(event.payload)
 })
@@ -120,14 +127,20 @@ listen('settings-gridLabelSecondary-changed', (event) => {
 listen('settings-gridDateGrouping-changed', (event) => {
   config.setGridDateGrouping(event.payload)
 })
+listen('settings-gridMediaBadges-changed', (event) => {
+  config.setGridMediaBadges(event.payload)
+})
 listen('settings-filmStripViewPreviewPosition-changed', (event) => {
   config.setFilmStripViewPreviewPosition(event.payload)
 })
 listen('settings-mouseWheelMode-changed', (event) => {
   config.setMouseWheelMode(event.payload)
 })
-listen('settings-slideShowInterval-changed', (event) => {
-  config.setSlideShowInterval(event.payload)
+listen('settings-mediaViewerBackgroundMode-changed', (event) => {
+  config.setMediaViewerBackgroundMode(event.payload)
+})
+listen('settings-navigatorViewMode-changed', (event) => {
+  config.setNavigatorViewMode(event.payload)
 })
 listen('settings-autoPlayVideo-changed', (event) => {
   config.setAutoPlayVideo(event.payload)

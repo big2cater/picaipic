@@ -8,8 +8,9 @@ use crate::t_config::{self, AppConfig, Library, LibraryInfo, LibraryState};
 use crate::t_face;
 use crate::t_image;
 use crate::t_sqlite::{
-    ACamera, AFile, AFolder, ALens, ALocation, ATag, ATagFileState, ATagSelectionCount, AThumb,
-    ATimeLine, Album, ImageSearchParams, Person, QueryParams,
+    ACamera, ACollection, ACollectionOrder, AFile, AFolder, ALens, ALocation, ATag, ATagFileState,
+    ATagSelectionCount, AThumb, ATimeLine, Album, CollectionAddResult, ImageSearchParams, Person,
+    QueryParams, SmartQueryParams,
 };
 use crate::t_storage;
 use crate::t_utils;
@@ -500,6 +501,27 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
     t_utils::reveal_path(path)
 }
 
+/// unique path under the system temp directory (intermediate export / print sheet)
+#[tauri::command]
+pub fn temp_file_path(prefix: Option<String>, extension: Option<String>) -> Result<String, String> {
+    t_utils::temp_file_path(
+        prefix.as_deref().unwrap_or("picaipic"),
+        extension.as_deref().unwrap_or("jpg"),
+    )
+}
+
+/// delete an app temp file (only under system temp + allowed prefixes)
+#[tauri::command]
+pub fn delete_temp_file(path: &str) -> Result<(), String> {
+    t_utils::delete_temp_file(path)
+}
+
+/// remove stale print_layout_/picaipic_ temp files (default max age 1 day)
+#[tauri::command]
+pub fn cleanup_stale_temp_files(max_age_secs: Option<u64>) -> Result<u32, String> {
+    t_utils::cleanup_stale_temp_files(max_age_secs.unwrap_or(24 * 60 * 60))
+}
+
 /// open an external URL or app-specific deep link
 #[tauri::command]
 pub fn open_external_url(url: &str) -> Result<(), String> {
@@ -514,7 +536,18 @@ pub fn get_external_app_display_name(app_path: &str) -> Result<String, String> {
 /// open a file with a specific external application
 #[tauri::command]
 pub fn open_file_with_app(file_path: &str, app_path: &str) -> Result<(), String> {
-    if file_path.is_empty() || app_path.is_empty() {
+    open_files_with_app(vec![file_path.to_string()], app_path)
+}
+
+/// open one or more files with a specific external application
+#[tauri::command]
+pub fn open_files_with_app(file_paths: Vec<String>, app_path: &str) -> Result<(), String> {
+    let file_paths: Vec<String> = file_paths
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if file_paths.is_empty() || app_path.trim().is_empty() {
         return Err("Missing file path or app path".to_string());
     }
 
@@ -523,7 +556,7 @@ pub fn open_file_with_app(file_path: &str, app_path: &str) -> Result<(), String>
         Command::new("open")
             .arg("-a")
             .arg(app_path)
-            .arg(file_path)
+            .args(&file_paths)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -531,7 +564,7 @@ pub fn open_file_with_app(file_path: &str, app_path: &str) -> Result<(), String>
     #[cfg(not(target_os = "macos"))]
     {
         Command::new(app_path)
-            .arg(file_path)
+            .args(&file_paths)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -625,6 +658,34 @@ pub fn get_folder_thumb_count(file_type: i64, folder_id: i64) -> i64 {
 #[tauri::command]
 pub async fn edit_image(params: t_image::EditParams) -> Result<bool, String> {
     Ok(t_image::edit_image(params).await)
+}
+
+/// export a template collage
+#[tauri::command]
+pub async fn export_collage(params: t_image::CollageExportParams) -> Result<bool, String> {
+    t_image::export_collage(params).await
+}
+
+/// batch process images with ordered built-in actions
+#[tauri::command]
+pub async fn batch_process_images(
+    app_handle: tauri::AppHandle,
+    params: t_image::BatchProcessParams,
+) -> Result<t_image::BatchProcessResult, String> {
+    t_image::batch_process_images(app_handle, params).await
+}
+
+/// cancel an in-flight batch process
+#[tauri::command]
+pub fn cancel_batch_process() -> Result<(), String> {
+    t_image::cancel_batch_process();
+    Ok(())
+}
+
+/// export a photo print layout sheet
+#[tauri::command]
+pub async fn export_print_layout(params: t_image::PrintLayoutExportParams) -> Result<bool, String> {
+    t_image::export_print_layout(params).await
 }
 
 /// copy an edited image to clipboard
@@ -750,6 +811,21 @@ pub fn move_file(
         let _ = AThumb::relocate_for_file(file_id, old_album_id, new_album_id)
             .map_err(|e| format!("Error while relocating thumbnail cache: {}", e));
     }
+
+    // Refresh album totals and Live Photo pairing after a successful move.
+    // Cross-album moves invalidate companion links / sidebar counts otherwise.
+    let mut albums_to_refresh = std::collections::HashSet::new();
+    if let Some(id) = old_album_id {
+        albums_to_refresh.insert(id);
+    }
+    if let Some(id) = new_album_id {
+        albums_to_refresh.insert(id);
+    }
+    for album_id in albums_to_refresh {
+        let _ = AFile::pair_live_photos(album_id);
+        let _ = Album::recount_album(album_id);
+    }
+
     transfer.finalize()
 }
 
@@ -1265,6 +1341,18 @@ pub async fn batch_delete_files(
 pub fn edit_file_comment(file_id: i64, comment: &str) -> Result<usize, String> {
     AFile::update_column(file_id, "comments", &comment)
         .map_err(|e| format!("Error while editing file comment: {}", e))
+}
+
+/// Enable/disable AI PNG prompt import into empty comments (scan-time).
+#[tauri::command]
+pub fn set_import_ai_prompts(enabled: bool) {
+    crate::t_ai_prompt::set_import_enabled(enabled);
+}
+
+/// Current AI PNG prompt import flag.
+#[tauri::command]
+pub fn get_import_ai_prompts() -> bool {
+    crate::t_ai_prompt::is_import_enabled()
 }
 
 /// get a file's thumb image, if not exist, create a new one
@@ -2133,3 +2221,95 @@ pub fn rescan_live_photo_metadata(
 ) -> Result<crate::t_live_photo::RescanLivePhotoResult, String> {
     crate::t_live_photo::rescan_live_photo_metadata(album_id)
 }
+
+// ---------------------------------------------------------------------------
+// Collections (virtual file sets)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_collections() -> Result<Vec<ACollection>, String> {
+    ACollection::list()
+}
+
+#[tauri::command]
+pub fn create_collection(name: String) -> Result<ACollection, String> {
+    ACollection::create(&name)
+}
+
+#[tauri::command]
+pub fn rename_collection(id: i64, name: String) -> Result<(), String> {
+    ACollection::rename(id, &name)
+}
+
+#[tauri::command]
+pub fn delete_collection(id: i64) -> Result<(), String> {
+    ACollection::delete(id)
+}
+
+#[tauri::command]
+pub fn reorder_collections(items: Vec<ACollectionOrder>) -> Result<(), String> {
+    ACollection::reorder(&items)
+}
+
+#[tauri::command]
+pub fn add_files_to_collection(
+    collection_id: i64,
+    file_ids: Vec<i64>,
+) -> Result<CollectionAddResult, String> {
+    ACollection::add_files(collection_id, &file_ids)
+}
+
+#[tauri::command]
+pub fn remove_files_from_collection(
+    collection_id: i64,
+    file_ids: Vec<i64>,
+) -> Result<usize, String> {
+    ACollection::remove_files(collection_id, &file_ids)
+}
+
+#[tauri::command]
+pub fn clear_collection(collection_id: i64) -> Result<(), String> {
+    ACollection::clear(collection_id)
+}
+
+#[tauri::command]
+pub fn get_collection_file_ids(collection_id: i64) -> Result<Vec<i64>, String> {
+    ACollection::file_ids(collection_id)
+}
+
+#[tauri::command]
+pub fn get_collection_count_and_sum(
+    collection_id: i64,
+    params: QueryParams,
+) -> Result<(i64, i64), String> {
+    ACollection::get_count_and_sum(collection_id, &params)
+}
+
+#[tauri::command]
+pub fn get_collection_files(
+    collection_id: i64,
+    params: QueryParams,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<AFile>, String> {
+    ACollection::get_files(collection_id, &params, offset, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Smart Albums (rule queries)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_smart_query_count_and_sum(params: SmartQueryParams) -> Result<(i64, i64), String> {
+    AFile::get_smart_query_count_and_sum(&params)
+}
+
+#[tauri::command]
+pub fn get_smart_query_files(
+    params: SmartQueryParams,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<AFile>, String> {
+    AFile::get_smart_query_files(&params, offset, limit)
+}
+

@@ -5,12 +5,23 @@ export interface VideoPrepareResult {
   action: string;
 }
 
+/** Host prepare modes: null = strategy auto; process = force transcode; fallback = escalate remux→transcode. */
+export type VideoPrepareMode = 'compatible' | 'process' | 'fallback' | null;
+
+/** Formats that WebView video elements generally cannot play reliably. */
+export function isWebViewVideoPlaybackDisabled(filePath: string): boolean {
+  const extension = filePath.match(/\.([^./\\]+)$/)?.[1]?.trim().toLowerCase() || '';
+  return ['mpg', 'mpeg', 'vob'].includes(extension);
+}
+
 export async function prepareVideo(
   filePath: string,
   playerId: string = 'default',
-  force: string | null = null
+  force: VideoPrepareMode = null,
 ): Promise<VideoPrepareResult> {
-  return invoke<VideoPrepareResult>('prepare_video', { filePath, playerId, force });
+  // Backend understands process/fallback; "compatible" means default strategy.
+  const hostForce = force === 'compatible' ? null : force;
+  return invoke<VideoPrepareResult>('prepare_video', { filePath, playerId, force: hostForce });
 }
 
 export async function cancelVideoPrepare(playerId: string = 'default'): Promise<void> {
