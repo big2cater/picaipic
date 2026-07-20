@@ -476,8 +476,7 @@ const canNext = computed(() => {
 const canStart = computed(() =>
   files.value.length > 0
   && actions.value.length > 0
-  && (outputMode.value === 'overwrite' || !!outputDir.value)
-  && !(outputMode.value === 'overwrite' && overwritePolicy.value === 'skip' && false),
+  && (outputMode.value === 'overwrite' || !!outputDir.value),
 );
 
 const progressLabel = computed(() => {
@@ -488,8 +487,8 @@ const progressLabel = computed(() => {
 });
 
 function sliderMin(action: BatchAction) {
-  if (action.type === 'brightness' || action.type === 'contrast' || action.type === 'hue') return -100;
   if (action.type === 'hue') return -180;
+  if (action.type === 'brightness' || action.type === 'contrast') return -100;
   return 0;
 }
 function sliderMax(action: BatchAction) {

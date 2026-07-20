@@ -783,7 +783,7 @@ import {
   IconCopy,
   IconPalette,
 } from '@/common/icons';
-import { LIB_ITEM, DATE_GROUP } from '@/common/constants';
+import { LIB_ITEM, DATE_GROUP, SIDEBAR } from '@/common/constants';
 
 const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
 
@@ -839,7 +839,7 @@ function handleBreadcrumbClick(segmentIndex: number) {
   const sidebarIndex = config.main.sidebarIndex;
 
   // Location: clicking parent segment navigates to admin1 only
-  if (sidebarIndex === 6) {
+  if (sidebarIndex === SIDEBAR.LOCATION) {
     if (segmentIndex === 0) {
       libConfig.location.name = null;
     }
@@ -847,7 +847,7 @@ function handleBreadcrumbClick(segmentIndex: number) {
   }
 
   // Camera: clicking parent segment navigates to make only
-  if (sidebarIndex === 7) {
+  if (sidebarIndex === SIDEBAR.CAMERA) {
     if (segmentIndex === 0) {
       if ((libConfig.camera as any).tab === 'lens') {
         (libConfig.camera as any).lensModel = null;
@@ -859,12 +859,12 @@ function handleBreadcrumbClick(segmentIndex: number) {
   }
 
   // Album folders (index 0) or Favorite folders (index 1): navigate to parent folder
-  if (sidebarIndex === 0 || sidebarIndex === 1) {
+  if (sidebarIndex === SIDEBAR.LIBRARY || sidebarIndex === SIDEBAR.FAVORITE) {
     const segments = titleSegments.value;
     // The first segment is the album/folder root name.
     // Remaining segments are relative path components.
     // To navigate to segmentIndex, we rebuild the folder path.
-    const currentPath = sidebarIndex === 0
+    const currentPath = sidebarIndex === SIDEBAR.LIBRARY
       ? (libConfig.album.folderPath || '')
       : (libConfig.favorite.folderPath || '');
 
@@ -877,7 +877,7 @@ function handleBreadcrumbClick(segmentIndex: number) {
     const levelsToGoUp = segments.length - 1 - segmentIndex;
     const targetPath = pathParts.slice(0, pathParts.length - levelsToGoUp).join(separator);
 
-    if (sidebarIndex === 0) {
+    if (sidebarIndex === SIDEBAR.LIBRARY) {
       // Update title immediately for responsive UI, defer folderPath update to
       // the expand-album-folder event handler so folderId stays consistent.
       contentTitle.value = segments.slice(0, segmentIndex + 1).join(' > ');
@@ -1658,7 +1658,7 @@ async function resolveAlbumImportDestination(albumId: number, folderPath?: strin
 
 async function resolveCurrentAlbumImportDestination() {
   const albumId = Number(libConfig.album.id || 0);
-  if (config.main.sidebarIndex !== 0 || albumId <= 0) return null;
+  if (config.main.sidebarIndex !== SIDEBAR.LIBRARY || albumId <= 0) return null;
 
   const folderPath = !libConfig.album.selected && libConfig.album.folderPath
     ? libConfig.album.folderPath
@@ -2142,7 +2142,7 @@ const searchResultGroupLabel = computed(() => {
   if (tempViewMode.value === 'similar') {
     return (localeMsg.value as any).search?.group_similar || localeMsg.value.search.similar_images;
   }
-  if (config.main.sidebarIndex === 4 && (libConfig.tag as any).tab === 'smart') {
+  if (config.main.sidebarIndex === SIDEBAR.TAG && (libConfig.tag as any).tab === 'smart') {
     return (localeMsg.value as any).search?.group_visual || localeMsg.value.search.search_images;
   }
   if (config.main.sidebarIndex !== 2) return '';
@@ -2220,20 +2220,20 @@ const effectiveDateGrouping = computed(() => {
   if (sidebarIndex === 0 && libraryQuickItem.value === LIB_ITEM.TODAY && Number(libConfig.album.id || 0) === 0) {
     return DATE_GROUP.DAY;
   }
-  if (sidebarIndex === 3 && libConfig.calendar.year === -1) {
+  if (sidebarIndex === SIDEBAR.CALENDAR && libConfig.calendar.year === -1) {
     return DATE_GROUP.DAY;
   }
 
   // Calendar year view: group by month; month view: by day; day view: none
-  if (sidebarIndex === 3 && libConfig.calendar.year != null && libConfig.calendar.year !== -1) {
+  if (sidebarIndex === SIDEBAR.CALENDAR && libConfig.calendar.year != null && libConfig.calendar.year !== -1) {
     if (libConfig.calendar.month === -1) return DATE_GROUP.MONTH;
     if (libConfig.calendar.date === -1) return DATE_GROUP.DAY;
     return DATE_GROUP.NONE;
   }
 
   // Search / person / tag smart search: no date groups
-  if (sidebarIndex === 2 || sidebarIndex === 5) return DATE_GROUP.NONE;
-  if (sidebarIndex === 4 && (libConfig.tag as any).tab === 'smart') return DATE_GROUP.NONE;
+  if (sidebarIndex === SIDEBAR.SEARCH || sidebarIndex === SIDEBAR.PERSON) return DATE_GROUP.NONE;
+  if (sidebarIndex === SIDEBAR.TAG && (libConfig.tag as any).tab === 'smart') return DATE_GROUP.NONE;
 
   return settingsMode;
 });
@@ -2253,18 +2253,18 @@ const currentTitleIcon = computed(() => {
             }
             return libConfig.album.selected ? IconFolders : IconFolder;
           }
-          case 1:
+          case SIDEBAR.FAVORITE:
             switch (libConfig.favorite.folderId) {
               case 0: return IconHeart;
               case 1: return IconFolderFavorite;
               default: return IconFolderFavorite;
             }
-          case 2: return IconPhotoSearch;
-          case 3: return config.calendar.isMonthly ? IconCalendarMonth : IconCalendarDay;
-          case 4: return (libConfig.tag as any).tab === 'smart' ? IconSmartTag : IconTag;
-          case 5: return IconPersonSearch;
-          case 6: return IconLocation;
-          case 7: return IconCameraAperture;
+          case SIDEBAR.SEARCH: return IconPhotoSearch;
+          case SIDEBAR.CALENDAR: return config.calendar.isMonthly ? IconCalendarMonth : IconCalendarDay;
+          case SIDEBAR.TAG: return (libConfig.tag as any).tab === 'smart' ? IconSmartTag : IconTag;
+          case SIDEBAR.PERSON: return IconPersonSearch;
+          case SIDEBAR.LOCATION: return IconLocation;
+          case SIDEBAR.CAMERA: return IconCameraAperture;
           default: return IconFiles;
         }
       }
@@ -4204,8 +4204,8 @@ onMounted( async() => {
 
   // Face Indexing listeners
   unlistenFaceIndexProgress = await listenFaceIndexProgress((event: any) => {
-    // Clear file list if in Person view (sidebarIndex === 5) and file list is not empty
-    if (config.main.sidebarIndex === 5 && fileList.value.length > 0) {
+    // Clear file list if in Person view and file list is not empty
+    if (config.main.sidebarIndex === SIDEBAR.PERSON && fileList.value.length > 0) {
       fileList.value = [];
       totalFileCount.value = 0;
       totalFileSize.value = 0;
@@ -4317,7 +4317,7 @@ watch(
   () => {
     scheduleContentRefresh(() => {
       // Only update content if we are currently in the Image Search view
-      if (config.main.sidebarIndex === 2) {
+      if (config.main.sidebarIndex === SIDEBAR.SEARCH) {
         refreshContentFromSelectionChange();
       }
     });
@@ -4908,27 +4908,32 @@ async function getFileList(
   currentQuerySource.value = 'query';
   currentCollectionId.value = null;
   currentSmartParams.value = null;
+  // Coerce numerics: HTML <select> / pinia can leave strings that break Rust i64 IPC.
+  const toI64 = (v: unknown, fallback = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  };
   // Update current query params with all fields
   currentQueryParams.value = {
-    searchFileType,
-    sortType,
-    sortOrder,
+    searchFileType: toI64(searchFileType, 0),
+    sortType: toI64(sortType, 0),
+    sortOrder: toI64(sortOrder, 0),
     searchFileName,
     searchAllSubfolders,
     searchFolder,
-    startDate,
-    endDate,
-    calendarSort,
+    startDate: toI64(startDate, 0),
+    endDate: toI64(endDate, 0),
+    calendarSort: toI64(calendarSort, 0),
     make,
     model,
     lensMake,
     lensModel,
     locationAdmin1,
     locationName,
-    isFavorite,
-    rating,
-    tagId,
-    personId,
+    isFavorite: !!isFavorite,
+    rating: toI64(rating, -1),
+    tagId: toI64(tagId, 0),
+    personId: toI64(personId, 0),
   };
 
   // Set loading state
@@ -4943,10 +4948,11 @@ async function getFileList(
       return;
     }
 
-    if (result) {
+    // Treat [0, 0] as a valid empty result; only null/undefined means IPC failure.
+    if (result != null) {
       clearSelectionForFileListUpdate();
-      totalFileCount.value = result[0];
-      totalFileSize.value = result[1];
+      totalFileCount.value = Number(result[0] || 0);
+      totalFileSize.value = Number(result[1] || 0);
       
       // Get timeline data for date-based sorts
       getQueryTimeLine(currentQueryParams.value).then(data => {
@@ -5178,7 +5184,7 @@ async function updateContent(force = false) {
   fileList.value = [];
   isLoading.value = true;
 
-  if(newIndex === 0) {   // album / library
+  if(newIndex === SIDEBAR.LIBRARY) {   // album / library
     if(libConfig.album.id === null) {
       contentTitle.value = "";
     } else if(libConfig.album.id === 0) {   // library quick entries or all files
@@ -5228,7 +5234,7 @@ async function updateContent(force = false) {
                 }
                 if (
                   requestId !== currentContentRequestId ||
-                  config.main.sidebarIndex !== 0 ||
+                  config.main.sidebarIndex !== SIDEBAR.LIBRARY ||
                   libConfig.album.folderId !== folderId ||
                   libConfig.album.folderPath !== folderPath
                 ) return;
@@ -5266,7 +5272,7 @@ async function updateContent(force = false) {
       });
     }
   }
-  else if(newIndex === 1) {   // favorite
+  else if(newIndex === SIDEBAR.FAVORITE) {   // favorite
     if(libConfig.favorite.folderId === null) {
       contentTitle.value = "";
     } else {
@@ -5301,7 +5307,7 @@ async function updateContent(force = false) {
       }
     }
   }
-  else if(newIndex === 2) {   // image search
+  else if(newIndex === SIDEBAR.SEARCH) {   // image search
     if(libConfig.search.searchType === 0) {   // search
       if (libConfig.search.searchText) {
         contentTitle.value = localeMsg.value.search.search_images + ' - ' + libConfig.search.searchText;
@@ -5330,13 +5336,15 @@ async function updateContent(force = false) {
       }
     }
   }
-  else if(newIndex === 3) {   // calendar
-    if(libConfig.calendar.year === null) {
-      contentTitle.value = "";
+  else if(newIndex === SIDEBAR.CALENDAR) {   // calendar
+    if(libConfig.calendar.year === null || libConfig.calendar.year === undefined) {
+      // Wait for Calendar.vue to load dots and auto-select a day/month.
+      contentTitle.value = localeMsg.value.calendar?.title || localeMsg.value.menu?.calendar?.title || '';
       showEmptyContent(requestId);
     } else if (libConfig.calendar.year === -1) {  // on this day
       contentTitle.value = localeMsg.value.calendar.on_this_day;
-      getFileList({ startDate: -1, endDate: -1 }, requestId);
+      // Always use taken_date for on-this-day (month-day match), newest first.
+      getFileList({ startDate: -1, endDate: -1, calendarSort: 1, sortType: 0, sortOrder: 0 }, requestId);
     } else {
       if (libConfig.calendar.month === -1) {          // yearly
         contentTitle.value = formatDate(libConfig.calendar.year!, 1, 1, localeMsg.value.format.year);
@@ -5346,10 +5354,11 @@ async function updateContent(force = false) {
         contentTitle.value = formatDate(libConfig.calendar.year!, libConfig.calendar.month!, libConfig.calendar.date!, localeMsg.value.format.date_long);
       }
       const [startDate, endDate] = getCalendarDateRange(libConfig.calendar.year!, libConfig.calendar.month!, libConfig.calendar.date!);
-      getFileList({ startDate, endDate }, requestId);
+      // Pass calendarSort so range filter uses the same date column as calendar dots.
+      getFileList({ startDate, endDate, calendarSort: config.settings.calendarSort }, requestId);
     }
   } 
-  else if(newIndex === 4) {   // tag
+  else if(newIndex === SIDEBAR.TAG) {   // tag
     const tagTab = (libConfig.tag as any).tab === 'smart' ? 'smart' : 'custom';
     if (tagTab === 'smart') {
       const smartId = libConfig.tag.smartId;
@@ -5385,7 +5394,7 @@ async function updateContent(force = false) {
       }
     }
   }
-  else if(newIndex === 5) {   // person
+  else if(newIndex === SIDEBAR.PERSON) {   // person
     if (libConfig.person.id === null) {
       contentTitle.value = "";
       showEmptyContent(requestId);
@@ -5394,7 +5403,7 @@ async function updateContent(force = false) {
       getFileList({ personId: libConfig.person.id }, requestId);
     }
   }
-  else if(newIndex === 6) {   // location
+  else if(newIndex === SIDEBAR.LOCATION) {   // location
     if(libConfig.location.admin1 === null) {
       contentTitle.value = "";
       showEmptyContent(requestId);
@@ -5408,7 +5417,7 @@ async function updateContent(force = false) {
       } 
     }
   }
-  else if(newIndex === 7) {   // camera
+  else if(newIndex === SIDEBAR.CAMERA) {   // camera
     if ((libConfig.camera as any).tab === 'lens') {
       const lensMake = (libConfig.camera as any).lensMake;
       const lensModel = (libConfig.camera as any).lensModel;
@@ -5680,14 +5689,14 @@ function exitTempViewMode() {
 function handleTitleClick() {
   switch (tempViewMode.value) {
     case 'similar':
-      config.main.sidebarIndex = 2;   // search tab
+      config.main.sidebarIndex = SIDEBAR.SEARCH;
       libConfig.search.searchType = 1;   // similar image 
       break;
     case 'person':
-      config.main.sidebarIndex = 5;   // person tab
+      config.main.sidebarIndex = SIDEBAR.PERSON;
       break;
     case 'album':
-      config.main.sidebarIndex = 0;   // album tab
+      config.main.sidebarIndex = SIDEBAR.LIBRARY;
 
       // Get first file to extract album info
       const file = fileList.value[0];
@@ -6855,10 +6864,15 @@ const indexAndInsertSavedFile = async (filePath: string) => {
 const toggleFavorite = async () => {
   if (selectedItemIndex.value >= 0) {
     const item = fileList.value[selectedItemIndex.value];
+    const previous = item.is_favorite;
     item.is_favorite = !item.is_favorite;
-    // update the favorite status in the database
-    await setFileFavorite(item.id, item.is_favorite);
-    syncFileMetaToImageViewer(item.id, { is_favorite: item.is_favorite });
+    try {
+      await setFileFavorite(item.id, item.is_favorite);
+      syncFileMetaToImageViewer(item.id, { is_favorite: item.is_favorite });
+    } catch (error) {
+      item.is_favorite = previous;
+      console.error('Failed to toggle favorite:', error);
+    }
   }
 };
 
@@ -6868,11 +6882,15 @@ const selectModeSetFavorites = async (isFavorite: boolean) => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const result = await batchUpdateFileMetadata({
-      fileIds: items.map(item => item.id),
-      isFavorite,
-    });
-    if (result === null) return;
+    try {
+      await batchUpdateFileMetadata({
+        fileIds: items.map(item => item.id),
+        isFavorite,
+      });
+    } catch (error) {
+      console.error('Failed to batch-update favorites:', error);
+      return;
+    }
     items.forEach(item => {
       item.is_favorite = isFavorite;
     });
@@ -6894,10 +6912,16 @@ const toggleSelectModeFavorite = async () => {
 const setSelectedFileRating = async (rating: number) => {
   if (selectedItemIndex.value >= 0) {
     const item = fileList.value[selectedItemIndex.value];
+    const previous = item.rating;
     const normalized = item.rating === rating ? 0 : rating;
     item.rating = normalized;
-    await setFileRating(item.id, normalized);
-    syncFileMetaToImageViewer(item.id, { rating: normalized });
+    try {
+      await setFileRating(item.id, normalized);
+      syncFileMetaToImageViewer(item.id, { rating: normalized });
+    } catch (error) {
+      item.rating = previous;
+      console.error('Failed to set rating:', error);
+    }
   }
 };
 
@@ -6907,11 +6931,15 @@ const selectModeSetRatings = async (rating: number) => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const result = await batchUpdateFileMetadata({
-      fileIds: items.map(item => item.id),
-      rating: normalized,
-    });
-    if (result === null) return;
+    try {
+      await batchUpdateFileMetadata({
+        fileIds: items.map(item => item.id),
+        rating: normalized,
+      });
+    } catch (error) {
+      console.error('Failed to batch-update ratings:', error);
+      return;
+    }
     items.forEach(item => {
       item.rating = normalized;
     });
@@ -7007,11 +7035,15 @@ const clickRotate = async () => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const result = await batchUpdateFileMetadata({
-      fileIds: items.map(item => item.id),
-      rotateDelta: 90,
-    });
-    if (result === null) return;
+    try {
+      await batchUpdateFileMetadata({
+        fileIds: items.map(item => item.id),
+        rotateDelta: 90,
+      });
+    } catch (error) {
+      console.error('Failed to batch-rotate files:', error);
+      return;
+    }
     items.forEach(item => {
       item.rotate = ((Number(item.rotate) || 0) + 90) % 360;
     });
@@ -7024,16 +7056,20 @@ const clickRotate = async () => {
   }
 
   if (selectedItemIndex.value >= 0) {
-    fileList.value[selectedItemIndex.value].rotate += 90;
+    const item = fileList.value[selectedItemIndex.value];
+    const previous = Number(item.rotate) || 0;
+    item.rotate = previous + 90;
 
     // notify the image viewer
-    tauriEmit('message-from-content', { message: 'rotate', fileId: fileList.value[selectedItemIndex.value].id });
+    tauriEmit('message-from-content', { message: 'rotate', fileId: item.id });
 
-    // update the rotate status in the database
-    setFileRotate(fileList.value[selectedItemIndex.value].id, fileList.value[selectedItemIndex.value].rotate);
-    syncFileMetaToImageViewer(fileList.value[selectedItemIndex.value].id, {
-      rotate: fileList.value[selectedItemIndex.value].rotate,
-    });
+    try {
+      await setFileRotate(item.id, item.rotate);
+      syncFileMetaToImageViewer(item.id, { rotate: item.rotate });
+    } catch (error) {
+      item.rotate = previous;
+      console.error('Failed to rotate file:', error);
+    }
   }
 };
 
@@ -7059,11 +7095,15 @@ const onEditComment = async (newComment: any) => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const result = await batchUpdateFileMetadata({
-      fileIds: items.map(item => item.id),
-      comment: newComment,
-    });
-    if (result === null) return;
+    try {
+      await batchUpdateFileMetadata({
+        fileIds: items.map(item => item.id),
+        comment: newComment,
+      });
+    } catch (error) {
+      console.error('Failed to batch-update comments:', error);
+      return;
+    }
     items.forEach(item => {
       item.comments = newComment;
     });
@@ -7300,8 +7340,8 @@ const sortExtendOptions = computed(() => {
 });
 
 const isSearchLikeView = computed(() => {
-  return config.main.sidebarIndex === 2 || (
-    config.main.sidebarIndex === 4 && (libConfig.tag as any).tab === 'smart'
+  return config.main.sidebarIndex === SIDEBAR.SEARCH || (
+    config.main.sidebarIndex === SIDEBAR.TAG && (libConfig.tag as any).tab === 'smart'
   );
 });
 

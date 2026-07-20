@@ -13,23 +13,24 @@
       {{ yearTitle }}
     </div>
 
-    <!-- month list -->
+    <!-- month list: show month number; density still encodes count -->
     <div class="p-2 grid grid-cols-6 gap-x-2 gap-y-2 text-center">
       <div v-for="m in 12" 
         :key="m" 
         class="size-7 text-xs flex items-center justify-center rounded-box"
         :class="{
-          'bg-base-content/5 cursor-default scale-80': sumMonthCount(m) === 0,
-          'text-base-content/70 hover:text-base-content cursor-pointer': sumMonthCount(m) > 0,
+          'bg-base-content/5 text-base-content/20 cursor-default scale-80': sumMonthCount(m) === 0,
+          'text-base-content/80 hover:text-base-content cursor-pointer font-medium': sumMonthCount(m) > 0,
           'bg-base-content/20': sumMonthCount(m) > 0 && sumMonthCount(m) < 100,
           'bg-base-content/50': sumMonthCount(m) >= 100 && sumMonthCount(m) < 1000,
-          'bg-base-content/80': sumMonthCount(m) >= 1000,
-          'bg-primary/70 text-primary-content/70 hover:text-primary-content/70 selected-item': isSelected(year, m),
+          'bg-base-content/80 text-base-content': sumMonthCount(m) >= 1000,
+          'bg-primary/70 text-primary-content hover:text-primary-content selected-item': isSelected(year, m),
           'border border-base-content/20': isThisMonth(year, m),
         }"
+        :title="sumMonthCount(m) > 0 ? String(sumMonthCount(m)) : undefined"
         @click="sumMonthCount(m) > 0 ? clickDate(year, m) : null" 
       >
-        {{ sumMonthCount(m) > 0 ? (sumMonthCount(m) < 10000 ? sumMonthCount(m) : '9k+') : '' }}
+        {{ m }}
       </div>
     </div>
 
@@ -85,8 +86,8 @@ const isSelected = (year: number, month: number) => libConfig.calendar.year === 
 
 // click a year or a month to select it
 const clickDate = (year: number, month: number) => {
-  libConfig.calendar.year = year;
-  libConfig.calendar.month = month; // -1 means selecting a year
+  libConfig.calendar.year = Number(year);
+  libConfig.calendar.month = Number(month); // -1 means selecting a year
   libConfig.calendar.date = -1;   // -1 means selecting a month
 
   console.log('clickDate:', libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date);

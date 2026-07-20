@@ -364,7 +364,8 @@ const buttons = computed(() =>  [
 ]);
 
 // dedicated full-area heatmap view, shown instead of Content
-const MAP_SIDEBAR_INDEX = 9;
+// Absolute indices must match Home `buttons` order and Content `SIDEBAR` constants.
+const MAP_SIDEBAR_INDEX = 9; // SIDEBAR.MAP
 
 const visibleButtons = computed(() =>
   buttons.value
@@ -373,6 +374,7 @@ const visibleButtons = computed(() =>
 );
 
 watch(() => config.settings.face.enabled, (enabled) => {
+  // Person panel is absolute index 6 (SIDEBAR.PERSON) when face is enabled.
   if (!enabled && config.main.sidebarIndex === 6) {
     config.main.sidebarIndex = 0;
   }
@@ -505,10 +507,12 @@ function handleHomeKeyDown(event: KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
     if (!libraryEmpty.value) {
-      if (config.main.sidebarIndex === 2 && showPanel.value) {
+      // Search is absolute index 3 after Smart Albums was inserted at 1.
+      const SEARCH_SIDEBAR_INDEX = 3;
+      if (config.main.sidebarIndex === SEARCH_SIDEBAR_INDEX && showPanel.value) {
         nextTick(() => (panelRef.value as any)?.focusSearchInput?.());
       } else {
-        config.main.sidebarIndex = 2;
+        config.main.sidebarIndex = SEARCH_SIDEBAR_INDEX;
         showPanel.value = true;
       }
     }

@@ -841,6 +841,7 @@ export async function copyImages(filePaths) {
 }
 
 // rename a file
+// Contract: returns new path string on success, null on failure (callers already branch on null).
 export async function renameFile(fileId, filePath, newName) {
   try {
     const result = await invoke('rename_file', { fileId, filePath, newName });
@@ -848,20 +849,21 @@ export async function renameFile(fileId, filePath, newName) {
       return result;
     }
   } catch (error) {
-    console.log('Failed to rename file:', error);
+    console.error('Failed to rename file:', error);
   }
   return null;
 }
 
 // move a file
+// Contract: returns new path string on success, null on failure (callers already branch on null).
 export async function moveFile(fileId, filePath, newFolderId, newFolderPath, conflictPolicy = 'keep_both') {
   try {
     const result = await invoke('move_file', { fileId, filePath, newFolderId, newFolderPath, conflictPolicy });
-    if(result) {
+    if (result) {
       return result;
-    };
+    }
   } catch (error) {
-    console.log('Failed to move file:', error);
+    console.error('Failed to move file:', error);
   }
   return null;
 }
@@ -870,7 +872,7 @@ export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, co
   try {
     return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy });
   } catch (error) {
-    console.log('Failed to move file outside library:', error);
+    console.error('Failed to move file outside library:', error);
   }
   return null;
 }
@@ -1103,17 +1105,14 @@ export async function checkFileExists(filePath) {
   return false;
 }
 
-// set file rotate
+// set file rotate — rethrows so callers can distinguish failure from success
 export async function setFileRotate(fileId, fileRotate) {
   try {
-    const result = await invoke('set_file_rotate', { fileId, rotate: fileRotate % 360 });
-    if(result) {
-      return result;
-    };
+    return await invoke('set_file_rotate', { fileId, rotate: fileRotate % 360 });
   } catch (error) {
-    console.log('Failed to set file rotate:', error);
+    console.error('Failed to set file rotate:', error);
+    throw error;
   }
-  return null;
 }
 
 // get file has_tags status
@@ -1198,30 +1197,24 @@ export async function setFolderSearchExcluded(albumId, folderPath, isExcluded) {
   return null;
 }
 
-// set file favorite
+// set file favorite — rethrows; do not map errors to null (null looked like "no-op success")
 export async function setFileFavorite(fileId, isFavorite) {
   try {
-    const result = await invoke('set_file_favorite', { fileId, isFavorite });
-    if(result) {
-      return result;
-    };
+    return await invoke('set_file_favorite', { fileId, isFavorite });
   } catch (error) {
-    console.log('Failed to set file favorite:', error);
+    console.error('Failed to set file favorite:', error);
+    throw error;
   }
-  return null;
 }
 
-// set file rating
+// set file rating — rethrows so UI can tell DB failure from rating 0
 export async function setFileRating(fileId, rating) {
   try {
-    const result = await invoke('set_file_rating', { fileId, rating });
-    if(result !== null && result !== undefined) {
-      return result;
-    };
+    return await invoke('set_file_rating', { fileId, rating });
   } catch (error) {
-    console.log('Failed to set file rating:', error);
+    console.error('Failed to set file rating:', error);
+    throw error;
   }
-  return null;
 }
 
 export async function batchUpdateFileMetadata(params) {
@@ -1229,7 +1222,7 @@ export async function batchUpdateFileMetadata(params) {
     return await invoke('batch_update_file_metadata', { params });
   } catch (error) {
     console.error('Failed to update file metadata:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -1350,10 +1343,13 @@ export async function applyTagsToFiles(fileIds, addTagIds, removeTagIds) {
 
 // calendar
 
-// get taken dates
-export async function getTakenDates(sort = 0) {
+// get taken dates (calendar dots). Pass fileType so counts match the content filter.
+export async function getTakenDates(sort = 0, fileType = 0) {
   try {
-    const taken_dates = await invoke('get_taken_dates', { sort });
+    const taken_dates = await invoke('get_taken_dates', {
+      sort,
+      fileType: Number(fileType || 0),
+    });
     if (taken_dates) {
       return taken_dates;
     }

@@ -2,7 +2,7 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-20 (G2–G13 polish; G1/G7–G9 cancelled)._
+_Last reviewed: 2026-07-20 (correctness pack + calendar SIDEBAR index fix)._
 
 | Pattern | Use when |
 |---------|----------|
@@ -17,7 +17,8 @@ _Last reviewed: 2026-07-20 (G2–G13 polish; G1/G7–G9 cancelled)._
 | [change-batch-process.md](change-batch-process.md) | Changing batch wizard, action palette, templates, or `batch_process_images` |
 | [change-print-layout.md](change-print-layout.md) | Changing 冲印排版 packing, A4, export vs print-sized print, temp cache, or cell-sized decode |
 | [../../docs/guide/builtin-tools-roadmap.md](../../docs/guide/builtin-tools-roadmap.md) | Built-in tools roadmap: A/B/C1/C2 + print layout + collage magazine cells |
-| [change-face-index.md](change-face-index.md) | Changing face detection/embedding index workers, batch DB writes, or scan progress |
+| [change-face-index.md](change-face-index.md) | Changing face detection/embedding index workers, batch DB writes, clustering, or scan progress |
+| [change-calendar.md](change-calendar.md) | Calendar sidebar dots, day/month selection, on-this-day, or Content date-range empty list |
 | [change-library-perf.md](change-library-perf.md) | Large-library viewport loading or similar/semantic search performance |
 | [change-compare-viewer.md](change-compare-viewer.md) | Multi-pane image comparison (2/4-up) or viewport sync |
 | [change-collections.md](change-collections.md) | Collections tray, membership DB, or collection Content source |

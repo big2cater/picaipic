@@ -38,6 +38,7 @@ last_updated: 2026-07-20
 - Reuse Phase A photo/ratio presets for crop actions; custom ratios pass `ratio_w`/`ratio_h`.
 - C2: `border`/`expand` are pure geometry+fill; `watermark` needs a local image path; `text` loads a system TTF/TTC via `ab_glyph` (no bundled font asset).
 - **Optional library import (G2 MVP):** host returns `outputPaths` for successful writes. Wizard checkbox `batchProcess.importToLibrary` (default off). `Content.onBatchDone`: **saveAs** → sequential `importFile` into current album; **overwrite** → `updateFileInfo` only (never re-copy). No album → toast `batch.import_need_album`.
+- Hue slider range is **[-180, 180]**; brightness/contrast remain **[-100, 100]**. Do not fold `hue` into the brightness/contrast min branch (dead-code trap).
 
 ## Verify
 

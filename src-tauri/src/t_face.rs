@@ -1,6 +1,7 @@
 /**
  * Face Recognition module
- * Handles face detection (RetinaFace) and embedding (MobileFaceNet) using ONNX Runtime.
+ * Handles face detection (InsightFace SCRFD det_500m) and embedding (MobileFaceNet)
+ * using ONNX Runtime.
  */
 use crate::{t_cluster, t_common, t_sqlite};
 use image::DynamicImage;
@@ -67,7 +68,7 @@ struct Anchor {
 }
 
 pub struct FaceEngine {
-    detection_model: Option<Session>, // RetinaFace
+    detection_model: Option<Session>, // InsightFace SCRFD det_500m
     embedding_model: Option<Session>, // MobileFaceNet
 }
 
@@ -124,7 +125,7 @@ impl FaceEngine {
 
         let threads = intra_threads.max(1);
 
-        // Load Detection Model (RetinaFace)
+        // Load Detection Model (InsightFace SCRFD det_500m)
         let detection_model = Session::builder()
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -160,7 +161,7 @@ impl FaceEngine {
         let original_width = img.width() as f32;
         let original_height = img.height() as f32;
 
-        // RetinaFace typically expects 640x640 input, but works with any size divisible by 32 (stride 32).
+        // SCRFD (det_500m) expects a square letterboxed input; 640 is the training size.
         // Optimization: For small images (like thumbnails ~512px), use their native size slightly rounded up.
         // For large images, downscale to 640px max dimension.
         let max_dim = original_width.max(original_height);
@@ -193,7 +194,7 @@ impl FaceEngine {
             &rgb_buf
         };
 
-        // Standard InsightFace/RetinaFace preprocessing aligns to Top-Left (0,0)
+        // InsightFace SCRFD preprocessing aligns to Top-Left (0,0)
 
         // Normalize: (pixel - 127.5) / 128.0
         // Initialize with zeros (padding)
@@ -242,16 +243,25 @@ impl FaceEngine {
                 .map_err(|e| format!("Detection inference error: {}", e))?;
 
             let mut all_detections = Vec::new();
+            // SCRFD multi-level FPN: strides 8/16/32, two scales per cell.
+            // Bundled det_500m.onnx outputs (verified): scores [N,1], boxes [N,4], landmarks [N,10].
             let strides = [8, 16, 32];
-            let min_sizes = [[16, 32], [64, 128], [256, 512]]; // Standard RetinaFace config
+            let min_sizes = [[16, 32], [64, 128], [256, 512]];
 
-            // Map output indices based on observation
+            // Map output indices based on model export order
             // Scores, Boxes, Landmarks indices per stride
             let indices = [
                 (0, 3, 6), // Stride 8
                 (1, 4, 7), // Stride 16
                 (2, 5, 8), // Stride 32
             ];
+
+            if outputs.len() < 9 {
+                return Err(format!(
+                    "Unexpected detection model outputs: expected >= 9 tensors (SCRFD), got {}",
+                    outputs.len()
+                ));
+            }
 
             let confidence_threshold = 0.6;
 
@@ -261,10 +271,10 @@ impl FaceEngine {
                 let scores_tensor = &outputs[score_idx];
                 let boxes_tensor = &outputs[box_idx];
 
-                let (_, scores_data) = scores_tensor
+                let (scores_shape, scores_data) = scores_tensor
                     .try_extract_tensor::<f32>()
                     .map_err(|e| format!("Failed stride {} scores: {}", stride, e))?;
-                let (_, boxes_data) = boxes_tensor
+                let (boxes_shape, boxes_data) = boxes_tensor
                     .try_extract_tensor::<f32>()
                     .map_err(|e| format!("Failed stride {} boxes: {}", stride, e))?;
 
@@ -273,20 +283,34 @@ impl FaceEngine {
                 let anchors =
                     Self::generate_anchors(stride, &min_sizes[i], feature_map_w, feature_map_h);
 
+                // Guard against wrong architecture (e.g. classic RetinaFace class scores).
+                let score_count = scores_data.len();
+                let box_count = boxes_data.len() / 4;
+                if score_count != anchors.len() || box_count != anchors.len() {
+                    return Err(format!(
+                        "Detection tensor/anchor mismatch at stride {}: scores_shape={:?} ({}), boxes_shape={:?} ({}), anchors={}",
+                        stride,
+                        scores_shape.to_vec(),
+                        score_count,
+                        boxes_shape.to_vec(),
+                        box_count,
+                        anchors.len()
+                    ));
+                }
+
                 for (j, anchor) in anchors.iter().enumerate() {
+                    // SCRFD face score is a single channel per anchor (shape [N,1]).
                     let score = scores_data[j];
                     if score < confidence_threshold {
                         continue;
                     }
 
-                    // Decode box: [l, t, r, b] (distances from center, normalized by stride)
-                    // This assumes SCRFD model (det_10g.onnx) which outputs distances
+                    // Decode SCRFD distances [l, t, r, b] from anchor center, scaled by stride.
                     let l = boxes_data[j * 4];
                     let t = boxes_data[j * 4 + 1];
                     let r = boxes_data[j * 4 + 2];
                     let b = boxes_data[j * 4 + 3];
 
-                    // SCRFD uses stride-scaled distances
                     // x1 = cx - l * stride
                     // y1 = cy - t * stride
                     // x2 = cx + r * stride
@@ -345,8 +369,8 @@ impl FaceEngine {
         for y in 0..feature_h {
             for x in 0..feature_w {
                 for &_min_size in min_sizes {
-                    // Dense anchor centers
-                    // Adjusted to 0.0 (top-left) from 0.5 (center) to fix systematic bottom-right shift
+                    // SCRFD dense anchors: cell origin (x*stride, y*stride), not (x+0.5)*stride.
+                    // (Classic RetinaFace centers differ — do not "fix" this without re-checking det_500m.)
                     let cx = (x as f32) * stride as f32;
                     let cy = (y as f32) * stride as f32;
 

@@ -21,6 +21,7 @@ edges:
 last_updated: 2026-07-20
 ---
 
+
 # Conventions
 
 ## Naming
@@ -34,6 +35,7 @@ last_updated: 2026-07-20
 ## Structure
 
 - Vue views/components orchestrate UI; OS, database, indexing, and destructive file work stays in Rust behind `src-vite/src/common/api.js`.
+- Left-sidebar panel routing uses absolute indices from `Home.vue` `buttons` order. Prefer `SIDEBAR` in `src-vite/src/common/constants.ts` (`LIBRARY=0` … `CALENDAR=4` … `MAP=9`). Inserting a panel (e.g. Smart Albums at 1) shifts later indices — update constants and Content/Home together.
 - Register every new Tauri command in `src-tauri/src/main.rs` and add/update its frontend wrapper in `api.js`; long operations expose progress/cancel behavior through events and managed state.
 - Put SQLite schema evolution in ordered migrations in `t_migration.rs`; keep runtime queries in `t_sqlite.rs` and database location/backup/restore behavior in `t_storage.rs`.
 - Keep reusable state in Pinia stores and reusable UI in components; use Vue `<script setup>` and existing Tailwind/daisyUI patterns.
@@ -53,7 +55,9 @@ export async function operationName(value) {
   }
 }
 ```
-The Rust command must be registered in `main.rs`; event listeners must return/clean up the unlisten function when component-scoped.
+The Rust command must be registered in `main.rs`; event listeners must return/clean up the unlisten function when component-scoped. Mutating metadata (`setFileRating` / favorite / rotate / batch metadata) must rethrow; do not map failures to `null` when the UI optimistically updates. Query helpers may still return `null` for empty-vs-error ambiguity (known debt).
+
+**Sidebar routing pattern:** `Content.vue` `updateContent` switches on `config.main.sidebarIndex` using `SIDEBAR.*`. Calendar date selection only updates `libConfig.calendar`; Content must be on `SIDEBAR.CALENDAR` or the grid will not load that range. See `patterns/change-calendar.md`.
 
 **Rust error pattern:** production commands return `Result<T, String>` (or another explicit error type) and add operation context. Avoid `panic!`; locks/files/native calls need explicit failure handling. Multi-column updates must not swallow intermediate errors with `let _ =` when the overall operation is reported as success (see `edit_album`).
 

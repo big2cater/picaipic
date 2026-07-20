@@ -123,23 +123,19 @@ const sorted_calendar_items = computed(() => {
 onMounted(async () => {
   console.log('Calendar.vue mounted');
   await getCalendarDates();
-  
+  ensureCalendarSelection();
   // Scroll to selected date after data is loaded and DOM is updated
   scrollToSelected();
-
-  // if (calendar_dates.value.length === 0) {
-  //   libConfig.calendar.date = null;
-  //   libConfig.calendar.month = null;
-  //   libConfig.calendar.year = null;
-  // }
 });
 
 watch(() => [config.calendar.isMonthly, config.settings.calendarSort], () => {
   scrollToSelected();
 });
 
-watch(() => config.settings.calendarSort, async () => {
+watch(() => [config.settings.calendarSort, config.search.fileType], async () => {
   await getCalendarDates();
+  ensureCalendarSelection();
+  scrollToSelected();
 });
 
 function scrollToSelected() {
@@ -179,11 +175,67 @@ function switchToDailyView() {
   config.calendar.isMonthly = false;
 }
 
+/// Prefer a concrete day/month so Content never opens calendar with year=null ("未找到文件").
+function ensureCalendarSelection() {
+  const dates = calendar_dates.value;
+  const years = Object.keys(dates || {}).map(Number).filter((y) => y > 0);
+  if (years.length === 0) {
+    libConfig.calendar.year = null;
+    libConfig.calendar.month = null;
+    libConfig.calendar.date = null;
+    return;
+  }
+
+  const ascending = config.settings.calendarSort % 2 === 0;
+  years.sort((a, b) => (ascending ? a - b : b - a));
+
+  // Keep "On this day" (-1) and valid existing selections.
+  const curYear = libConfig.calendar.year;
+  if (curYear === -1) return;
+  if (
+    curYear != null
+    && dates[curYear]
+    && (
+      libConfig.calendar.month === -1
+      || (
+        libConfig.calendar.month != null
+        && dates[curYear][libConfig.calendar.month]
+        && (
+          libConfig.calendar.date === -1
+          || (libConfig.calendar.date != null
+            && dates[curYear][libConfig.calendar.month].some((d) => d.date === libConfig.calendar.date))
+        )
+      )
+    )
+  ) {
+    return;
+  }
+
+  // Pick the edge year/month/day that has photos (newest when sort is desc).
+  const pickYear = ascending ? years[years.length - 1] : years[0];
+  const months = Object.keys(dates[pickYear]).map(Number).sort((a, b) => (ascending ? a - b : b - a));
+  const month = ascending ? months[months.length - 1] : months[0];
+  const dayEntries = (dates[pickYear][month] || []).slice().sort((a, b) => (
+    ascending ? a.date - b.date : b.date - a.date
+  ));
+  const day = dayEntries[0]?.date ?? -1;
+
+  libConfig.calendar.year = pickYear;
+  libConfig.calendar.month = month;
+  // Monthly view selects the whole month; daily view selects a concrete day with photos.
+  libConfig.calendar.date = config.calendar.isMonthly ? -1 : day;
+}
+
 /// fetch calendar dates
 async function getCalendarDates() {
-  const taken_dates = await getTakenDates(config.settings.calendarSort);
-  if(taken_dates) {
+  const taken_dates = await getTakenDates(
+    config.settings.calendarSort,
+    config.search.fileType,
+  );
+  if (taken_dates) {
     calendar_dates.value = transformArray(taken_dates);
+  } else {
+    calendar_dates.value = {};
   }
 }
 

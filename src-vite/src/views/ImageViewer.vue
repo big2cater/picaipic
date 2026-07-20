@@ -1554,9 +1554,15 @@ const toggleFavorite = async (pane: ViewerPane = 'left') => {
   const currentFileId = getFileIdByPane(pane);
   if (!target || currentFileId <= 0) return;
 
+  const previous = target.is_favorite;
   target.is_favorite = !target.is_favorite;
-  await setFileFavorite(currentFileId, target.is_favorite);
-  syncFileMetaToContent(currentFileId, { is_favorite: target.is_favorite });
+  try {
+    await setFileFavorite(currentFileId, target.is_favorite);
+    syncFileMetaToContent(currentFileId, { is_favorite: target.is_favorite });
+  } catch (error) {
+    target.is_favorite = previous;
+    console.error('Failed to toggle favorite:', error);
+  }
 };
 
 const setCurrentFileRating = async (rating: number, pane: ViewerPane = 'left') => {
@@ -1564,10 +1570,16 @@ const setCurrentFileRating = async (rating: number, pane: ViewerPane = 'left') =
   const currentFileId = getFileIdByPane(pane);
   if (!target || currentFileId <= 0) return;
 
+  const previous = target.rating;
   const normalized = Number(target.rating || 0) === rating ? 0 : rating;
   target.rating = normalized;
-  await setFileRating(currentFileId, normalized);
-  syncFileMetaToContent(currentFileId, { rating: normalized });
+  try {
+    await setFileRating(currentFileId, normalized);
+    syncFileMetaToContent(currentFileId, { rating: normalized });
+  } catch (error) {
+    target.rating = previous;
+    console.error('Failed to set rating:', error);
+  }
 };
 
 const clickRotate = async (pane: 'left' | 'right' = 'left') => {
@@ -1576,10 +1588,16 @@ const clickRotate = async (pane: 'left' | 'right' = 'left') => {
   const viewerRef = getViewerRef(pane);
   if (!target || currentFileId <= 0) return;
 
-  target.rotate = (Number(target.rotate) || 0) + 90;
+  const previous = Number(target.rotate) || 0;
+  target.rotate = previous + 90;
   viewerRef?.rotateRight?.();
-  await setFileRotate(currentFileId, target.rotate);
-  syncFileMetaToContent(currentFileId, { rotate: target.rotate });
+  try {
+    await setFileRotate(currentFileId, target.rotate);
+    syncFileMetaToContent(currentFileId, { rotate: target.rotate });
+  } catch (error) {
+    target.rotate = previous;
+    console.error('Failed to rotate file:', error);
+  }
 };
 
 const clickTag = (pane: 'left' | 'right' = 'left') => {

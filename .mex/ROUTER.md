@@ -20,6 +20,7 @@ last_updated: 2026-07-20
 ---
 
 
+
 # Session Bootstrap
 
 Read root `AGENTS.md`, then this file, then the routed context and matching pattern before changing code.
@@ -44,7 +45,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Built-in **Phase C1–C2 batch** (2026-07-18): multi-select 批处理 wizard — composable actions including border/expand/watermark/text; templates; progress/cancel; host `batch_process_images` — `patterns/change-batch-process.md`.
 - Dialog safety (2026-07-19): collage draft save/delete + batch template save/delete/overwrite use `MessageBox` / plugin-dialog `ask` only — no `window.prompt`/`window.confirm` (WebView no-op risk). Free collage rotate source headroom uses true AABB.
 - Batch process **parallel workers** (2026-07-19): serial dest planning + JoinSet concurrency (2–8); GridView VirtualScroll buffer 4→8. SearchBox submits on Enter only (no per-key SQLite). Face index **CPU parallel** (2026-07-19): 2–4 worker engines + batched SQLite writes; GPU EP still future.
-- **Smart Albums / 智能相册** (2026-07-19): rule SQL + sidebar list/editor + Content smart source — .
+- **Smart Albums / 智能相册** (2026-07-19): rule SQL + sidebar list/editor + Content smart source — `patterns/change-smart-albums.md`. Inserted at absolute sidebar index 1 (`SIDEBAR.SMART`); later panels shifted — always use `SIDEBAR` constants.
 - **Collections / 集合** (2026-07-19): SQLite membership + left-sidebar tray + drag-add + Content `collection` query source — `patterns/change-collections.md`.
 - Large-library **search perf** (2026-07-19): `cosine_similarity_blob` + chunked `get_files_by_ids`; semantic search defers bulk thumbs to viewport — `patterns/change-library-perf.md`.
 - **Library polish Phase 5** (2026-07-19): Library sidebar All/Favorites/On this day quick entries + Content view-adaptive date grouping (`effectiveDateGrouping` → GridView) — `patterns/change-library-shortcuts.md`.
@@ -63,6 +64,14 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **G11 print magazine pack** (2026-07-20): free-rect `magazine` strategy + auto scoring — `printLayout.ts`.
 - **G12 export-only DPI** (2026-07-20): DPI under Export options; Export DPI copy — `PrintLayoutDialog.vue`.
 - **G13 system print UX** (2026-07-20): hint that printer/tray is system dialog only; no host `print_file`.
+- **Correctness fixes (2026-07-20):**
+  - Face clustering is **incremental**: preserves existing person names/assignments; only unassigned faces join clusters or create new `Person N` — `t_cluster.rs`, `Face::get_all_for_clustering` includes `person_id`.
+  - Face detector naming/IO aligned to **SCRFD det_500m** with output/anchor mismatch fail-closed — `t_face.rs`, `t_common.rs`.
+  - DB storage move/reset clears conn pool after migrate — `t_cmds.rs` (`change_db_storage_dir` / `reset_db_storage_dir`).
+  - Collage host rejects source count > cell count (no silent drop) — `t_image.rs`.
+  - Batch dialog: hue min **-180**, removed `&& false` dead disable — `BatchProcessDialog.vue`.
+  - Dedup skips rows without `file.id` instead of `unwrap` panic — `t_dedup.rs`.
+  - **Calendar empty list (root cause):** after Smart Albums was inserted at sidebar index 1, `Content.vue` still treated calendar as index `3` (now Search). Calendar is absolute index `4`. Fixed via `SIDEBAR` constants in `constants.ts` and rewired Content/Home routing. Also: local-day SQL filter, month/day number UI on dots, numeric QueryParams coercion.
 
 **Cancelled / deferred (owner 2026-07-20):**
 - **G1** collage-as-batch-action (C3 insert) — cancelled.
@@ -75,9 +84,11 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Remote signing CRL / dual-sign key-transition artifacts; recurring release-exe plugin regression after host changes.
 - Broader HEIC sequence sample coverage; broader automated coverage outside plugin-host + current Rust unit tests.
 - Publish v1.1.0 draft release (owner decision; repo remains private for now).
-- Commit remaining G10–G13 + docs if not yet on `main` tip.
+- Commit remaining G10–G13 + correctness pack + calendar SIDEBAR fix if not yet on `main` tip.
 
 **Known issues / active risks:**
+- `api.js` still swallows many non-mutating IPC errors as `null`/`false`. Mutating metadata paths (`setFileRating` / `setFileFavorite` / `setFileRotate` / `batchUpdateFileMetadata`) now rethrow; broader get-* cleanup is still open.
+- Adding a new left-sidebar button **shifts absolute indices** — update `SIDEBAR` in `constants.ts` and every `updateContent` / shortcut branch; never hard-code calendar as `3`.
 - Packaged-plugin behavior must be checked in the release executable; dev-mode success alone does not prove installer/resource/runtime correctness.
 - GitHub Actions **artifact storage quota** can fail uploads even when builds succeed; prefer Release assets for installers; PR upload is best-effort.
 - Release Rust builds can fail at local MSVC/CRT link time in native deps (ONNX/LibRaw) even when `cargo check` passes.
@@ -98,7 +109,8 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Set up, run, verify, or package | `context/setup.md` |
 | Change AI plugin host, manifest, runtime, task, trust, or sandbox | `context/plugin-runtime.md` |
 | Change Live Photo / Motion Photo detection, pairing, or preview | `patterns/change-live-photo.md` |
-| Change face indexing performance or scan DB batching | `patterns/change-face-index.md` |
+| Change face indexing performance, clustering, or scan DB batching | `patterns/change-face-index.md` |
+| Change calendar dots, day/month selection, or empty calendar content | `patterns/change-calendar.md` |
 | Change AI PNG prompt import into comments | `patterns/change-ai-prompt-import.md` |
 | Change thumbnail media-info badges | `patterns/change-media-badges.md` |
 | Change image viewer background modes | `patterns/change-viewer-background.md` |

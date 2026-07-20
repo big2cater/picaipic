@@ -21,19 +21,19 @@
         :key="d.date"
         class="size-6 p-1 text-xs flex items-center justify-center rounded-box"
         :class="{
-          'bg-base-content/5 cursor-default scale-80': d.count === 0 && isWeekend(d.date),
-          'bg-base-content/10 cursor-default scale-80': d.count === 0 && !isWeekend(d.date),
-          'text-base-content/70 hover:text-base-content cursor-pointer': d.count > 0,
+          'bg-base-content/5 text-base-content/20 cursor-default scale-80': d.count === 0 && isWeekend(d.date),
+          'bg-base-content/10 text-base-content/25 cursor-default scale-80': d.count === 0 && !isWeekend(d.date),
+          'text-base-content/80 hover:text-base-content cursor-pointer font-medium': d.count > 0,
           'bg-base-content/20': d.count > 0 && d.count < 10,
           'bg-base-content/50': d.count >= 10 && d.count < 100,
-          'bg-base-content/80 text-[10px]': d.count >= 100,
-          'bg-primary/70 text-primary-content/70 hover:text-primary-content/70 selected-item': isSelected(year, month, d.date),
+          'bg-base-content/80 text-base-content': d.count >= 100,
+          'bg-primary/70 text-primary-content hover:text-primary-content selected-item': isSelected(year, month, d.date),
           'border border-base-content/20': isTodayFn(d.date),
         }"
+        :title="d.count > 0 ? String(d.count) : undefined"
         @click="d.count > 0 ? clickDate(year, month, d.date): null"
       >
-        {{ d.count > 0 ? (d.count < 1000 ? d.count : '999+') : '' }}
-        <!-- {{ Number(d.date) }} -->
+        {{ Number(d.date) }}
       </div>
     </div>
 
@@ -121,9 +121,9 @@ function getMonthDates(year: number, month: number, dates: DateItem[] = []) {
 
 // click a date to select it
 const clickDate = (year: number, month: number, date: number) => {
-  libConfig.calendar.year = year;
-  libConfig.calendar.month = month; // -1 means selecting a year
-  libConfig.calendar.date = date;   // -1 means selecting a month
+  libConfig.calendar.year = Number(year);
+  libConfig.calendar.month = Number(month); // -1 means selecting a year
+  libConfig.calendar.date = Number(date);   // -1 means selecting a month
 
   console.log('clickDate:', libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date);
 };

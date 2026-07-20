@@ -60,7 +60,8 @@ pub const AI_TOKENIZER: &str = "tokenizer.json";
 // Face Recognition Constants
 
 // models
-pub const DETECTION_MODEL: &str = "det_500m.onnx"; // RetinaFace
+// InsightFace SCRFD-500m (det_500m.onnx): 9 outputs (scores/boxes/landmarks × 3 strides)
+pub const DETECTION_MODEL: &str = "det_500m.onnx";
 pub const EMBEDDING_MODEL: &str = "w600k_mbf.onnx"; // MobileFaceNet
 
 // Quality thresholds - Recommended Values

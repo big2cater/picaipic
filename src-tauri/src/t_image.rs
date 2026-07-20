@@ -1458,6 +1458,14 @@ pub async fn export_collage(params: CollageExportParams) -> Result<bool, String>
     if cell_count == 0 {
         return Err("Invalid collage template".to_string());
     }
+    // Fixed grids have a hard cell budget; refuse silent truncation of extra sources.
+    // Strip templates expand with image_count (see collage_grid_dims), so they won't hit this.
+    if image_count > cell_count {
+        return Err(format!(
+            "Collage template has {} cells but {} images were provided; remove extras or pick a larger template",
+            cell_count, image_count
+        ));
+    }
 
     let out_w = params.output_width.max(64).min(8192);
     let out_h = params.output_height.max(64).min(8192);
@@ -1541,6 +1549,18 @@ async fn export_collage_cells(params: CollageExportParams) -> Result<bool, Strin
     let cells = params.cells.clone().unwrap_or_default();
     if cells.is_empty() {
         return Err("No collage cells".to_string());
+    }
+    let image_count = params
+        .source_file_paths
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .count();
+    if image_count > cells.len() {
+        return Err(format!(
+            "Collage has {} cells but {} images were provided; remove extras or pick a larger template",
+            cells.len(),
+            image_count
+        ));
     }
 
     let out_w = params.output_width.max(64).min(8192);

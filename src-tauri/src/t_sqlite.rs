@@ -2434,8 +2434,16 @@ impl AFile {
         Ok(result)
     }
 
+    /// Exclude Apple Live Photo companion videos from normal browsing lists.
+    /// Matches Lap v0.3 library browsing: type 2 is kept linked but hidden from grids.
+    fn live_photo_companion_exclusion_condition() -> &'static str {
+        "COALESCE(a.live_photo_type, 0) != 2"
+    }
+
     /// get all taken dates from db
-    pub fn get_taken_dates(sort: i64) -> Result<Vec<(String, i64)>, String> {
+    /// `file_type_mask` matches QueryParams.search_file_type so calendar dots
+    /// stay consistent with the active file-type filter in the content list.
+    pub fn get_taken_dates(sort: i64, file_type_mask: i64) -> Result<Vec<(String, i64)>, String> {
         let conn = open_conn()?;
 
         // sort encodes both the date column and direction:
@@ -2455,13 +2463,30 @@ impl AFile {
             "strftime('%Y-%m-%d', {}, 'unixepoch', 'localtime')",
             date_col
         );
+
+        // Keep the same filters as content queries so a day with dots never opens empty
+        // just because calendar ignored file-type / folder-exclusion / Live companions.
+        let mut conditions = vec![
+            format!("{} IS NOT NULL", date_col),
+            format!("{} >= 86400", date_col),
+            Self::live_photo_companion_exclusion_condition().to_string(),
+            Self::search_exclusion_condition("b"),
+        ];
+        if let Some(file_type_condition) = Self::build_file_type_condition(file_type_mask) {
+            conditions.push(file_type_condition);
+        }
+
         let query = format!(
             "SELECT {} AS group_date, COUNT(1)
             FROM afiles a
-            WHERE {} IS NOT NULL AND {} >= 86400
+            LEFT JOIN afolders b ON a.folder_id = b.id
+            WHERE {}
             GROUP BY {}
             ORDER BY group_date {}",
-            date_expr, date_col, date_col, date_expr, order_clause
+            date_expr,
+            conditions.join(" AND "),
+            date_expr,
+            order_clause
         );
 
         let mut stmt = conn
@@ -2481,9 +2506,10 @@ impl AFile {
     // get total count and size of files
     pub fn get_total_count_and_sum() -> Result<(i64, i64), String> {
         let sql = format!(
-            "{} WHERE {}",
+            "{} WHERE {} AND {}",
             Self::build_count_query(),
-            Self::search_exclusion_condition("b")
+            Self::search_exclusion_condition("b"),
+            Self::live_photo_companion_exclusion_condition()
         );
         Self::query_count_and_sum(&sql, &[])
     }
@@ -2492,7 +2518,9 @@ impl AFile {
     // Returns (joins_clause, where_clause, params)
     fn build_search_query_parts(params: &QueryParams) -> (String, String, Vec<Box<dyn ToSql>>) {
         let mut joins = Vec::new();
-        let mut conditions: Vec<String> = Vec::new();
+        // Always hide Live companion videos in normal query lists (Lap-compatible).
+        let mut conditions: Vec<String> =
+            vec![Self::live_photo_companion_exclusion_condition().to_string()];
         let mut sql_params: Vec<Box<dyn ToSql>> = Vec::new();
 
         if !params.search_file_name.is_empty() {
@@ -2527,15 +2555,32 @@ impl AFile {
                 2 => "a.modified_at",
                 _ => "a.taken_date",
             };
-            conditions.push(format!("{} >= ? AND {} < ?", date_col, date_col));
+            // Compare by local calendar day (same expression as get_taken_dates), not raw
+            // unix-second ranges. This avoids JS timezone / float boundary mismatches that
+            // produced "dots with counts but empty content list".
+            conditions.push(format!(
+                "strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                 >= strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime') \
+                 AND strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                 < strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime')",
+                date_col
+            ));
             sql_params.push(Box::new(params.start_date));
             sql_params.push(Box::new(params.end_date));
         } else if params.start_date == -1 && params.end_date == -1 {
             // "On This Day" feature: find all photos taken on the same month and day as today
             let now = chrono::Local::now();
             let today_month_day = now.format("%m-%d").to_string();
-            conditions
-                .push("strftime('%m-%d', a.taken_date, 'unixepoch', 'localtime') = ?".to_string());
+            let date_col = match params.calendar_sort / 2 {
+                0 => "a.taken_date",
+                1 => "a.created_at",
+                2 => "a.modified_at",
+                _ => "a.taken_date",
+            };
+            conditions.push(format!(
+                "strftime('%m-%d', {}, 'unixepoch', 'localtime') = ?",
+                date_col
+            ));
             sql_params.push(Box::new(today_month_day));
         }
 
@@ -4979,20 +5024,23 @@ impl Face {
         Ok(faces)
     }
 
-    /// Get slim face data for clustering: (face_id, file_id, embedding_bytes)
-    /// Avoids loading full Face structs (bbox JSON, person_id, created_at) to reduce memory
-    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<Vec<u8>>)>, String> {
+    /// Get slim face data for clustering: (face_id, file_id, person_id, embedding_bytes)
+    /// Avoids loading full Face structs (bbox JSON, created_at) to reduce memory.
+    /// person_id is preserved so re-clustering can keep manual / prior assignments.
+    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<i64>, Option<Vec<u8>>)>, String>
+    {
         let conn = open_conn()?;
         let mut stmt = conn
-            .prepare("SELECT id, file_id, embedding FROM faces")
+            .prepare("SELECT id, file_id, person_id, embedding FROM faces")
             .map_err(|e| e.to_string())?;
 
         let faces = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
                 let file_id: i64 = row.get(1)?;
-                let embedding: Option<Vec<u8>> = row.get(2)?;
-                Ok((id, file_id, embedding))
+                let person_id: Option<i64> = row.get(2)?;
+                let embedding: Option<Vec<u8>> = row.get(3)?;
+                Ok((id, file_id, person_id, embedding))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
@@ -5001,7 +5049,34 @@ impl Face {
         Ok(faces)
     }
 
-    /// Reset all face assignments and delete all persons (for re-clustering)
+    /// Next free "Person N" suffix for auto-created clusters (does not reuse existing numbers).
+    pub fn next_auto_person_number() -> Result<usize, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT name FROM persons WHERE name LIKE 'Person %'")
+            .map_err(|e| e.to_string())?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, Option<String>>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut max_n: usize = 0;
+        for name in names {
+            let name = name.map_err(|e| e.to_string())?;
+            let Some(name) = name else {
+                continue;
+            };
+            if let Some(rest) = name.strip_prefix("Person ") {
+                if let Ok(n) = rest.trim().parse::<usize>() {
+                    max_n = max_n.max(n);
+                }
+            }
+        }
+        Ok(max_n.saturating_add(1).max(1))
+    }
+
+    /// Reset all face assignments and delete all persons.
+    /// Kept for explicit full-reset paths only — normal re-clustering must not call this.
+    #[allow(dead_code)]
     pub fn reset_all_assignments() -> Result<(), String> {
         let conn = open_conn()?;
 

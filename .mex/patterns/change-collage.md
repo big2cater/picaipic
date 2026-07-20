@@ -1,7 +1,7 @@
 ---
 name: change-collage
 description: Runbook for template/strip/free/magazine collage (拼图) UI and host export with cell-sized source decode.
-last_updated: 2026-07-19
+last_updated: 2026-07-20
 ---
 
 # Change collage / 拼图 (Phase B1–B3 + magazine cells + free drafts)
@@ -40,6 +40,7 @@ last_updated: 2026-07-19
 - **Never use `window.prompt` / `window.confirm`** in Tauri UI — WebView (esp. WebKit) may no-op and return null/false/undefined. Draft rename uses in-app `MessageBox` (showInput); delete uses `@tauri-apps/plugin-dialog` `ask`.
 - Free export empty-guard: `exportDisabled` + `doExport` both check `freeItems.length === 0` before host invoke.
 - Free rotate source budget: host `rotated_box_source_need` uses true AABB (`|w·cos|+|h·sin|`) so ~45° does not undersample (was fixed 1.15×).
+- **No silent truncation (2026-07-20):** fixed-grid / cells export returns `Err` when non-empty source paths exceed cell count. UI still shows `using_n_of_m` and should slice before invoke; host is the hard guard. Strips expand with `image_count` and are unaffected.
 
 ## Verify
 

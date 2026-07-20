@@ -161,17 +161,25 @@ export function getCalendarDateRange(year: number, month: number, date: number) 
   let startDate = 0;
   let endDate = 0;
 
-  if (month === -1) { // -1 means selecting a year
-    startDate = new Date(year, 0, 1).getTime() / 1000;
-    endDate = new Date(year + 1, 0, 1).getTime() / 1000;
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(date);
+
+  // Integer unix seconds — matches SQLite afiles.*_date i64 storage.
+  const toUnix = (yy: number, m0: number, dd: number) =>
+    Math.floor(new Date(yy, m0, dd).getTime() / 1000);
+
+  if (m === -1) { // -1 means selecting a year
+    startDate = toUnix(y, 0, 1);
+    endDate = toUnix(y + 1, 0, 1);
   }
-  else if (date === -1) { // -1 means selecting a month
-    startDate = new Date(year, month - 1, 1).getTime() / 1000;
-    endDate = new Date(year, month, 1).getTime() / 1000;
+  else if (d === -1) { // -1 means selecting a month
+    startDate = toUnix(y, m - 1, 1);
+    endDate = toUnix(y, m, 1);
   }
   else {  // otherwise, get files by date
-    startDate = new Date(year, month - 1, date).getTime() / 1000;
-    endDate = new Date(year, month - 1, date + 1).getTime() / 1000;
+    startDate = toUnix(y, m - 1, d);
+    endDate = toUnix(y, m - 1, d + 1);
   }
   return [startDate, endDate];
 }

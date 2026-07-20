@@ -102,7 +102,10 @@ pub fn change_db_storage_dir(
     status_state: State<t_face::FaceIndexingStatus>,
 ) -> Result<String, String> {
     ensure_db_storage_change_allowed(&status_state)?;
-    t_storage::change_db_storage_dir(new_dir)
+    let path = t_storage::change_db_storage_dir(new_dir)?;
+    // Drop pooled connections still holding handles to the old DB paths.
+    t_sqlite::clear_conn_pool();
+    Ok(path)
 }
 
 #[tauri::command]
@@ -110,7 +113,10 @@ pub fn reset_db_storage_dir(
     status_state: State<t_face::FaceIndexingStatus>,
 ) -> Result<String, String> {
     ensure_db_storage_change_allowed(&status_state)?;
-    t_storage::reset_db_storage_dir()
+    let path = t_storage::reset_db_storage_dir()?;
+    // Drop pooled connections still holding handles to the old DB paths.
+    t_sqlite::clear_conn_pool();
+    Ok(path)
 }
 
 #[tauri::command]
@@ -703,6 +709,34 @@ pub async fn copy_images(
     t_image::copy_files_to_clipboard(&app_handle, file_paths).await
 }
 
+/// Best-effort: re-read on-disk mtime/inode into afiles after rename/move.
+/// Keeps sort-by-modified and dedup mtime/inode checks from going stale.
+fn refresh_file_disk_metadata(file_id: i64, disk_path: &str) {
+    match t_utils::FileInfo::new(disk_path) {
+        Ok(info) => {
+            if let Some(modified) = info.modified {
+                if let Err(e) = AFile::update_column(file_id, "modified_at", &modified) {
+                    eprintln!(
+                        "Failed to update modified_at after path change (id={}, path={}): {}",
+                        file_id, disk_path, e
+                    );
+                }
+            }
+            let inode = info.inode as i64;
+            if let Err(e) = AFile::update_column(file_id, "inode", &inode) {
+                eprintln!(
+                    "Failed to update inode after path change (id={}, path={}): {}",
+                    file_id, disk_path, e
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "Failed to read disk metadata after path change (id={}, path={}): {}",
+            file_id, disk_path, e
+        ),
+    }
+}
+
 /// rename a file
 #[tauri::command]
 pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<String> {
@@ -740,7 +774,10 @@ pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<Stri
     }
 
     match AFile::update_column(file_id, "name", &new_name) {
-        Ok(_) => Some(new_file_path),
+        Ok(_) => {
+            refresh_file_disk_metadata(file_id, &new_file_path);
+            Some(new_file_path)
+        }
         Err(e) => {
             eprintln!("Error while renaming file in DB: {}", e);
             // Best-effort restore of name_pinyin so partial DB state is not left behind.
@@ -826,7 +863,9 @@ pub fn move_file(
         let _ = Album::recount_album(album_id);
     }
 
-    transfer.finalize()
+    let final_path = transfer.finalize()?;
+    refresh_file_disk_metadata(file_id, &final_path);
+    Ok(final_path)
 }
 
 /// move a file outside the library and remove its database record
@@ -1748,10 +1787,11 @@ pub fn apply_tags_to_files(
 
 // calendar
 
-/// get camera's taken dates
+/// get calendar day counts (taken/created/modified depending on sort)
 #[tauri::command]
-pub fn get_taken_dates(sort: i64) -> Result<Vec<(String, i64)>, String> {
-    AFile::get_taken_dates(sort).map_err(|e| format!("Error while getting taken dates: {}", e))
+pub fn get_taken_dates(sort: i64, file_type: Option<i64>) -> Result<Vec<(String, i64)>, String> {
+    AFile::get_taken_dates(sort, file_type.unwrap_or(0))
+        .map_err(|e| format!("Error while getting taken dates: {}", e))
 }
 
 // camera

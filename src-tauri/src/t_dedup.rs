@@ -178,19 +178,22 @@ fn scan_and_hash_files(
         let needs_hash = check_if_needs_hash(&tx, &file)?;
 
         if needs_hash {
+            let Some(file_id) = file.id else {
+                continue;
+            };
             if let Some(path) = &file.file_path {
                 match compute_blake3_hash(path) {
                     Ok(hash) => {
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or_default()
                             .as_secs() as i64;
                         let mtime = file.modified_at.unwrap_or(0);
 
                         tx.execute(
                             "INSERT OR REPLACE INTO file_hashes (file_id, hash, file_size, mtime, computed_at)
                              VALUES (?1, ?2, ?3, ?4, ?5)",
-                            params![file.id.unwrap(), hash, file.size, mtime, now],
+                            params![file_id, hash, file.size, mtime, now],
                         ).map_err(|e| e.to_string())?;
                     }
                     Err(e) => eprintln!("Failed to hash file {}: {}", path, e),
@@ -394,7 +397,10 @@ fn filter_suspicious_files(files: Vec<AFile>) -> Vec<AFile> {
 
 fn check_if_needs_hash(conn: &Connection, file: &AFile) -> Result<bool, String> {
     let mtime = file.modified_at.unwrap_or(0);
-    let id = file.id.unwrap();
+    let Some(id) = file.id else {
+        // Rows without an id cannot be hashed into file_hashes; treat as no-op.
+        return Ok(false);
+    };
 
     let db_mtime: Option<i64> = conn
         .query_row(

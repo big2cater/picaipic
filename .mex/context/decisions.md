@@ -19,9 +19,26 @@ edges:
 last_updated: 2026-07-20
 ---
 
+
 # Decisions
 
 ## Decision Log
+
+### Calendar empty content was sidebar-index drift, not empty library
+**Date:** 2026-07-20  
+**Status:** Active (shipped)  
+**Decision:** Treat left-sidebar indices as a named `SIDEBAR` contract in `constants.ts`. After Smart Albums was inserted at index 1, Content must route calendar at **4** (not legacy 3). Calendar day counts and file queries share file-type / exclusion / Live-companion filters and local-day `strftime` comparison.  
+**Reasoning:** Users saw dots with counts but “未找到文件” because clicks updated `libConfig.calendar` while Content still ran the search branch. Packaging/cache was a red herring.  
+**Alternatives considered:** Hard-coded numeric fix only in the calendar branch (rejected: same class of bug remains for tags/person/shortcuts); clearing WebView cache (rejected: does not change routing).  
+**Consequences:** All new sidebar buttons require updating `SIDEBAR` + Content/Home. Runbook: `patterns/change-calendar.md`.
+
+### Incremental face clustering preserves manual person labels
+**Date:** 2026-07-20  
+**Status:** Active (shipped)  
+**Decision:** `cluster_faces` no longer calls `reset_all_assignments` on normal re-index. Existing `person_id` assignments are frozen seeds; only unassigned faces join clusters or create new `Person N` via `next_auto_person_number`.  
+**Reasoning:** Full wipe destroyed renames/merges on every face index — high-severity UX bug for a photo manager.  
+**Alternatives considered:** Post-cluster name remapping only (weaker for manual splits); schema `is_manual` flag (deferred — frozen assignments already preserve user edits).  
+**Consequences:** Explicit full-reset paths may still use `reset_all_assignments`. See `patterns/change-face-index.md`.
 
 ### Gap triage 2026-07-20: cancel G1/G7/G8/G9; ship G2/G6/G10–G13; sandbox 3–5 opt-in only
 **Date:** 2026-07-20  

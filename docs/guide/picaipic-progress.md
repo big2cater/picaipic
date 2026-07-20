@@ -14,10 +14,39 @@ Updated: 2026-07-20
 | Sandbox Phase 3–5 | Opt-in spikes (default off) |
 | G10 FileInfo Live hover | Shipped |
 | G11 magazine pack / G12 export DPI / G13 system-print UX | Shipped |
+| Correctness pack (faces/storage/collage/batch/dedup/meta API) | Shipped |
+| Calendar SIDEBAR index + local-day query | Shipped |
 | G1 / G7 / G8 / G9 | **Not doing** (owner) |
 | Publish v1.1.0 draft | Owner decision |
 
 Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+
+## 2026-07-20 Correctness pack + calendar fix
+
+### High / medium severity product bugs
+
+- **Incremental face clustering:** do not wipe persons on re-index; seed/freeze existing `person_id`; only unassigned faces join or create `Person N` (`t_cluster.rs`, `Face::get_all_for_clustering` + `next_auto_person_number`).
+- **SCRFD det_500m:** comments/IO guards match bundled ONNX (9 outputs, score/box vs anchor count).
+- **DB storage migrate:** `clear_conn_pool` after `change_db_storage_dir` / `reset_db_storage_dir`.
+- **Collage:** host errors when source count exceeds cell count.
+- **Batch dialog:** hue min `-180`; remove `&& false` dead disable.
+- **Dedup:** skip rows without `file.id` instead of panic.
+- **Rename/move:** refresh `modified_at` + `inode` after successful path change.
+- **api.js mutating metadata:** rating/favorite/rotate/batch rethrow; optimistic UI rollback in Content/ImageViewer.
+
+### Calendar empty list (user-reported)
+
+- **Root cause:** Smart Albums inserted at sidebar index **1** shifted later panels; `Content.vue` still treated **calendar as 3** (now Search). Calendar absolute index is **4**.
+- **Fix:** `SIDEBAR` map in `constants.ts`; Content/Home routing and search shortcut updated.
+- **Also:** day-count filters align with content queries; local-day `strftime` range filter; month/day numbers on dots; numeric QueryParams coercion.
+- Runbook: `.mex/patterns/change-calendar.md`.
+- Packaging does **not** clear user DB/WebView cache; not required for this fix.
+
+### Verification
+
+- `cargo check --manifest-path src-tauri/Cargo.toml`
+- `pnpm --dir src-vite build`
+- Manual: calendar click filled day/month → files appear
 
 ## 2026-07-19 Lap 0.3 UX pack (prompt import · media badges · viewer bg · search filters)
 

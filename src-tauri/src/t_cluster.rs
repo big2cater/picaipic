@@ -73,10 +73,16 @@ fn insert_top_k(candidates: &mut Vec<(usize, f32)>, edge: (usize, f32), max_edge
     }
 }
 
-/// Run Chinese Whispers clustering on ALL faces
+/// Run Chinese Whispers clustering while preserving existing person assignments.
+///
+/// Strategy (incremental / seed-preserving):
+/// 1. Keep all existing person rows and face→person links.
+/// 2. Cluster ALL faces (assigned + unassigned) so new faces can join existing people.
+/// 3. Seed labels from existing person_id when present; only reassign unassigned faces.
+/// 4. Create new Person rows only for clusters made entirely of previously unassigned faces.
 ///
 /// Memory-optimized:
-/// 1. Uses slim face data (id, file_id, embedding_bytes) instead of full Face structs
+/// 1. Uses slim face data (id, file_id, person_id, embedding_bytes)
 /// 2. Prunes candidate edges to Top-K during build (not after), bounding memory at N * K_NEIGHBORS
 /// 3. Pre-parses all embeddings once to avoid allocations in inner loop
 pub fn cluster_faces<F, C>(
@@ -90,24 +96,22 @@ where
 {
     const K_NEIGHBORS: usize = t_common::K_NEIGHBORS;
 
-    // 1. Reset all existing assignments and delete persons
-    Face::reset_all_assignments()?;
-
-    // 2. Get ALL faces for clustering — slim: (face_id, file_id, embedding_bytes)
+    // 1. Load ALL faces — slim: (face_id, file_id, person_id, embedding_bytes)
+    //    Do NOT wipe existing assignments; user renames / merges must survive re-index.
     let mut slim_faces = Face::get_all_for_clustering()?;
     let n = slim_faces.len();
     if n == 0 {
         return Ok(0);
     }
 
-    // 3. Pre-parse embeddings (do this once)
+    // 2. Pre-parse embeddings (do this once)
     let mut parsed_embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(n);
-    for (_id, _file_id, embedding_bytes) in &mut slim_faces {
+    for (_id, _file_id, _person_id, embedding_bytes) in &mut slim_faces {
         parsed_embeddings.push(embedding_bytes.as_deref().and_then(parse_embedding));
         embedding_bytes.take();
     }
 
-    // 4. Build K-NN Graph with early Top-K pruning
+    // 3. Build K-NN Graph with early Top-K pruning
     //    candidate_lists memory is bounded at N * K_NEIGHBORS entries
     let mut candidate_lists: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
     let total_pairs = n.saturating_mul(n.saturating_sub(1)) / 2;
@@ -162,7 +166,7 @@ where
         }
     }
 
-    // 5. Build final graph from pruned candidate lists (edges already Top-K)
+    // 4. Build final graph from pruned candidate lists (edges already Top-K)
     let mut graph: Vec<Vec<Edge>> = vec![Vec::new(); n];
 
     for (i, candidates) in candidate_lists.iter().enumerate() {
@@ -175,8 +179,29 @@ where
     drop(candidate_lists);
     drop(parsed_embeddings);
 
-    // 6. Run Chinese Whispers Algorithm
-    let mut labels: Vec<usize> = (0..n).collect();
+    // 5. Seed labels: faces that already belong to a person share a label keyed by person_id.
+    //    Unassigned faces start with unique labels so they can join via whispers.
+    let mut person_label: HashMap<i64, usize> = HashMap::new();
+    let mut labels: Vec<usize> = Vec::with_capacity(n);
+    let mut next_label = 0usize;
+    for face in &slim_faces {
+        if let Some(pid) = face.2 {
+            let label = *person_label.entry(pid).or_insert_with(|| {
+                let l = next_label;
+                next_label += 1;
+                l
+            });
+            labels.push(label);
+        } else {
+            labels.push(next_label);
+            next_label += 1;
+        }
+    }
+
+    // Frozen labels: existing assignments must not be reassigned by clustering.
+    let frozen: Vec<bool> = slim_faces.iter().map(|f| f.2.is_some()).collect();
+
+    // 6. Run Chinese Whispers Algorithm (only moves unassigned faces)
     let mut order: Vec<usize> = (0..n).collect();
     let mut rng = rand::thread_rng();
     let max_iterations = 20;
@@ -198,7 +223,7 @@ where
         order.shuffle(&mut rng);
 
         for &node in &order {
-            if graph[node].is_empty() {
+            if frozen[node] || graph[node].is_empty() {
                 continue;
             }
 
@@ -212,7 +237,7 @@ where
             // Find best label
             let best_label = label_weights
                 .into_iter()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(label, _)| label)
                 .unwrap_or(labels[node]);
 
@@ -237,18 +262,21 @@ where
         return Ok(0);
     }
 
-    // 6. Collect clusters
+    // 7. Collect clusters
     let mut cluster_map: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &label) in labels.iter().enumerate() {
-        // if !graph[i].is_empty() {
         cluster_map.entry(label).or_default().push(i);
-        // }
     }
     drop(graph);
-    drop(labels);
     drop(order);
 
-    // 7. Filter clusters
+    // Reverse map: label -> existing person_id (if any seed face carried one)
+    let label_to_person: HashMap<usize, i64> = person_label
+        .into_iter()
+        .map(|(pid, label)| (label, pid))
+        .collect();
+
+    // 8. Filter clusters
     const MIN_SAMPLES: usize = t_common::MIN_SAMPLES;
     let valid_clusters: Vec<_> = cluster_map
         .into_iter()
@@ -257,10 +285,11 @@ where
 
     let total_clusters = valid_clusters.len();
 
-    // 8. Assign faces to persons
-    let mut total_assigned = 0;
+    // 9. Assign only previously-unassigned faces
+    let mut total_assigned = 0usize;
+    let mut next_person_num = Face::next_auto_person_number()?;
 
-    for (cluster_idx, (_, cluster_face_indices)) in valid_clusters.into_iter().enumerate() {
+    for (cluster_idx, (label, cluster_face_indices)) in valid_clusters.into_iter().enumerate() {
         if is_cancelled_fn() {
             return Ok(total_assigned);
         }
@@ -271,18 +300,41 @@ where
             total: total_clusters,
         });
 
-        let person_name = format!("Person {}", cluster_idx + 1);
-        let person_id = Person::create(Some(&person_name))?;
+        // Prefer an existing person if any face in this cluster already belongs to one.
+        let mut person_id = label_to_person.get(&label).copied();
+        if person_id.is_none() {
+            for &face_idx in &cluster_face_indices {
+                if let Some(pid) = slim_faces[face_idx].2 {
+                    person_id = Some(pid);
+                    break;
+                }
+            }
+        }
+
+        let person_id = if let Some(pid) = person_id {
+            pid
+        } else {
+            // Brand-new cluster of only unassigned faces → create a person.
+            let person_name = format!("Person {}", next_person_num);
+            next_person_num += 1;
+            Person::create(Some(&person_name))?
+        };
 
         for face_idx in cluster_face_indices {
+            // Never overwrite an existing assignment (handles multi-person seeds in one label).
+            if slim_faces[face_idx].2.is_some() {
+                continue;
+            }
             Face::assign_to_person(slim_faces[face_idx].0, person_id)?;
             total_assigned += 1;
         }
     }
 
     drop(slim_faces);
+    drop(labels);
+    drop(frozen);
 
-    // 9. Generate thumbnails
+    // 10. Generate thumbnails
     progress_fn(ClusterProgress {
         phase: "thumbnail".to_string(),
         current: 0,
