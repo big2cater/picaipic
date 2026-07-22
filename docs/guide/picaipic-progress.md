@@ -1,12 +1,13 @@
 # PicAiPic Progress
 
-Updated: 2026-07-20
+Updated: 2026-07-22
 
-## Status board (2026-07-20)
+## Status board (2026-07-22)
 
 | Track | Status |
 |-------|--------|
 | Built-in A/B/C1/C2 + print layout | Shipped |
+| Photo frame / 相框 G-Frame-1 + G2 (blur float/sink + logo) | **Shipped** (2026-07-22) |
 | Batch import to library (G2) | Shipped |
 | Lap 0.3 UX (prompt/badges/bg/search) | Shipped |
 | Multi-key trust + local revoke (G6) | Shipped |
@@ -17,9 +18,162 @@ Updated: 2026-07-20
 | Correctness pack (faces/storage/collage/batch/dedup/meta API) | Shipped |
 | Calendar SIDEBAR index + local-day query | Shipped |
 | G1 / G7 / G8 / G9 | **Not doing** (owner) |
+| Traditional color match / 追色 + style 33³ `.cube` | **Shipped** (host, 2026-07-20/21) |
+| Photo style / 照片格调 + LUT library | **Shipped** (host, 2026-07-21; UI merged + geometry-aware preview) |
+| Multi-image compare library entry | **Shipped** (2026-07-21) |
+| ImageViewer Edit toolbar (no plugin toolbar) | **Shipped** (2026-07-21) |
+| Batch capture-time watermark/text | **Shipped** (2026-07-21) |
 | Publish v1.1.0 draft | Owner decision |
+| Large-library face cluster ANN / blocked KNN | **P0–P2 + HNSW shipped**; P3 deferred — `docs/guide/face-cluster-ann-plan.md` |
+| Toolbar LIVE file-type filter (bit 8) | **Shipped** (2026-07-22) |
+| AI search threshold honor + CLIP-scale floors | **Shipped** (2026-07-22) |
+| Settings cross-window hydrate gate + mediaBadges loop fix | **Shipped** (2026-07-22) |
+| App icon from `favicon1.ico` (neural-cat) + package -Clean | **Shipped** (2026-07-22) |
 
 Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+
+
+
+
+
+## 2026-07-22 Photo frame / 相框 G-Frame-1 + G2
+
+- Multi-select entry **Photo frame** → classic white/black bars + **float-blur** / **sink-blur**.
+- Host: EXIF/LibRaw summary; classic solid bar; float/sink via `make_cover_blur_bg` + `make_soft_shadow` + translucent text strip; optional local logo (`load_frame_logo` / `place_frame_logo`).
+- IPC: `photo_frame_preview` / `export_photo_frame` / `cancel_photo_frame_export`; event `photo-frame-progress`.
+- Frontend: `photoFrameTemplates.ts`, `PhotoFrameDialog.vue` (blur/shadow/logo controls); optional import into open album.
+- Save-as only; originals untouched; fully local.
+- Follow-up G3/G4: top/side magazine, batch action `photoFrame`, logo library UI.
+- Pattern: `.mex/patterns/change-photo-frame.md`. Roadmap Phase G. Chinese: `docs/guide/目前的开发情况.md`.
+
+## 2026-07-21 Editor preview / compare entry / viewer edit / capture-time stamp
+
+### Photo-style / adjust preview
+- Unified presets + manual; layered CSS/host preview; combined color-match+style.
+- `PreviewGeometry` (flip/rotate/crop + full size) applied before grade; crop decode budget scales up to 8192.
+- Caches: layout decode LRU, JPEG result LRU, client fingerprint short-circuit; viewport `previewMaxEdge`.
+- Histogram samples host bake when present; compare panes crop-aligned.
+
+### Multi-image compare entry
+- Single-file menu: **Compare with next…**
+- Multi-select: **Compare selected…** (first two) → `forceSplit` 2-up + sync.
+- Viewer toolbar still cycles 1/2/4 panes.
+
+### ImageViewer toolbar
+- Removed `image.toolbar` plugin buttons (e.g. SA-LUT on the bar).
+- Added built-in **Edit image…** opening the host ImageEditor; plugins remain on context menu.
+
+### Batch watermark / text
+- Optional EXIF capture-time stamp (`includeCaptureTime`, `captureTimeFormat`: datetime|date|time).
+- Text prefix optional; image watermark can also stamp time after the mark image.
+- Pattern: `patterns/change-batch-process.md`.
+
+## 2026-07-21 Photo style / 照片格调 + LUT library (UI merge)
+
+PhotonCamera-inspired **local** host tools (not a GLES port; not SA-LUT plugin):
+
+- **LUT library:** import/rename/favorite/delete `.cube` under `app_data/luts/` (`t_lut.rs`, `LutLibraryDialog.vue`).
+- **Unified recipes:** built-in + custom = CSS base params + host effects (highlights/shadows/fade/vignette/grain) + optional library LUT + intensity.
+- **ImageEditor IA:** no separate photo-style panel. Recipes live in **Presets** strip + **Manual** (effects/LUT). Save-as custom appears in presets; custom order is stable (config array order).
+- **Preview layering:** CSS filter for base-only changes (instant); host `apply_photo_style_preview` only when host-only fields are active (maxEdge 1200).
+- **Apply order (host save/batch):** base → LUT → effects.
+- **Surfaces:** ImageEditor Adjust; `edit_image.photoStyle`; batch `photoStyle`.
+- **Config:** `imageEditor.photoStyles`, `activePhotoStyleId` (= selected preset id), expanded `custom` recipe fields.
+- Pattern: `.mex/patterns/change-photo-style.md`
+- Product: `docs/guide/builtin-tools-roadmap.md` Phase F
+- Verify: `pnpm --dir src-vite build`; optional `cargo test --manifest-path src-tauri/Cargo.toml lut`.
+- **Perf/correctness follow-up:** layout decode LRU for interactive previews; combined color-match+style preview; host-preview keeps CSS blur; debounced named-custom persist.
+
+### PhotonCamera AI analysis note (reference only)
+- Photon **AI color simulation / LUT creator analysis** uses a **cloud OpenAI-compatible vision API** (`OpenAIApiClient`, `/chat/completions`; user Key/BaseURL/Model or built-in proxy).
+- Photon also has **local** models for depth (MiDaS/DepthAnything) and detection (YOLOX) — separate from AI recolor analysis.
+- PicAiPic’s photo-style/LUT/color-match slice remains **fully local**; no Photon-style cloud recolor path in this cut.
+
+## 2026-07-21 Traditional color match / 追色 + single-image style LUT
+
+Host-built-in traditional tools (not SA-LUT plugin):
+
+- **Apply match:** global Lab median/percentile transfer from a reference image onto a target (`t_color_match.rs`).
+  - ImageEditor **Adjust** tab → **Color Match** panel (pick reference, intensity / tone lock / highlight-shadow protect / auto WB, debounced `color_match_preview`).
+  - Save via `edit_image` optional `colorMatch` (geometry → match → CSS-style adjustments).
+  - Batch action `colorMatch` with shared `referenceFilePath`.
+- **Export `.cube`:** **single-image style bake** (default 33³) via `export_color_match_lut` / `build_style_cube_from_image`.
+  - Prefer selected reference image; else current photo.
+  - Not a dual-image source×reference match map; not cancelled G7 SA-LUT `export-lut`.
+- Pattern: `.mex/patterns/change-color-match.md`
+- Product: `docs/guide/builtin-tools-roadmap.md` Phase E
+- Verify: `cargo test --manifest-path src-tauri/Cargo.toml color_match`; frontend build.
+
+## 2026-07-22 Color-match perf + batch cancel hardening (code audit)
+
+- **Color match:** stats downsample both target and reference to max-edge 1024; single full-res f32 plane + one pixel pass (WB → Lab blend → protect → tone); one sort per Lab channel for median/p16/p84; Lab a/b clamp restored to full 0..255 (was 72..186 crushing saturated colors); style LUT size outside 17–65 returns error (no silent clamp).
+- **Batch:** write `{dest}.picaipic-batch.tmp` then rename; cancel/error removes temp only (overwrite-safe); progress `current` clamped to `total`.
+- Tests: `same_image_stays_close`, `warm_reference_pulls_mean_warmer`, `highlight_protection_*`, `style_cube_*`, `saturated_reference_keeps_chroma`, `style_cube_rejects_out_of_range_size` — all pass.
+- Patterns: `change-color-match.md`, `change-batch-process.md`.
+
+## 2026-07-22 Photo frame bug pack
+
+- Info bar: left/right column max-width + min center gap; `fit_frame_text` shrink then `…` truncate (no L/R overlap).
+- Export: `{dest}.picaipic-batch.tmp` → rename; cancel scrubs temps only; worker limit ≤2; source long edge >8192 downscaled before frame; single `to_rgba8` in apply.
+- Datetime: EXIF + ISO-8601 (`T`, fraction, Z/offset) → `YYYY-MM-DD HH:MM:SS` (`format_frame_date_time` tests).
+- Pattern: `change-photo-frame.md`.
+
+## 2026-07-22 Collage / cluster / watermark audit pack
+
+- **Collage:** `save_collage_image` writes `{dest}.picaipic-collage.tmp` then rename (no mid-encode clobber); strip templates cap 12→48.
+- **Decode:** `load_image_for_layout` uses libjpeg-turbo `decode_rgb8_scaled` for JPEG (shared by collage + photo-frame export).
+- **Cluster:** `insert_top_k` linear insert (no per-pair full sort); cancel returns `Err("cancelled…")` so UI is not “success 0”; cosine length `debug_assert`. Still **O(n²)** pairs — next product plan below.
+- **Watermark/batch text:** `read_capture_time_label` uses `format_frame_date_time` (ISO-safe); watermark source + capture-time labels cached per batch worker.
+
+## 2026-07-22 Large-library face clustering (P0–P2 + HNSW)
+
+- Plan: **`docs/guide/face-cluster-ann-plan.md`** (status in progress; P3 deferred).
+- **P0:** `[cluster]` phase logs (n, assigned/unassigned, graph/whisper/assign/total ms); synthetic exact-graph bench tests.
+- **P1:** `build_knn_graph_exact` + `build_knn_graph_blocked` + adaptive; `CLUSTER_N_EXACT=8000`, `CLUSTER_BLOCK_SIZE=2048`.
+- **P2:** `face.clusterMode` = `auto` \| `exact` \| `fast` (Settings + IPC); edge parity report tests.
+- **ANN:** pure-Rust **`instant-distance` 0.6.1** HNSW for auto large-n / fast; non-cancel failure → blocked exact fallback; knobs `CLUSTER_ANN_EF_*`.
+- **P3 disk/incremental ANN:** owner deferred (low ROI; inference dominates index time; crate is rebuild-from-points). Prefer measure + optional embedding binary cache later.
+- Runbook: `.mex/patterns/change-face-index.md`. Decision: `.mex/context/decisions.md`.
+
+## 2026-07-22 LIVE toolbar filter + smart tags + AI search threshold
+
+- File-type bitmask adds **8 = LIVE/Motion still** (`live_photo_type` IN 1,3,4); companion MOV type 2 still list-excluded. UI All/Image/RAW/Video/LIVE; smart album type LIVE.
+- Smart-tag prompts refined; `SMART_TAG_SEARCH_THRESHOLD = 0.28`.
+- **`search_similar_images` honors `params.threshold`** (no force 0.25 when `search_text` set). Settings floors retuned for CLIP: **0.40 / 0.34 / 0.28 / 0.22**.
+- Patterns: `change-ai-search-filters.md`, `change-live-photo.md`.
+
+## 2026-07-22 Settings sync + mediaBadges hang + api rethrow
+
+- **mediaBadges infinite loop:** Settings deep-watch + dual-window `main.js` listeners + replace-every-time setter → hang. Fix: `setGridMediaBadges` equal-noop; no set inside computed getters.
+- **Hydrate gate:** `settingsHydrating` + `emitSettings` so opening Settings does not fan out every setting to main.
+- Mutating IPC rethrow: `importFile` / `importUrl` / `importFileBytes` / `updateFileInfo` (plus existing rating/favorite/rotate/batch).
+- Pattern: `.mex/patterns/settings-cross-window-sync.md`.
+
+## 2026-07-22 App icons from favicon1.ico + package script
+
+- **Canonical app mark:** repo-root **`favicon1.ico`** (neural-cat PicAiPic). Frame wordmark stays `resources/branding/default-frame-logo.png` from `logo-pic.png` — never overwrite app icons with frame logo.
+- Regenerated `src-tauri/icons/*` via `pnpm … tauri icon` from favicon1 master; frontend `assets/images/icon.png` + `docs/public/icon.png` synced.
+- **`build.rs`:** `rerun-if-changed` on icon assets so ICO content changes force re-link.
+- **`scripts/regenerate_app_icons.ps1`**; **`package_windows.ps1`** always regenerates icons from `favicon1.ico`; **`-Clean`** runs `cargo clean -p PicAiPic`.
+- **`build-exe.bat`** always passes **`-Clean`**.
+- Pattern: `change-photo-frame.md` (app icon vs frame logo), `release-build.md` app-icons section.
+
+## 2026-07-22 Photo frame EXIF single-open
+
+- `read_frame_exif_summary`: one 512KB head read for JPEG/common; kamadak + little_exif share the buffer; RAW → LibRaw only (no redundant head scan); datetime from same buffer; EXIF summary still cached by path+mtime for preview toggles.
+
+## 2026-07-22 Photo frame custom presets + default logo + app icon
+
+- **Presets:** `config.photoFrame.presets[]` (id/name/updatedAt/options); dialog save/apply/delete; remembers last template + preset + import preference.
+- **Default logo:** frontend `showLogo: true`, empty `logoPath`; host `resolve_frame_logo_path` falls back to `resources/branding/default-frame-logo.png` (from repo `logo-pic.png`); packaged via `tauri.conf.json` resources `branding/*`.
+- **Windows app icon (corrected same day):** do **not** use `logo-pic.png` for chrome. Use **`favicon1.ico`** → `scripts/regenerate_app_icons.ps1` / package `-Clean`. Bundle still `icons/icon.png` + `icons/icon.ico`.
+
+## 2026-07-22 Audit follow-ups (pool / face / plugin / SQL)
+
+- **SQLite pool:** path keys normalized (`/` + lowercase on Windows + canonicalize when possible); idle pool capped at `MAX_CONN_POOL = 8` (excess Drop closes conn).
+- **`update_column`:** allow-lists for albums / afolders / afiles (identifier injection defense-in-depth; values already parameterized).
+- **Face index:** cancel still reports discarded jobs so progress can reach 100%; unfinished feeder path forces `current = total` on cancel; detection/embedding `unwrap` → `ok_or_else` Err. Workers remain per-thread engines (ort `Session` not Sync; count already 2–4).
+- **Plugin setup log:** `AiPluginSetupJob::push_log` ring-caps to 2000 lines.
 
 ## 2026-07-20 Correctness pack + calendar fix
 
@@ -97,7 +251,7 @@ Aligned further with upstream lap v0.3.0 browsing/metadata UX while keeping PicA
 
 ### Explicitly not doing (2026-07-20)
 
-- **G1** collage-in-batch, **G7** export-lut, **G8** face GPU EP, **G9** whole-library empty-comment backfill.
+- **G1** collage-in-batch, **G7** SA-LUT export-lut (host traditional single-image style `.cube` is separate and shipped), **G8** face GPU EP, **G9** whole-library empty-comment backfill.
 
 ### G10–G13 polish (2026-07-20)
 

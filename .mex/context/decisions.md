@@ -16,13 +16,68 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 ---
+
 
 
 # Decisions
 
 ## Decision Log
+
+### Large-library face clustering will leave all-pairs for an adaptive ANN/blocked path
+**Date:** 2026-07-22  
+**Status:** Active (P0–P2 + in-process HNSW shipped; **P3 not doing for now**)  
+**Decision:** Keep Chinese Whispers + Top-K + frozen seeds. Graph: **`auto`**: exact if `n < 8000`, else **HNSW ANN** (`instant-distance` pure Rust); **`fast`**: always ANN; **`exact`**: all-pairs. ANN non-cancel failure → **blocked exact** fallback. Settings `face.clusterMode`. No GPU face EP (G8 cancelled). **Do not implement P3** (disk ANN / incremental insert) unless measurement shows re-cluster is a real user pain; then prefer embedding binary cache over incremental HNSW.  
+**Reasoning:** Sub-quadratic graph build is already in-tree; face-index wall time is mostly ONNX inference, not clustering. `instant-distance` is rebuild-from-points (no true incremental API); graph serde is version-brittle; partial-update risks frozen-seed / same-file regressions.  
+**Consequences:** Program exit = P0–P2 + ANN + docs. Revisit only after real 20k+ face timings (parse vs graph vs whisper). Higher ROI for face speed remains inference workers/batching, not P3.  
+
+### Photo frame is EXIF info framing (classic + blur float/sink + optional logo)
+**Date:** 2026-07-22  
+**Status:** Active (shipped G-Frame-1 + G2)  
+**Decision:** Ship photix-inspired EXIF frames via independent multi-select dialog: classic white/black bars, then **float-blur** / **sink-blur** (cover blur + soft shadow) and optional **local logo path**. Host-local EXIF + draw; save-as only. Defer top/side magazine layouts, logo library UI, and batch-wizard action.  
+**Reasoning:** Users asked for “相框” referencing photix-mark-web (EXIF watermark framing), then asked for Immich-style blur float/sink and logo because classic-only looked plain. Independent dialog matches collage/print/batch entry patterns; logo is user file pick (privacy, no cloud pack).  
+**Consequences:** Batch `photoFrame` and magazine layouts remain follow-ups; logo is path-based, not a built-in brand pack.  
+
+### ImageViewer toolbar prefers built-in Edit over plugin toolbar icons
+**Date:** 2026-07-21  
+**Status:** Active (shipped)  
+**Decision:** Do not render image.toolbar plugin placements on the ImageViewer chrome. Provide a fixed Edit image button that opens the host ImageEditor. Plugins remain available from the image context menu.  
+**Reasoning:** SA-LUT and similar tools cluttered the viewer bar; editing is the primary built-in action users expect on the chrome.  
+**Consequences:** Sample plugins may still declare image.toolbar; host ignores that placement for now.  
+
+### Batch watermark optional EXIF capture time
+**Date:** 2026-07-21  
+**Status:** Active (shipped)  
+**Decision:** Text and image watermark batch actions may stamp each file EXIF capture time (format selectable).  
+**Reasoning:** Common photo-export need without manual per-file text.  
+**Consequences:** Missing EXIF yields a placeholder dash; does not fail the batch.  
+
+### Unify photo style into presets + manual (layered preview)
+**Date:** 2026-07-21  
+**Status:** Active (shipped)  
+**Decision:** Remove the standalone ImageEditor photo-style panel. Merge built-in/custom styles into the existing **Presets** strip and put host-only controls (highlights/shadows/fade/vignette/grain/LUT) under **Manual**. Use **layered preview**: CSS filters for base fields (instant); host `apply_photo_style_preview` only when host-only fields are active. One recipe model in `photoStylePresets.ts`. Custom presets keep config array order (no reorder on edit).  
+**Reasoning:** Owner reported duplicate sliders vs manual adjust, presets vs style lists, and laggy style preview. Dual tracks were an MVP shortcut, not the target IA.  
+**Alternatives considered:** Keep two panels with synced values (still noisy); always host-preview everything (keeps lag); CSS-only effects (cannot do LUT/grain well).  
+**Consequences:** `activePhotoStyleId` maps to selected preset id; named custom recipes update in place; save-as adds to presets; batch `photoStyle` unchanged. Runbook: `patterns/change-photo-style.md`.
+
+### Photo style + LUT library is local recipe system, not Photon cloud AI
+**Date:** 2026-07-21  
+**Status:** Active (shipped MVP)  
+**Decision:** Implement Panasonic-like **photo styles** and a **user LUT library** on the host (`t_lut.rs` + ImageEditor + batch), inspired by PhotonCamera’s management/recipe layering. Keep apply order base→LUT→effects. Do **not** port Photon GLES realtime pipeline or Photon AI recolor (which uses OpenAI-compatible cloud vision APIs).  
+**Reasoning:** Owner wants customizable looks (params + effects + LUT), not LUT-only filters. Local-first PicAiPic non-negotiables forbid making built-in looks depend on remote AI. Photon is a useful product/reference for library UX and recipe composition, not a drop-in codebase.  
+**Alternatives considered:** LUT-only apply without style recipes (too weak vs 照片格调); full Photon ColorRecipe/GLES port (too large, camera-centric); cloud AI recolor like Photon (conflicts with local-first default for built-ins).  
+**Consequences:** Style cubes from traditional color match can be imported into the LUT library and referenced by styles. Future optional AI recolor would be a separate, explicit feature (likely plugin), not mixed into host photo-style MVP. Runbook: `patterns/change-photo-style.md`.
+
+
+### Host traditional color match vs single-image style LUT
+**Date:** 2026-07-21  
+**Status:** Active (shipped)  
+**Decision:** Ship pure-Rust global Lab color match on the host (ImageEditor adjust panel + batch `colorMatch`) without segmentation/OpenCV/plugin runtime. Export `.cube` as a **single-image style bake** (default 33³): prefer the selected reference image, else the current photo. Do not encode a dual-image source×reference match map into the LUT. Keep this separate from cancelled SA-LUT plugin **G7** `export-lut`.  
+**Reasoning:** Owner wants apply-match and LUT export as independent workflows; a style LUT from one photo is reusable and matches “export this image’s look,” while dual-image match maps are redundant with “save matched image then export.”  
+**Alternatives considered:** Dual-image match-map cube (rejected by owner); SA-LUT neural LUT export (cancelled G7); region/SAM matching (deferred).  
+**Consequences:** `export_color_match_lut` takes only `sourceFilePath` + dest + size; UI labels must say “style LUT,” not “export match map.” Runbook: `patterns/change-color-match.md`.
+
 
 ### Calendar empty content was sidebar-index drift, not empty library
 **Date:** 2026-07-20  

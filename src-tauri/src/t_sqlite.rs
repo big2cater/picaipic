@@ -244,12 +244,23 @@ impl Album {
         Ok(result)
     }
 
-    /// update a column value
+    /// update a column value (allow-listed column names only)
     pub fn update_column(
         id: i64,
         column: &str,
         value: &dyn rusqlite::ToSql,
     ) -> Result<usize, String> {
+        assert_allowed_column(
+            column,
+            &[
+                "name",
+                "description",
+                "path",
+                "display_order_id",
+                "cover_file_id",
+                "last_scan_time",
+            ],
+        )?;
         let conn = open_conn()?;
         let query = format!("UPDATE albums SET {} = ?1 WHERE id = ?2", column);
         let result = conn
@@ -678,12 +689,16 @@ impl AFolder {
         Ok(result)
     }
 
-    // update a column value
+    // update a column value (allow-listed column names only)
     pub fn update_column(
         id: i64,
         column: &str,
         value: &dyn rusqlite::ToSql,
     ) -> Result<usize, String> {
+        assert_allowed_column(
+            column,
+            &["is_favorite", "is_excluded_from_search", "modified_at"],
+        )?;
         let conn = open_conn()?;
         let query = format!("UPDATE afolders SET {} = ?1 WHERE id = ?2", column);
         let result = conn
@@ -889,10 +904,10 @@ pub struct QueryParams {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageSearchParams {
-    pub search_text: String, // search image text (for AI search)
+    pub search_text: String,  // search image text (for AI search)
     pub file_id: Option<i64>, // file id (for similar image search)
-    pub threshold: f32,      // search threshold
-    pub limit: i64,          // search limit
+    pub threshold: f32,       // search threshold
+    pub limit: i64,           // search limit
     /// Bitmask matching QueryParams.search_file_type (0 all, 1 image, 2 video, 4 raw).
     #[serde(default)]
     pub search_file_type: i64,
@@ -2050,8 +2065,16 @@ impl AFile {
         .map_err(|e| e.to_string())
     }
 
+    /// Bitmask: 1=image, 2=video, 4=raw, 8=Live/Motion still (live_photo_type 1/3/4).
+    /// Companion Live videos (type 2) stay excluded by list queries separately.
     fn build_file_type_condition(mask: i64) -> Option<String> {
         if mask <= 0 {
+            return None;
+        }
+
+        // All three traditional kinds (with or without LIVE) ≡ no type filter.
+        let traditional = mask & 7;
+        if traditional == 7 {
             return None;
         }
 
@@ -2065,8 +2088,12 @@ impl AFile {
         if mask & 4 == 4 {
             conditions.push("a.file_type = 3".to_string());
         }
+        if mask & 8 == 8 {
+            // Apple Live still, Google Motion Photo, HEIC-internal video still.
+            conditions.push("COALESCE(a.live_photo_type, 0) IN (1, 3, 4)".to_string());
+        }
 
-        if conditions.is_empty() || conditions.len() == 3 {
+        if conditions.is_empty() {
             None
         } else {
             Some(format!("({})", conditions.join(" OR ")))
@@ -2244,6 +2271,24 @@ impl AFile {
         column: &str,
         value: &dyn rusqlite::ToSql,
     ) -> Result<usize, String> {
+        assert_allowed_column(
+            column,
+            &[
+                "name",
+                "name_pinyin",
+                "comments",
+                "is_favorite",
+                "rating",
+                "rotate",
+                "folder_id",
+                "modified_at",
+                "inode",
+                "last_scan_time",
+                "live_photo_type",
+                "content_id",
+                "paired_file_id",
+            ],
+        )?;
         let query = format!("UPDATE afiles SET {} = ?1 WHERE id = ?2", column);
         conn.execute(&query, params![value, file_id])
             .map_err(|e| e.to_string())
@@ -3059,7 +3104,8 @@ impl AFile {
         query.push_str(&Self::search_exclusion_condition("b"));
 
         // Optional Image / RAW / Video filter (same mask as library queries).
-        if let Some(file_type_condition) = Self::build_file_type_condition(params.search_file_type) {
+        if let Some(file_type_condition) = Self::build_file_type_condition(params.search_file_type)
+        {
             query.push_str(" AND (");
             query.push_str(&file_type_condition);
             query.push(')');
@@ -3077,11 +3123,15 @@ impl AFile {
 
         let mut scores: Vec<(i64, f32)> = Vec::new();
 
-        // If search_text is present, force threshold to 0.25
-        let threshold = if !params.search_text.is_empty() {
-            0.25
-        } else {
+        // Cosine similarity floor. Honor the caller's value (settings slider + smart-tag
+        // override). Only fall back when missing/non-positive — never silently replace a
+        // valid text/smart-tag threshold with a hardcoded 0.25 (that made smart tags ignore
+        // SMART_TAG_SEARCH_THRESHOLD and made the image-search similarity setting a no-op
+        // for free-text search).
+        let threshold = if params.threshold > 0.0 {
             params.threshold
+        } else {
+            0.25
         };
 
         // Stream cosine over LE f32 blobs without allocating a Vec per candidate.
@@ -3134,17 +3184,11 @@ impl AFile {
         let base = Self::build_base_query();
 
         for chunk in ids.chunks(CHUNK) {
-            let placeholders = chunk
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!("{} WHERE a.id IN ({})", base, placeholders);
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let params: Vec<&dyn rusqlite::ToSql> = chunk
-                .iter()
-                .map(|id| id as &dyn rusqlite::ToSql)
-                .collect();
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
             let rows = stmt
                 .query_map(params.as_slice(), Self::from_row)
                 .map_err(|e| e.to_string())?;
@@ -5263,7 +5307,6 @@ impl Face {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Smart Albums (rule-based saved queries; definitions live in LibraryState)
 // ---------------------------------------------------------------------------
@@ -5836,8 +5879,7 @@ impl ACollection {
 
         let mut out = Vec::new();
         for row in rows {
-            let (id, name, sort_order, created_at, updated_at) =
-                row.map_err(|e| e.to_string())?;
+            let (id, name, sort_order, created_at, updated_at) = row.map_err(|e| e.to_string())?;
             let count: i64 = conn
                 .query_row(Self::count_files_sql(), params![id], |r| r.get(0))
                 .unwrap_or(0);
@@ -6063,10 +6105,7 @@ impl ACollection {
         if params.person_id > 0 {
             query.push_str(" GROUP BY a.id");
         }
-        query.push_str(&format!(
-            " ORDER BY {}",
-            AFile::build_order_clause(params)
-        ));
+        query.push_str(&format!(" ORDER BY {}", AFile::build_order_clause(params)));
         // Prefer "date added to collection" when default date sorts would dominate:
         // still honor user sort; only add cf.added_at as stable secondary when sort is id.
         query.push_str(" LIMIT ? OFFSET ?");
@@ -6416,6 +6455,42 @@ impl AGpsHeatPoint {
 /// get connection to the db
 static CONN_POOL: Mutex<Vec<(String, Connection)>> = Mutex::new(Vec::new());
 
+/// Soft cap on idle pooled connections. Excess Drop just closes the connection
+/// instead of growing the pool without bound under concurrent bursts.
+const MAX_CONN_POOL: usize = 8;
+
+/// Normalize DB path keys so pool reuse is not broken by slash/case variance.
+fn normalize_db_path_key(path: &str) -> String {
+    let p = Path::new(path);
+    let raw = match p.canonicalize() {
+        Ok(c) => c.to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    };
+    let mut s = raw.replace('\\', "/");
+    // Windows extended-length prefix from canonicalize.
+    if let Some(stripped) = s.strip_prefix("//?/") {
+        s = stripped.to_string();
+    }
+    #[cfg(windows)]
+    {
+        s = s.to_ascii_lowercase();
+    }
+    // Drop trailing slash (except drive root like "c:/").
+    if s.len() > 3 && s.ends_with('/') {
+        s.pop();
+    }
+    s
+}
+
+/// Reject dynamic SQL identifiers that are not on an explicit allow-list.
+fn assert_allowed_column(column: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.iter().any(|c| *c == column) {
+        Ok(())
+    } else {
+        Err(format!("Invalid or disallowed column name: {}", column))
+    }
+}
+
 /// A pooled connection that returns to the global pool on Drop.
 pub(crate) struct PooledConn(Option<(String, Connection)>);
 
@@ -6423,7 +6498,10 @@ impl Drop for PooledConn {
     fn drop(&mut self) {
         if let Some(entry) = self.0.take() {
             if let Ok(mut pool) = CONN_POOL.lock() {
-                pool.push(entry);
+                if pool.len() < MAX_CONN_POOL {
+                    pool.push(entry);
+                }
+                // else: drop connection (closes) — pool already full
             }
         }
     }
@@ -6459,6 +6537,10 @@ fn setup_conn(conn: &Connection) -> Result<(), String> {
 fn create_conn() -> Result<(String, Connection), String> {
     let path = t_storage::get_current_db_path()
         .map_err(|e| format!("Failed to get the database file path: {}", e))?;
+    create_conn_for_path(path)
+}
+
+fn create_conn_for_path(path: String) -> Result<(String, Connection), String> {
     let conn = Connection::open(&path)
         .map_err(|e| format!("Failed to open database connection: {}", e))?;
     setup_conn(&conn)?;
@@ -6470,20 +6552,8 @@ fn create_conn() -> Result<(String, Connection), String> {
     if let Err(e) = crate::t_migration::ensure_collections_tables(&conn) {
         eprintln!("ensure_collections_tables on open: {}", e);
     }
-    Ok((path, conn))
-}
-
-fn create_conn_for_path(path: String) -> Result<(String, Connection), String> {
-    let conn = Connection::open(&path)
-        .map_err(|e| format!("Failed to open database connection: {}", e))?;
-    setup_conn(&conn)?;
-    if let Err(e) = crate::t_migration::ensure_live_photo_columns(&conn) {
-        eprintln!("ensure_live_photo_columns on open: {}", e);
-    }
-    if let Err(e) = crate::t_migration::ensure_collections_tables(&conn) {
-        eprintln!("ensure_collections_tables on open: {}", e);
-    }
-    Ok((path, conn))
+    // Pool key after open so canonicalize can succeed once the file exists.
+    Ok((normalize_db_path_key(&path), conn))
 }
 
 pub(crate) fn clear_conn_pool() {
@@ -6495,10 +6565,11 @@ pub(crate) fn clear_conn_pool() {
 pub(crate) fn open_conn() -> Result<PooledConn, String> {
     let current_path = t_storage::get_current_db_path()
         .map_err(|e| format!("Failed to get the database file path: {}", e))?;
+    let current_key = normalize_db_path_key(&current_path);
     if let Ok(mut pool) = CONN_POOL.lock() {
         // Only reuse connections pointing to the same DB file
         while let Some((path, conn)) = pool.pop() {
-            if path == current_path {
+            if path == current_key {
                 return Ok(PooledConn(Some((path, conn))));
             }
             // Stale connection for a different library — drop it
@@ -6514,9 +6585,10 @@ pub(crate) fn open_conn_for_library(library_id: &str) -> Result<PooledConn, Stri
             library_id, e
         )
     })?;
+    let path_key = normalize_db_path_key(&path);
     if let Ok(mut pool) = CONN_POOL.lock() {
         while let Some((pooled_path, conn)) = pool.pop() {
-            if pooled_path == path {
+            if pooled_path == path_key {
                 return Ok(PooledConn(Some((pooled_path, conn))));
             }
         }

@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core'
 import router from '@/common/router'
 import App from '@/App.vue'
 import { useConfigStore } from '@/stores/configStore'
+import { setImportAiPrompts } from '@/common/api'
 import '@/assets/app.css'
 
 // I18n
@@ -102,12 +103,13 @@ listen('settings-categorySort-changed', (event) => {
 listen('settings-showSubfolderFiles-changed', (event) => {
   config.setShowSubfolderFiles(event.payload)
 })
+listen('settings-showCollections-changed', (event) => {
+  config.setShowCollections(event.payload)
+})
 listen('settings-importAiPromptsToComments-changed', (event) => {
   config.setImportAiPromptsToComments(event.payload)
   // Keep Rust scan flag in sync (best-effort; Home also syncs on boot).
-  import('@/common/api').then(({ setImportAiPrompts }) => {
-    void setImportAiPrompts(event.payload !== false)
-  }).catch(() => {})
+  void setImportAiPrompts(event.payload !== false)
 })
 listen('settings-gridSize-changed', (event) => {
   config.setGridSize(event.payload)
@@ -148,9 +150,6 @@ listen('settings-autoPlayVideo-changed', (event) => {
 listen('settings-loopVideo-changed', (event) => {
   config.settings.loopVideo = event.payload
 })
-listen('settings-navigatorViewMode-changed', (event) => {
-  config.setNavigatorViewMode(event.payload)
-})
 listen('settings-navigatorViewSize-changed', (event) => {
   config.setNavigatorViewSize(event.payload)
 })
@@ -160,6 +159,9 @@ listen('settings-slideShowTransition-changed', (event) => {
 // listen('settings-showComment-changed', (event) => {
 //   config.setShowComment(event.payload)
 // })
+listen('settings-imageSearchModel-changed', (event) => {
+  config.setImageSearchModel(event.payload)
+})
 listen('settings-imageSearchThresholdIndex-changed', (event) => {
   config.setImageSearchThresholdIndex(event.payload)
 })
@@ -168,6 +170,9 @@ listen('settings-imageSearchLimit-changed', (event) => {
 })
 listen('settings-faceClusterThresholdIndex-changed', (event) => {
   config.setFaceClusterThresholdIndex(event.payload)
+})
+listen('settings-faceClusterMode-changed', (event) => {
+  config.setFaceClusterMode(event.payload)
 })
 listen('settings-faceEnabled-changed', (event) => {
   config.setFaceEnabled(event.payload)

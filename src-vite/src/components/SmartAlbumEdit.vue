@@ -59,6 +59,7 @@
                 <option :value="1">{{ $t('album.smart_edit.type_image') }}</option>
                 <option :value="2">{{ $t('album.smart_edit.type_video') }}</option>
                 <option :value="4">{{ $t('album.smart_edit.type_raw') }}</option>
+                <option :value="8">{{ $t('album.smart_edit.type_live') }}</option>
               </select>
             </template>
             <template v-else-if="rule.field === 'orientation'">

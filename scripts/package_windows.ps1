@@ -6,6 +6,9 @@ param(
     [ValidateSet("nsis", "msi", "all", "none")]
     [string[]]$Bundle = @("nsis", "msi"),
 
+    # -Clean: remove previous release outputs AND cargo clean -p PicAiPic so
+    #         src-tauri/icons/icon.ico is re-linked into the EXE (required after icon changes).
+    # Icons: always regenerated from repo-root favicon1.ico before build when present.
     [switch]$Clean,
     [switch]$SkipDownloads,
     [switch]$SkipInstall,
@@ -31,6 +34,61 @@ function Write-Ok {
 function Write-Warn {
     param([string]$Message)
     Write-Host "WARN $Message" -ForegroundColor Yellow
+}
+
+function Invoke-RegenerateAppIcons {
+    param([string]$RootDir)
+
+    # Windows taskbar / Explorer / installed EXE icons come ONLY from
+    # src-tauri/icons/icon.ico (tauri.conf.json bundle.icon). Repo-root
+    # favicon1.ico is the brand source of truth — keep icons/ in sync before every package.
+    $favicon = Join-Path $RootDir "favicon1.ico"
+    $script = Join-Path $RootDir "scripts\regenerate_app_icons.ps1"
+    $iconIco = Join-Path $RootDir "src-tauri\icons\icon.ico"
+
+    if (-not (Test-Path $favicon)) {
+        Write-Warn "favicon1.ico not found at repo root — leaving existing $iconIco as-is."
+        return
+    }
+
+    Write-Step "Regenerating app icons from favicon1.ico"
+    if (Test-Path $script) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $script
+        if ($LASTEXITCODE -ne 0) {
+            throw "regenerate_app_icons.ps1 failed with exit code $LASTEXITCODE."
+        }
+    }
+    else {
+        # Minimal fallback: copy ico + ensure PNG master for title bar
+        $iconsDir = Join-Path $RootDir "src-tauri\icons"
+        Copy-Item -Force $favicon (Join-Path $iconsDir "icon.ico")
+        Write-Warn "scripts\regenerate_app_icons.ps1 missing — copied favicon1.ico -> icons\icon.ico only."
+    }
+
+    if (-not (Test-Path $iconIco)) {
+        throw "Expected icon file missing after regenerate: $iconIco"
+    }
+    Write-Ok "App icons ready (icon.ico / icon.png under src-tauri\icons)."
+}
+
+function Invoke-CargoCleanPackage {
+    param([string]$TauriDir)
+
+    Write-Step "cargo clean -p PicAiPic (force re-link so icon.ico is embedded)"
+    # Icons are baked into the EXE at link time. Removing only target/release/*.exe
+    # is not enough if Cargo thinks the package is up to date.
+    $global:LASTEXITCODE = 0
+    Push-Location $TauriDir
+    try {
+        & cargo clean -p PicAiPic
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo clean -p PicAiPic failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Ok "Package clean finished."
 }
 
 function Resolve-RepoRoot {
@@ -444,9 +502,17 @@ else {
 
 Stop-RunningReleaseExe -ExePath (Join-Path $ReleaseDir "PicAiPic.exe")
 
+# Always refresh icons from favicon1.ico so packaging never ships a stale orphan brand file.
+Invoke-RegenerateAppIcons -RootDir $RootDir
+
 if ($Clean) {
     Write-Step "Cleaning old release artifacts"
     Remove-ReleaseArtifacts -ReleaseDir $ReleaseDir
+    # Force PicAiPic recompile/link so the new icon.ico is actually embedded in the EXE.
+    Invoke-CargoCleanPackage -TauriDir $TauriDir
+}
+else {
+    Write-Warn "Skipping cargo clean (-Clean not set). If the taskbar icon is wrong after install, re-run with -Clean (build-exe.bat already passes -Clean)."
 }
 
 New-LocalTauriConfig -OutputPath $LocalConfigPath

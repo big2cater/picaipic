@@ -50,3 +50,4 @@ __pycache__/
 
 # ZCode client local state
 .zcode/
+tools/

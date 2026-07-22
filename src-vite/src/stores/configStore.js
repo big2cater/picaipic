@@ -39,7 +39,7 @@ export const useConfigStore = defineStore('configStore', {
 
     search: {
       maxSearchHistory: 20,     // max search history
-      fileType: 0,              // filter file type bitmask (0: all, 1: image, 2: video, 4: raw)
+      fileType: 0,              // bitmask: 0 all, 1 image, 2 video, 4 raw, 8 live/motion still
       sortType: 0,              // sort type (default to time)
       sortOrder: 0,             // sort order(0: ascending, 1: descending)
     },
@@ -69,6 +69,13 @@ export const useConfigStore = defineStore('configStore', {
         hue: 0,
         blur: 0,
         filter: '',
+        highlights: 0,
+        shadows: 0,
+        fade: 0,
+        vignette: 0,
+        grain: 0,
+        lutId: '',
+        lutIntensity: 100,
       },
       // Legacy numeric crop shape kept for older persisted configs; prefer cropPresetId.
       cropShape: 0,
@@ -76,6 +83,9 @@ export const useConfigStore = defineStore('configStore', {
       cropPresetId: 'free',
       // User-defined favorite ratios (app-wide, not per-library)
       customCropRatios: [],
+      // Photo styles (Panasonic-like): user customs only; builtins in photoStylePresets.ts
+      photoStyles: [],
+      activePhotoStyleId: 'natural',
       saveAs: 0,                // image editor save as (0: Overwrite existing file, 1: Save as new file)
       format: 0,                // image editor format (0: JPEG, 1: PNG, 2: WEBP)
       quality: 0,               // jpeg quality (0: High, 1: Medium, 2: Low), [90, 80, 60]
@@ -90,6 +100,14 @@ export const useConfigStore = defineStore('configStore', {
     batchProcess: {
       templates: [],
       importToLibrary: false,
+    },
+
+    // Photo frame / 相框: user-saved full option presets + last export prefs
+    photoFrame: {
+      presets: [],
+      importToLibrary: false,
+      lastTemplateId: 'classic-white',
+      lastPresetId: '',
     },
 
     // Photo print layout (冲印排版): custom papers + custom packing styles
@@ -188,14 +206,18 @@ export const useConfigStore = defineStore('configStore', {
         enabled: false, // enable face recognition in image search
         // Cluster threshold index: 0=Very High, 1=High, 2=Medium, 3=Low
         clusterThresholdIndex: 2, // Default: Medium
+        // Graph build: auto (exact small-n / HNSW large-n) | exact | fast (HNSW; blocked fallback)
+        clusterMode: 'auto',
       },
     },
   }),
 
   getters: {
-    // Image search threshold values
+    // Image search cosine-similarity floors (higher = stricter, fewer results).
+    // Tuned for local CLIP figure–ground range (~0.2–0.4 typical positive hits).
+    // Old [0.8, 0.6, 0.4, 0.25] made Very High/High effectively empty for text search.
     // [Very High, High, Medium, Low]
-    imageSearchThresholds: () => [0.8, 0.6, 0.4, 0.25],
+    imageSearchThresholds: () => [0.40, 0.34, 0.28, 0.22],
     
     // Cluster threshold values: cosine distance (lower = stricter, higher = looser)
     // [Very High, High, Medium, Low]
@@ -261,6 +283,9 @@ export const useConfigStore = defineStore('configStore', {
     setShowSubfolderFiles(showSubfolderFiles) {
       this.settings.showSubfolderFiles = showSubfolderFiles;
     },
+    setShowCollections(showCollections) {
+      this.settings.showCollections = !!showCollections;
+    },
     setImportAiPromptsToComments(importAiPromptsToComments) {
       this.settings.importAiPromptsToComments = importAiPromptsToComments !== false;
     },
@@ -294,7 +319,7 @@ export const useConfigStore = defineStore('configStore', {
     },
     setGridMediaBadges(mediaBadges) {
       const next = mediaBadges && typeof mediaBadges === 'object' ? mediaBadges : {};
-      this.settings.grid.mediaBadges = {
+      const normalized = {
         format: !!next.format,
         iso: !!next.iso,
         shutter: !!next.shutter,
@@ -302,6 +327,22 @@ export const useConfigStore = defineStore('configStore', {
         focal: !!next.focal,
         exposure: !!next.exposure,
       };
+      // Avoid replacing the object when values are unchanged. Settings.vue deep-watches
+      // mediaBadges and re-emits; both main and settings windows listen on the same event,
+      // so a replace-every-time path causes an infinite emit/apply loop (UI flicker / hang).
+      const cur = this.settings.grid.mediaBadges;
+      if (
+        cur &&
+        cur.format === normalized.format &&
+        cur.iso === normalized.iso &&
+        cur.shutter === normalized.shutter &&
+        cur.aperture === normalized.aperture &&
+        cur.focal === normalized.focal &&
+        cur.exposure === normalized.exposure
+      ) {
+        return;
+      }
+      this.settings.grid.mediaBadges = normalized;
     },
     setShowFilmStrip(showFilmStrip) {
       this.settings.grid.showFilmStrip = showFilmStrip;
@@ -339,6 +380,10 @@ export const useConfigStore = defineStore('configStore', {
     //   this.settings.showComment = showComment;
     // },
     // image search settings
+    setImageSearchModel(model) {
+      const n = Number(model);
+      this.settings.imageSearch.model = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    },
     setImageSearchThresholdIndex(imageSearchThresholdIndex) {
       this.settings.imageSearch.thresholdIndex = imageSearchThresholdIndex;
     },
@@ -349,16 +394,25 @@ export const useConfigStore = defineStore('configStore', {
     // face recognition settings
     setFaceEnabled(enabled) {
       if (!this.settings.face) {
-        this.settings.face = { enabled, clusterThresholdIndex: 2 };
+        this.settings.face = { enabled, clusterThresholdIndex: 2, clusterMode: 'auto' };
       } else {
         this.settings.face.enabled = enabled;
       }
     },
     setFaceClusterThresholdIndex(index) {
       if (!this.settings.face) {
-        this.settings.face = { enabled: true, clusterThresholdIndex: index };
+        this.settings.face = { enabled: true, clusterThresholdIndex: index, clusterMode: 'auto' };
       } else {
         this.settings.face.clusterThresholdIndex = index;
+      }
+    },
+    setFaceClusterMode(mode) {
+      const allowed = ['auto', 'exact', 'fast'];
+      const next = allowed.includes(mode) ? mode : 'auto';
+      if (!this.settings.face) {
+        this.settings.face = { enabled: true, clusterThresholdIndex: 2, clusterMode: next };
+      } else {
+        this.settings.face.clusterMode = next;
       }
     },
 

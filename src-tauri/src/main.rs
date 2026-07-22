@@ -17,6 +17,8 @@ mod t_ai;
 mod t_ai_prompt;
 mod t_cluster;
 mod t_cmds;
+mod t_color_match;
+mod t_lut;
 mod t_common;
 mod t_config;
 mod t_dedup;
@@ -287,10 +289,20 @@ async fn main() {
             t_cmds::is_directory_accessible,
             t_cmds::get_folder_thumb_count,
             t_cmds::edit_image,
+            t_cmds::color_match_preview,
+            t_cmds::export_color_match_lut,
+            t_cmds::list_lut_library,
+            t_cmds::import_lut_file,
+            t_cmds::delete_lut_entry,
+            t_cmds::update_lut_entry,
+            t_cmds::apply_photo_style_preview,
             t_cmds::export_collage,
             t_cmds::batch_process_images,
             t_cmds::cancel_batch_process,
             t_cmds::export_print_layout,
+            t_cmds::photo_frame_preview,
+            t_cmds::export_photo_frame,
+            t_cmds::cancel_photo_frame_export,
             t_cmds::copy_edited_image,
             t_cmds::copy_images,
             t_cmds::rename_file,

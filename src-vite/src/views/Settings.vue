@@ -547,6 +547,17 @@
                   <option v-for="(option, index) in faceClusterOptions" :key="index" :value="option.value">{{ option.label }}</option>
               </select>
             </div>
+            <div v-if="config.settings.face.enabled" class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div class="flex items-center">
+                  <div>{{ $t('settings.face_recognition.cluster_mode') }}</div>
+                </div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.face_recognition.cluster_mode_hint') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="faceClusterModeModel" :disabled="!config.settings.face.enabled">
+                <option v-for="option in faceClusterModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -1647,7 +1658,7 @@
 
 <script setup lang="ts">
 
-import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit } from '@tauri-apps/api/event';
@@ -1747,6 +1758,17 @@ const settingsTabs = [
 
 const appWindow = getCurrentWebviewWindow()
 let gridSizeEmitTimer: number | null = null;
+/**
+ * While true, skip cross-window `settings-*` emits. Settings and main both run
+ * `main.js` listeners; mount-time pinia normalize / persist rehydrate must not
+ * blast the main window with a full settings fan-out.
+ */
+const settingsHydrating = ref(true);
+
+function emitSettings(event: string, payload?: unknown) {
+  if (settingsHydrating.value) return;
+  void emit(event, payload as any);
+}
 const SETTINGS_BASE_WIDTH = 600;
 const SETTINGS_BASE_HEIGHT = 620;
 const dbStorageDir = ref('');
@@ -2304,13 +2326,12 @@ const gridLabelOptions = computed(() => {
   return result;
 });
 
-// Ensure nested mediaBadges object exists for older persisted configs.
-const gridMediaBadges = computed(() => {
-  if (!config.settings.grid.mediaBadges || typeof config.settings.grid.mediaBadges !== 'object') {
-    config.setGridMediaBadges({});
-  }
-  return config.settings.grid.mediaBadges;
-});
+// Nested mediaBadges for checkbox v-model. Normalize legacy configs once at setup
+// (not inside a computed getter — mutations there re-fire deep watches).
+if (!config.settings.grid?.mediaBadges || typeof config.settings.grid.mediaBadges !== 'object') {
+  config.setGridMediaBadges({});
+}
+const gridMediaBadges = computed(() => config.settings.grid.mediaBadges);
 
 // Define the navigator view mode options
 const navigatorViewModeOptions = computed(() => {
@@ -2366,7 +2387,7 @@ const filmStripViewPreviewPositionOptions = computed(() => {
 const similarityOptions = computed(() => {
   const options = localeMsg.value.settings.image_search.similarity_options;
   // Use getter to retrieve thresholds
-  const values = config.imageSearchThresholds ?? [0.8, 0.6, 0.4, 0.25]; 
+  const values = config.imageSearchThresholds ?? [0.40, 0.34, 0.28, 0.22]; 
   // Map index dummy as the value since v-model is thresholdIndex
   return values.map((val, i) => ({ label: options[i], value: i }));
 });
@@ -2417,6 +2438,28 @@ const faceClusterOptions = computed(() => {
     ['Very High', 'High', 'Medium', 'Low'];
   // Map index as value since v-model is clusterThresholdIndex
   return options.map((label: string, i: number) => ({ label, value: i }));
+});
+
+const faceClusterModeOptions = computed(() => {
+  const labels = localeMsg.value.settings.face_recognition?.cluster_mode_options || [
+    'Auto (recommended)',
+    'Exact (slow)',
+    'Fast (approximate)',
+  ];
+  const values = ['auto', 'exact', 'fast'] as const;
+  return values.map((value, i) => ({ value, label: labels[i] ?? value }));
+});
+
+// Persist may lack clusterMode on older installs; keep a safe default.
+const faceClusterModeModel = computed({
+  get: () => config.settings.face?.clusterMode ?? 'auto',
+  set: (value: string) => {
+    if (!config.settings.face) {
+      config.settings.face = { enabled: true, clusterThresholdIndex: 2, clusterMode: value };
+    } else {
+      config.settings.face.clusterMode = value;
+    }
+  },
 });
 
 const pluginMessages = computed(() => localeMsg.value.settings.plugins || {});
@@ -5439,9 +5482,14 @@ onMounted(async () => {
   
   // Show window after mount
   await appWindow.show();
+  // Allow any mount-time store normalize (tabIndex, app display names, etc.) to
+  // settle before cross-window settings fan-out is enabled.
+  await nextTick();
+  settingsHydrating.value = false;
 });
 
 onUnmounted(() => {
+  settingsHydrating.value = true;
   if (isDownloadingMultilingualModel.value) {
     void cancelMultilingualImageSearchModelDownload();
   }
@@ -5457,77 +5505,82 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
 });
 
-// general settings
+// general settings — emitSettings is gated until after mount hydrate
 watch(() => config.settings.tabIndex, (newValue) => {
-  emit('settings-settingsTabIndex-changed', newValue);
+  emitSettings('settings-settingsTabIndex-changed', newValue);
 });
 watch(() => config.settings.appearance, (newValue) => {
   setTheme(newValue, newValue === 0 ? config.settings.lightTheme : config.settings.darkTheme);
-  emit('settings-appearance-changed', newValue);
+  emitSettings('settings-appearance-changed', newValue);
 });
 watch(() => config.settings.lightTheme, (newValue) => {
   setTheme(config.settings.appearance, newValue);
-  emit('settings-lightTheme-changed', newValue);
+  emitSettings('settings-lightTheme-changed', newValue);
 });
 watch(() => config.settings.darkTheme, (newValue) => {
   setTheme(config.settings.appearance, newValue);
-  emit('settings-darkTheme-changed', newValue);
+  emitSettings('settings-darkTheme-changed', newValue);
 });
 watch(() => config.settings.scale, (newValue) => {
   applyWindowScale(Number(newValue || 1));
   updateSettingsWindowSize(Number(newValue || 1));
-  emit('settings-scale-changed', newValue);
+  emitSettings('settings-scale-changed', newValue);
 });
 watch(() => config.settings.externalImageAppPath, (newValue) => {
-  emit('settings-externalImageAppPath-changed', newValue);
+  emitSettings('settings-externalImageAppPath-changed', newValue);
 });
 watch(() => config.settings.externalImageAppName, (newValue) => {
-  emit('settings-externalImageAppName-changed', newValue);
+  emitSettings('settings-externalImageAppName-changed', newValue);
 });
 watch(() => config.settings.externalVideoAppPath, (newValue) => {
-  emit('settings-externalVideoAppPath-changed', newValue);
+  emitSettings('settings-externalVideoAppPath-changed', newValue);
 });
 watch(() => config.settings.externalVideoAppName, (newValue) => {
-  emit('settings-externalVideoAppName-changed', newValue);
+  emitSettings('settings-externalVideoAppName-changed', newValue);
 });
 watch(() => config.settings.language, (newValue) => {
   locale.value = newValue;
-  emit('settings-language-changed', newValue);
+  emitSettings('settings-language-changed', newValue);
 });
 watch(() => config.settings.showButtonText, (newValue) => {
-  emit('settings-showButtonText-changed', newValue);
+  emitSettings('settings-showButtonText-changed', newValue);
 });
 watch(() => config.settings.showToolTip, (newValue) => {
-  emit('settings-showToolTip-changed', newValue);
+  emitSettings('settings-showToolTip-changed', newValue);
 });
 watch(() => config.settings.showStatusBar, (newValue) => {
-  emit('settings-showStatusBar-changed', newValue);
+  emitSettings('settings-showStatusBar-changed', newValue);
 });
 watch(() => config.settings.autoCheckUpdates, (newValue) => {
-  emit('settings-autoCheckUpdates-changed', newValue);
+  emitSettings('settings-autoCheckUpdates-changed', newValue);
 });
 // watch(() => config.settings.showComment, (newValue) => {
-//   emit('settings-showComment-changed', newValue);
+//   emitSettings('settings-showComment-changed', newValue);
 // });
 watch(() => config.settings.debugMode, (newValue) => {
-  emit('settings-debugMode-changed', newValue);
+  emitSettings('settings-debugMode-changed', newValue);
 });
 watch(() => config.settings.folderSort, (newValue) => {
-  emit('settings-folderSort-changed', newValue);
+  emitSettings('settings-folderSort-changed', newValue);
 });
 watch(() => config.settings.calendarSort, (newValue) => {
-  emit('settings-calendarSort-changed', newValue);
+  emitSettings('settings-calendarSort-changed', newValue);
 });
 watch(() => config.settings.categorySort, (newValue) => {
-  emit('settings-categorySort-changed', newValue);
+  emitSettings('settings-categorySort-changed', newValue);
 });
 watch(() => config.settings.showSubfolderFiles, (newValue) => {
-  emit('settings-showSubfolderFiles-changed', newValue);
+  emitSettings('settings-showSubfolderFiles-changed', newValue);
+});
+watch(() => config.settings.showCollections, (newValue) => {
+  emitSettings('settings-showCollections-changed', !!newValue);
 });
 watch(() => config.settings.importAiPromptsToComments, (newValue) => {
   const enabled = newValue !== false;
-  emit('settings-importAiPromptsToComments-changed', enabled);
-  void setImportAiPrompts(enabled);
+  emitSettings('settings-importAiPromptsToComments-changed', enabled);
+  if (!settingsHydrating.value) {
+    void setImportAiPrompts(enabled);
+  }
 });
 
 // grid view settings
@@ -5537,32 +5590,34 @@ watch(() => config.settings.grid.size, (newValue: number) => {
   }
 
   gridSizeEmitTimer = window.setTimeout(() => {
-    emit('settings-gridSize-changed', newValue);
+    emitSettings('settings-gridSize-changed', newValue);
     gridSizeEmitTimer = null;
   }, 100);
 });
 watch(() => config.settings.grid.style, (newValue) => {
-  emit('settings-gridStyle-changed', newValue);
+  emitSettings('settings-gridStyle-changed', newValue);
 });
 watch(() => config.settings.grid.scaling, (newValue) => {
-  emit('settings-gridScaling-changed', newValue);
+  emitSettings('settings-gridScaling-changed', newValue);
 });
 watch(() => config.settings.grid.labelPrimary, (newValue) => {
-  emit('settings-gridLabelPrimary-changed', newValue);
+  emitSettings('settings-gridLabelPrimary-changed', newValue);
 });
 watch(() => config.settings.grid.labelSecondary, (newValue) => {
-  emit('settings-gridLabelSecondary-changed', newValue);
+  emitSettings('settings-gridLabelSecondary-changed', newValue);
 });
 watch(() => config.settings.grid.previewPosition, (newValue) => {
-  emit('settings-filmStripViewPreviewPosition-changed', newValue);
+  emitSettings('settings-filmStripViewPreviewPosition-changed', newValue);
 });
 watch(() => config.settings.grid.dateGrouping, (newValue) => {
-  emit('settings-gridDateGrouping-changed', newValue);
+  emitSettings('settings-gridDateGrouping-changed', newValue);
 });
 watch(
   () => config.settings.grid.mediaBadges,
   (newValue) => {
-    emit('settings-gridMediaBadges-changed', {
+    // Plain snapshot for the main window. setGridMediaBadges is equal-noop so
+    // this window's own listener cannot re-enter the deep watch forever.
+    emitSettings('settings-gridMediaBadges-changed', {
       format: !!newValue?.format,
       iso: !!newValue?.iso,
       shutter: !!newValue?.shutter,
@@ -5576,44 +5631,47 @@ watch(
 
 // image viewer settings
 watch(() => config.settings.mouseWheelMode, (newValue) => {
-  emit('settings-mouseWheelMode-changed', newValue);
+  emitSettings('settings-mouseWheelMode-changed', newValue);
 });
 watch(() => config.mediaViewer.backgroundMode, (newValue) => {
-  emit('settings-mediaViewerBackgroundMode-changed', Number(newValue) || 0);
+  emitSettings('settings-mediaViewerBackgroundMode-changed', Number(newValue) || 0);
 });
 watch(() => config.settings.navigatorViewMode, (newValue) => {
-  emit('settings-navigatorViewMode-changed', newValue);
+  emitSettings('settings-navigatorViewMode-changed', newValue);
 });
 watch(() => config.settings.navigatorViewSize, (newValue) => {
-  emit('settings-navigatorViewSize-changed', newValue);
+  emitSettings('settings-navigatorViewSize-changed', newValue);
 });
 watch(() => config.settings.slideShowTransition, (newValue) => {
-  emit('settings-slideShowTransition-changed', newValue);
+  emitSettings('settings-slideShowTransition-changed', newValue);
 });
 watch(() => config.settings.autoPlayVideo, (newValue) => {
-  emit('settings-autoPlayVideo-changed', newValue);
+  emitSettings('settings-autoPlayVideo-changed', newValue);
 });
 watch(() => config.settings.loopVideo, (newValue) => {
-  emit('settings-loopVideo-changed', newValue);
+  emitSettings('settings-loopVideo-changed', newValue);
 });
 
 // image search settings
 watch(() => config.settings.imageSearch.model, (newValue) => {
-  emit('settings-imageSearchModel-changed', newValue);
+  emitSettings('settings-imageSearchModel-changed', newValue);
 });
 watch(() => config.settings.imageSearch.thresholdIndex, (newValue) => {
-  emit('settings-imageSearchThresholdIndex-changed', newValue);
+  emitSettings('settings-imageSearchThresholdIndex-changed', newValue);
 });
 watch(() => config.settings.imageSearch.limit, (newValue) => {
-  emit('settings-imageSearchLimit-changed', newValue);
+  emitSettings('settings-imageSearchLimit-changed', newValue);
 });
 
 // face settings
 watch(() => config.settings.face.enabled, (newValue) => {
-  emit('settings-faceEnabled-changed', newValue);
+  emitSettings('settings-faceEnabled-changed', newValue);
 });
 watch(() => config.settings.face.clusterThresholdIndex, (newValue) => {
-  emit('settings-faceClusterThresholdIndex-changed', newValue);
+  emitSettings('settings-faceClusterThresholdIndex-changed', newValue);
+});
+watch(() => config.settings.face?.clusterMode ?? 'auto', (newValue) => {
+  emitSettings('settings-faceClusterMode-changed', newValue);
 });
 
 // Handle keyboard shortcuts

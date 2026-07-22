@@ -1,7 +1,7 @@
 ---
 name: change-compare-viewer
 description: Multi-pane image comparison in ImageViewer (1/2/4 panes, viewport sync).
-last_updated: 2026-07-19
+last_updated: 2026-07-21
 ---
 
 # Change compare / multi-pane viewer
@@ -33,3 +33,14 @@ last_updated: 2026-07-19
 
 - `pnpm --dir src-vite build`
 - Manual: open viewer → cycle to 2-up and 4-up → Tab cycles active pane → prev/next only moves active → sync toggle locks zoom/pan
+
+## Library entry points
+- Single-file context menu: `compare-with-next` → `openImageViewer(i, true, false, { rightIndex, forceSplit: true })`
+- Multi-select tray menu: `Compare selected…` uses first two selected indexes
+- Host already supports `forceSplit` / `compareMode` URL + update-img payload
+
+## Library entry points (2026-07-21)
+- Single-file context menu: **Compare with next…** (`compare-with-next`) → next/prev real file in list.
+- Multi-select menu: **Compare selected…** → first two selected indexes.
+- Both call `openImageViewer(left, true, false, { rightIndex, forceSplit: true })` (2-up + sync session).
+- Files: `fileMenu.ts`, `Content.vue` (`openCompareWithNext` / `openCompareSelected`).

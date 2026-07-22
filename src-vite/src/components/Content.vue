@@ -428,6 +428,7 @@
             @collage="openCollageDialog"
             @batch="openBatchDialog"
             @print-layout="openPrintLayoutDialog"
+            @photo-frame="openPhotoFrameDialog"
             @favorite-all="selectModeSetFavorites(true)"
             @unfavorite-all="selectModeSetFavorites(false)"
             @set-rating-all="selectModeSetRatings"
@@ -540,6 +541,13 @@
     :files="printLayoutSourceFiles"
     @done="onPrintLayoutDone"
     @cancel="showPrintLayoutDialog = false"
+  />
+
+  <PhotoFrameDialog
+    v-if="showPhotoFrameDialog"
+    :files="photoFrameSourceFiles"
+    @done="onPhotoFrameDone"
+    @cancel="showPhotoFrameDialog = false"
   />
 
   <!-- move to trash -->
@@ -727,8 +735,10 @@ import LivePhotoExportDialog from '@/components/LivePhotoExportDialog.vue';
 import CollageDialog from '@/components/CollageDialog.vue';
 import BatchProcessDialog from '@/components/BatchProcessDialog.vue';
 import PrintLayoutDialog from '@/components/PrintLayoutDialog.vue';
+import PhotoFrameDialog from '@/components/PhotoFrameDialog.vue';
 import { filterCollageSourceFiles } from '@/common/collageTemplates';
 import { filterBatchImageFiles } from '@/common/batchProcess';
+import { filterPhotoFrameImageFiles } from '@/common/photoFrameTemplates';
 import ScrollBar from '@/components/ScrollBar.vue';
 import SliderInput from '@/components/SliderInput.vue';
 import StatusBar from '@/components/StatusBar.vue';
@@ -782,6 +792,7 @@ import {
   IconStarFilled,
   IconCopy,
   IconPalette,
+  IconSplitOn,
 } from '@/common/icons';
 import { LIB_ITEM, DATE_GROUP, SIDEBAR } from '@/common/constants';
 
@@ -1100,6 +1111,8 @@ const showBatchDialog = ref(false);
 const batchSourceFiles = ref<any[]>([]);
 const showPrintLayoutDialog = ref(false);
 const printLayoutSourceFiles = ref<any[]>([]);
+const showPhotoFrameDialog = ref(false);
+const photoFrameSourceFiles = ref<any[]>([]);
 
 async function onLivePhotoExportDone(_outputs: string[]) {
   const file = livePhotoExportFile.value;
@@ -1233,6 +1246,56 @@ async function onPrintLayoutDone(payload: { path: string; importToLibrary?: bool
     }
   } catch (error: any) {
     toast.error(error?.message || String(error) || t('print_layout.import_failed'));
+  }
+}
+
+function openPhotoFrameDialog() {
+  const images = filterPhotoFrameImageFiles(selectedFiles.value as any[]);
+  if (images.length < 1) return;
+  photoFrameSourceFiles.value = images;
+  showPhotoFrameDialog.value = true;
+}
+
+async function onPhotoFrameDone(payload: any) {
+  showPhotoFrameDialog.value = false;
+  const shouldImport = !!payload?.importToLibrary;
+  if (!shouldImport) return;
+
+  const outputPaths: string[] = Array.isArray(payload?.outputPaths)
+    ? payload.outputPaths.map((p: any) => String(p || '')).filter(Boolean)
+    : Array.isArray(payload?.output_paths)
+      ? payload.output_paths.map((p: any) => String(p || '')).filter(Boolean)
+      : [];
+  if (outputPaths.length === 0) return;
+
+  try {
+    const destination = await resolveCurrentAlbumImportDestination();
+    if (!destination) {
+      toast.warning(t('photo_frame.import_need_album'));
+      return;
+    }
+    let ok = 0;
+    let fail = 0;
+    for (const path of outputPaths) {
+      try {
+        const imported = await importFile(path, destination.folderId, destination.folderPath);
+        if (imported) ok += 1;
+        else fail += 1;
+      } catch {
+        fail += 1;
+      }
+    }
+    if (ok > 0) {
+      toast.success(t('photo_frame.import_success', { count: ok }));
+      await refreshImportedFiles(destination.albumId);
+    }
+    if (fail > 0 && ok === 0) {
+      toast.warning(t('photo_frame.import_failed'));
+    } else if (fail > 0) {
+      toast.warning(t('photo_frame.import_partial', { ok, fail }));
+    }
+  } catch (error: any) {
+    toast.error(error?.message || String(error) || t('photo_frame.import_failed'));
   }
 }
 type FileConflictPolicy = 'skip' | 'keep_both' | 'replace';
@@ -2829,6 +2892,7 @@ function handleItemAction(payload: { action: any, index: number }) {
 
   const actionMap = {
     'open': () => openImageViewer(selectedItemIndex.value, true),
+    'compare-with-next': () => void openCompareWithNext(selectedItemIndex.value),
     'print': () => void printImage(selectedItemIndex.value),
     'edit': () => void openImageEditor(selectedItemIndex.value),
     'open-external-app': () => {
@@ -3942,8 +4006,12 @@ onMounted( async() => {
       ...(nativeDragPayload?.filePaths || []),
     ];
     for (const filePath of [...new Set(filePaths)]) {
-      const file = await importFile(filePath, folderId, folderPath);
-      if (file) imported++;
+      try {
+        const file = await importFile(filePath, folderId, folderPath);
+        if (file) imported++;
+      } catch (err) {
+        console.error('Failed to import dropped file:', filePath, err);
+      }
     }
     if (imported > 0) {
       await refreshImportedFiles(albumId);
@@ -5925,6 +5993,14 @@ const selectionMenuItems = computed(() => {
       action: () => void openInExternalApp(),
     },
     {
+      label: localeMsg.value.menu?.file?.compare_selected
+        || localeMsg.value.image_viewer?.toolbar?.split_to_2
+        || 'Compare selected...',
+      icon: markRaw(IconSplitOn),
+      disabled: disabled || count < 2 || kind === 'empty',
+      action: () => void openCompareSelected(),
+    },
+    {
       label: localeMsg.value.menu?.meta?.copy || 'Copy',
       icon: markRaw(IconCopy),
       disabled,
@@ -7197,11 +7273,16 @@ const openAlbumEdit = (albumId: number) => {
 const FILE_TYPE_IMAGE = 1;
 const FILE_TYPE_VIDEO = 2;
 const FILE_TYPE_RAW = 4;
-const FILE_TYPE_ALL_MASK = FILE_TYPE_IMAGE | FILE_TYPE_VIDEO | FILE_TYPE_RAW;
+/** Live Photo / Motion Photo stills (`live_photo_type` 1/3/4); not companion MOV. */
+const FILE_TYPE_LIVE = 8;
+const FILE_TYPE_KIND_BITS = [FILE_TYPE_IMAGE, FILE_TYPE_RAW, FILE_TYPE_VIDEO, FILE_TYPE_LIVE];
+const FILE_TYPE_ALL_MASK =
+  FILE_TYPE_IMAGE | FILE_TYPE_VIDEO | FILE_TYPE_RAW | FILE_TYPE_LIVE;
 
 function normalizeFileTypeMask(mask: number): number {
   if (!Number.isFinite(mask) || mask <= 0) return 0;
   const normalized = mask & FILE_TYPE_ALL_MASK;
+  // Selecting every kind is the same as "All".
   return normalized === 0 || normalized === FILE_TYPE_ALL_MASK ? 0 : normalized;
 }
 
@@ -7212,9 +7293,13 @@ const emptyFilesMessage = computed(() => {
     [FILE_TYPE_IMAGE]: 'image_files',
     [FILE_TYPE_VIDEO]: 'video_files',
     [FILE_TYPE_RAW]: 'raw_files',
+    [FILE_TYPE_LIVE]: 'live_files',
     [FILE_TYPE_IMAGE | FILE_TYPE_VIDEO]: 'image_video_files',
     [FILE_TYPE_IMAGE | FILE_TYPE_RAW]: 'image_raw_files',
     [FILE_TYPE_VIDEO | FILE_TYPE_RAW]: 'raw_video_files',
+    [FILE_TYPE_IMAGE | FILE_TYPE_LIVE]: 'image_live_files',
+    [FILE_TYPE_RAW | FILE_TYPE_LIVE]: 'raw_live_files',
+    [FILE_TYPE_VIDEO | FILE_TYPE_LIVE]: 'video_live_files',
   }[mask];
 
   return (messageKey && notFound[messageKey]) || notFound.files;
@@ -7223,7 +7308,7 @@ const emptyFilesMessage = computed(() => {
 const fileTypeSelectedValues = computed(() => {
   const mask = normalizeFileTypeMask(Number(config.search.fileType || 0));
   if (mask === 0) return [0];
-  return [FILE_TYPE_IMAGE, FILE_TYPE_RAW, FILE_TYPE_VIDEO].filter(value => (mask & value) === value);
+  return FILE_TYPE_KIND_BITS.filter(value => (mask & value) === value);
 });
 
 const fileTypeSummaryLabel = computed(() => {
@@ -7231,7 +7316,7 @@ const fileTypeSummaryLabel = computed(() => {
   const mask = normalizeFileTypeMask(Number(config.search.fileType || 0));
   if (mask === 0) return options[0]?.label || '';
 
-  const labels = [FILE_TYPE_IMAGE, FILE_TYPE_RAW, FILE_TYPE_VIDEO]
+  const labels = FILE_TYPE_KIND_BITS
     .filter(value => (mask & value) === value)
     .map(value => options.find(option => option.value === value)?.label)
     .filter(Boolean);
@@ -7318,7 +7403,7 @@ const handleDedupTrashSelectedDuplicates = (groupKey: string, fileIds: number[],
   openTrashMsgbox(reclaimableBytes, groupKey, fileIds);
 };
 
-// file type options
+// file type options (bitmask: 1 image, 2 video, 4 raw, 8 live)
 const fileTypeOptions = computed(() => {
   const options = localeMsg.value.toolbar.filter?.file_type_options || [];
   return [
@@ -7326,6 +7411,7 @@ const fileTypeOptions = computed(() => {
     { label: options[1] || 'Image', value: FILE_TYPE_IMAGE },
     { label: options[2] || 'RAW', value: FILE_TYPE_RAW },
     { label: options[3] || 'Video', value: FILE_TYPE_VIDEO },
+    { label: options[4] || 'LIVE', value: FILE_TYPE_LIVE },
   ];
 });
 
@@ -7512,6 +7598,72 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
 }
 
 // Open the image viewer window
+
+function getSelectedFileListIndexes(): number[] {
+  const indexes: number[] = [];
+  for (let i = 0; i < fileList.value.length; i++) {
+    const item = fileList.value[i];
+    if (item?.isSelected && isRealFileItem(item)) indexes.push(i);
+  }
+  return indexes;
+}
+
+/** Open image viewer in 2-up compare: current + next real file in the list. */
+async function openCompareWithNext(index: number) {
+  const fileCount = fileList.value.length;
+  if (fileCount <= 0) return;
+  let left = Math.max(0, Math.min(index, fileCount - 1));
+  // Skip placeholders if needed by walking forward for a real file
+  const isReal = (item: any) => !!item && !item.isPlaceholder && typeof item.id === 'number';
+  if (!isReal(fileList.value[left])) {
+    const found = fileList.value.findIndex((it, i) => i >= left && isReal(it));
+    if (found < 0) return;
+    left = found;
+  }
+  let right = -1;
+  for (let i = left + 1; i < fileCount; i++) {
+    if (isReal(fileList.value[i])) { right = i; break; }
+  }
+  if (right < 0) {
+    for (let i = left - 1; i >= 0; i--) {
+      if (isReal(fileList.value[i])) { right = i; break; }
+    }
+  }
+  if (right < 0) {
+    toast.info(
+      localeMsg.value.menu?.file?.compare_need_two
+      || 'Need at least two images in the list to compare.',
+    );
+    return;
+  }
+  await openImageViewer(left, true, false, { rightIndex: right, forceSplit: true });
+}
+
+/** Open 2-up compare with the first two selected files (or first + next if only one selected). */
+async function openCompareSelected() {
+  const indexes = getSelectedFileListIndexes();
+  if (indexes.length >= 2) {
+    await openImageViewer(indexes[0], true, false, {
+      rightIndex: indexes[1],
+      forceSplit: true,
+    });
+    return;
+  }
+  if (indexes.length === 1) {
+    await openCompareWithNext(indexes[0]);
+    return;
+  }
+  const idx = selectedItemIndex.value;
+  if (idx >= 0) {
+    await openCompareWithNext(idx);
+    return;
+  }
+  toast.info(
+    localeMsg.value.menu?.file?.compare_need_two
+    || 'Select two images to compare.',
+  );
+}
+
 async function openImageViewer(
   index: number,
   newViewer = false,

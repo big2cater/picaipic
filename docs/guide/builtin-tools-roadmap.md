@@ -1,9 +1,9 @@
 # Built-in tools roadmap (crop presets · collage · batch)
 
-Status: **Phase A + B + C1/C2 + D shipped** (crop, collage magazine cells, batch watermark/text/border/expand, print layout).  
-Recorded: 2026-07-19  
-Reference UX: 光影魔术手-style local tools (crop preset menu, collage modes, multi-step batch).  
-Non-goal for this plan: AI plugins, cloud processing, or full “magic hand” feature parity in one release.
+Status: **Phase A + B + C1/C2 + D + E(MVP) + F(MVP) + G-Frame-1/G2 shipped** (crop, collage, batch, print layout, traditional color match, photo style + LUT library, EXIF photo frame + blur float/sink + logo).  
+Recorded: 2026-07-22  
+Reference UX: 光影魔术手-style local tools (crop preset menu, collage modes, multi-step batch) + photix-mark-web / Immich-style EXIF frames (classic bar + blur float/sink + optional logo).  
+Non-goal for this plan: AI plugins, cloud processing, or full “magic hand” / full photix template parity in one release.
 
 ## Product intent
 
@@ -12,6 +12,8 @@ Keep PicAiPic local-first. Add lightweight **host-built-in** tools that users ex
 1. **Crop with photo-size presets** (证件照 / 相纸规格) under a crop sub-menu  
 2. **Collage / 拼图** as a first-class tool entry  
 3. **Batch processing / 批处理** for multi-image pipelines  
+4. **Photo frame / 相框** — EXIF info framing (classic bar; float/sink blur + shadow; optional local logo)  
+5. **Print layout / 冲印排版**, **color match / 追色**, **photo style + LUT** (see later phases)
 
 Prefer built-in host paths for deterministic geometry/export work. Do not force these through the AI plugin runtime.
 
@@ -311,4 +313,96 @@ Status: **shipped + refined** (2026-07-19).
 
 - Product plan: this document  
 - Session router “future work” points here  
-- Progress: `docs/guide/picaipic-progress.md`, `docs/guide/目前的开发情况.md`  
+- Progress: `docs/guide/picaipic-progress.md`, `docs/guide/目前的开发情况.md`
+
+---
+
+## E. Traditional color match / 追色 + style LUT (global Lab MVP)
+
+### Intent
+Local host path for soft global Lab statistics matching from a reference image, without segmentation models or the AI plugin runtime. Also export a **single-image style** 33³ `.cube` so a photo’s look can be reused in Resolve/PS.
+
+### UX entry
+- **Apply 追色:** ImageEditor → **调色** tab → **追色** panel (pick reference + params + debounced host preview). Also batch action `colorMatch`.
+- **Export `.cube`:** same panel. If a reference is selected, bake **that** image; otherwise bake the **current** photo. Not a dual-image match map.
+
+### Shipped (2026-07-20 → 2026-07-21; perf pack 2026-07-22)
+- Host `t_color_match.rs`: auto WB, Lab median/percentile match, intensity blend, highlight/shadow protect, tone preservation
+- **Perf/memory (2026-07-22):** both images’ Lab stats on ≤1024 max-edge; single-pass full-res grade (no multi-plane 50MP buffers); one sort per channel for quantiles; Lab a/b full 0..255
+- Preview IPC: `color_match_preview` (JPEG bytes)
+- `edit_image` optional `colorMatch` block (before CSS-style adjustments)
+- ImageEditor adjust-tab panel: pick reference + parameters + debounced host preview
+- Batch action `colorMatch` with shared reference image
+- Host **single-image style** `.cube` export (default **33³**) via `export_color_match_lut` / `build_style_cube_from_image`  
+  - Samples one image’s Lab look → reusable LUT  
+  - Separate from applying color match to pixels  
+  - Distinct from cancelled SA-LUT plugin G7 `export-lut`
+  - LUT size **must** be 17–65; out-of-range errors (no silent clamp)
+
+### Non-goals (this slice)
+- Region masks / SAM / FaceParser
+- Skin-range protection beyond global highlight/shadow
+- Dual-image “source×reference match map” baked into `.cube` (owner rejected; apply match then export the result image if that workflow is needed)
+- SA-LUT neural LUT export (G7 cancelled)
+
+### Touchpoints
+- `src-tauri/src/t_color_match.rs`, `t_image.rs`, `t_cmds.rs`, `main.rs`
+- `src-vite/src/views/ImageEditor.vue`, `common/batchProcess.ts`, `BatchProcessDialog.vue`, `common/api.js`
+- Pattern: `.mex/patterns/change-color-match.md`
+
+---
+
+## F. Photo style / 照片格调 + LUT library (Photon-inspired)
+
+### Shipped (2026-07-21; UI merge same day)
+- Host `t_lut.rs`: `.cube` parse + trilinear apply, LUT library under app data, photo-style pipeline (base → LUT → fade/vignette/grain)
+- IPC: `list_lut_library`, `import_lut_file`, `delete_lut_entry`, `update_lut_entry`, `apply_photo_style_preview`; `edit_image.photoStyle`; batch `photoStyle`
+- ImageEditor: recipes in **Presets** + **Manual** (no separate style panel); layered CSS/host preview; LUT library dialog; save custom to presets; stable custom order
+- Config: `imageEditor.photoStyles`, `activePhotoStyleId`, expanded `custom` recipe fields
+- Pattern: `.mex/patterns/change-photo-style.md`
+
+### Non-goals this slice
+- Full Photon ColorRecipe (bloom/halation/chromatic aberration/HSL wheels)
+- GLES realtime camera preview
+- Bundling Photon proprietary film assets
+- Photon-style cloud AI recolor (Photon uses OpenAI-compatible vision API for AI LUT analysis; PicAiPic photo style remains local)
+
+### Batch watermark capture time (2026-07-21)
+- Text and image watermark actions support optional EXIF capture-time stamp (`includeCaptureTime`, format datetime/date/time).
+- Host reads DateTimeOriginal (fallback Digitized/DateTime) per source file.
+
+---
+
+## G. Photo frame / 相框 (EXIF info bar, photix-inspired)
+
+Reference: [photix-mark-web](https://github.com/LeoonLiang/photix-mark-web) (EXIF watermark / frame templates — not decorative PNG frames).
+
+### G-Frame-1 (shipped 2026-07-22) — classic bottom bar
+
+- Entry: multi-select `SelectionPanel` → **相框** → `PhotoFrameDialog`
+- Templates: `classic-white`, `classic-black` (bottom info bar, four-corner EXIF text)
+- Options: field toggles (brand/model/lens/params/datetime), bar ratio, outer margin, colors
+- Host: `read_frame_exif_summary` + `apply_photo_frame`; IPC `photo_frame_preview` / `export_photo_frame` / `cancel_photo_frame_export`
+- Export: multi-file save-as only; progress event `photo-frame-progress`; optional import into open album
+- Pattern: `.mex/patterns/change-photo-frame.md`
+
+### G2 (shipped 2026-07-22) — float/sink blur + logo
+
+- Templates: **`float-blur`** (centered-ish photo, soft drop shadow on cover-blur canvas), **`sink-blur`** (top-biased photo, larger bottom blur/shadow zone, bar in lower pad)
+- Style sliders: canvas pad, blur sigma, shadow blur / offset / opacity
+- Logo: local png/jpg/webp path; positions bar-left/right, top-left/right; scale vs photo short edge
+- Host helpers: `make_cover_blur_bg`, `make_soft_shadow`, `load_frame_logo`, `place_frame_logo`; translucent strip under blur-layout text
+
+### Follow-ups
+
+| Slice | Scope |
+|-------|--------|
+| **G3** | Top / sidebar magazine layouts; batch action `photoFrame` |
+| **G4** | Brand logo library / pack UI; more artistic templates |
+
+### Non-goals (G1–G2)
+
+- Full photix Canvas processor pipeline port
+- ImageEditor embedded frame tab
+- Cloud logo packs or remote EXIF services
+

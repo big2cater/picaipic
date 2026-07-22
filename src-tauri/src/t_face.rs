@@ -85,7 +85,9 @@ impl FaceEngine {
     }
 
     /// Resolve ONNX model paths under the app resource `models/` directory.
-    pub fn resolve_model_paths(app: &AppHandle) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    pub fn resolve_model_paths(
+        app: &AppHandle,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
         let resource_dir = app
             .path()
             .resolve("models", tauri::path::BaseDirectory::Resource)
@@ -107,7 +109,11 @@ impl FaceEngine {
         Ok((detection_model_path, embedding_model_path))
     }
 
-    pub fn load_models_with_threads(&mut self, app: &AppHandle, intra_threads: usize) -> Result<(), String> {
+    pub fn load_models_with_threads(
+        &mut self,
+        app: &AppHandle,
+        intra_threads: usize,
+    ) -> Result<(), String> {
         let (detection_model_path, embedding_model_path) = Self::resolve_model_paths(app)?;
         self.load_models_from_paths(&detection_model_path, &embedding_model_path, intra_threads)
     }
@@ -238,7 +244,7 @@ impl FaceEngine {
             let outputs = self
                 .detection_model
                 .as_mut()
-                .unwrap()
+                .ok_or_else(|| "Face detection model is not loaded".to_string())?
                 .run(inputs!["input.1" => input_value])
                 .map_err(|e| format!("Detection inference error: {}", e))?;
 
@@ -458,7 +464,7 @@ impl FaceEngine {
         let outputs = self
             .embedding_model
             .as_mut()
-            .unwrap()
+            .ok_or_else(|| "Face embedding model is not loaded".to_string())?
             .run(inputs!["input.1" => input_value])
             .map_err(|e| format!("Embedding inference error: {}", e))?;
 
@@ -727,12 +733,14 @@ pub fn run_face_indexing(
     status_token_struct: FaceIndexingStatus,
     progress_token_struct: FaceIndexProgressState,
     cluster_epsilon: Option<f32>,
+    cluster_mode: Option<String>,
 ) -> Result<(), String> {
     let cancel_token = cancel_token_struct.0.clone();
     let status_token = status_token_struct.0.clone();
     let progress_token = progress_token_struct.0.clone();
     // Use provided epsilon or default to 0.42
     let epsilon = cluster_epsilon.unwrap_or(0.42);
+    let mode = t_cluster::ClusterMode::parse(cluster_mode.as_deref());
 
     // Check if already running
     {
@@ -901,7 +909,13 @@ pub fn run_face_indexing(
 
                 while let Some((file_id, file_path, width, height)) = job_queue.pop() {
                     if *cancel.lock().unwrap() {
-                        // Discard remaining queued jobs without inference (retryable).
+                        // Still report the job so the main loop advances progress to 100%.
+                        // Work is retryable (no write); only progress accounting is closed out.
+                        let _ = result_tx.send(FaceIndexWorkerResult {
+                            file_id,
+                            file_path,
+                            write: None,
+                        });
                         continue;
                     }
 
@@ -1060,6 +1074,21 @@ pub fn run_face_indexing(
         }
 
         if cancelled {
+            // Feeder may have stopped early; force progress bar to 100% on cancel.
+            {
+                let mut progress = progress_token.lock().unwrap();
+                progress.current = total_files;
+                progress.faces_found = total_faces;
+            }
+            let _ = app_handle.emit(
+                "face_index_progress",
+                serde_json::json!({
+                    "current": total_files,
+                    "total": total_files,
+                    "faces_found": total_faces,
+                    "phase": "indexing"
+                }),
+            );
             let _ = app_handle.emit(
                 "face_index_finished",
                 serde_json::json!({
@@ -1089,8 +1118,9 @@ pub fn run_face_indexing(
         );
 
         let cancel_token_cluster = cancel_token.clone();
-        let total_persons = match t_cluster::cluster_faces(
+        let cluster_result = t_cluster::cluster_faces(
             epsilon,
+            mode,
             |progress| {
                 let _ = app_handle.emit(
                     "cluster_progress",
@@ -1105,14 +1135,24 @@ pub fn run_face_indexing(
                 // Check if user has cancelled
                 *cancel_token_cluster.lock().unwrap()
             },
-        ) {
+        );
+        let cancelled_during_cluster = *cancel_token.lock().unwrap()
+            || cluster_result
+                .as_ref()
+                .err()
+                .map(|e| e.starts_with("cancelled"))
+                .unwrap_or(false);
+        let total_persons = match cluster_result {
             Ok(count) => count,
+            Err(e) if e.starts_with("cancelled") => {
+                eprintln!("Clustering cancelled: {}", e);
+                0
+            }
             Err(e) => {
                 eprintln!("Clustering failed: {}", e);
                 0
             }
         };
-        let cancelled_during_cluster = *cancel_token.lock().unwrap();
 
         // 5. Finished
         let _ = app_handle.emit(

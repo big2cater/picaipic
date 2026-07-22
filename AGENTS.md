@@ -38,4 +38,4 @@ After meaningful work, run GROW:
 
 ## Navigation
 At the start of every session, read `.mex/ROUTER.md`. It routes architecture, stack, conventions, decisions, setup, plugin-runtime, and recurring-task guidance.
-For planned built-in crop/collage/batch tools, also read `docs/guide/builtin-tools-roadmap.md` before implementing.
+For built-in crop/collage/batch/print/color-match/photo-style/photo-frame tools, read `docs/guide/builtin-tools-roadmap.md` and the matching `.mex/patterns/change-*.md` before implementing.

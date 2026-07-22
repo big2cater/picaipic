@@ -1655,6 +1655,53 @@ async function updateFileHasTags(fileIds: number[]) {
   showTaggingDialog.value = false;
 }
 
+
+async function openImageEditorForActivePane() {
+  const pane = getActiveFilePane();
+  const file = getFileInfoByPane(pane);
+  const fileId = Number(file?.id || 0);
+  if (fileId <= 0) return;
+  // Only still images / RAW
+  const ft = Number(file?.file_type || 0);
+  if (ft !== 1 && ft !== 3) return;
+
+  const webViewLabel = 'imageeditor';
+  const existing = await WebviewWindow.getByLabel(webViewLabel);
+  if (existing) {
+    await existing.emit('update-file', { fileId });
+    await existing.show();
+    await existing.setFocus();
+    return;
+  }
+
+  const newWindow = new WebviewWindow(webViewLabel, {
+    url: `/image-editor?fileId=${fileId}`,
+    title: 'Image Editor',
+    width: 1100,
+    height: 700,
+    minWidth: 800,
+    minHeight: 500,
+    resizable: true,
+    maximizable: false,
+    visible: false,
+    transparent: true,
+    decorations: isMac,
+    ...(isMac && {
+      titleBarStyle: 'overlay',
+      hiddenTitle: true,
+      minimizable: false,
+    }),
+  });
+
+  newWindow.once('tauri://created', () => {
+    newWindow.show();
+    newWindow.setFocus();
+  });
+  newWindow.once('tauri://error', (e) => {
+    console.error('Failed creating ImageEditor window:', e);
+  });
+}
+
 const handleItemAction = async (payload: { action: any }) => {
   if (payload.action?.type === 'plugin-menu') {
     const pane = getActiveFilePane();
@@ -1678,6 +1725,9 @@ const handleItemAction = async (payload: { action: any }) => {
       break;
     case 'comment':
       openCommentEditor(pane);
+      break;
+    case 'edit':
+      await openImageEditorForActivePane();
       break;
     case 'rating-0':
     case 'rating-1':

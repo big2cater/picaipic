@@ -1,7 +1,7 @@
 ---
 name: change-collage
 description: Runbook for template/strip/free/magazine collage (拼图) UI and host export with cell-sized source decode.
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 ---
 
 # Change collage / 拼图 (Phase B1–B3 + magazine cells + free drafts)
@@ -32,7 +32,8 @@ last_updated: 2026-07-20
 - **Save-as only** — do not overwrite library originals or auto-import export.
 - Preview may use thumbnails; full export uses host decode (HEIC/RAW via preview path).
 - **Source downscale to cell need:** for grid/cells/free, decode with `load_image_for_layout(path, max_edge)` and `downscale_image_for_fit_cells` so sources larger than the on-canvas cell are reduced before composite (same idea as print layout). Output canvas size is unchanged.
-- Templates: equal + magazine freeform cells (`2`, `2v`, `3a`, `3b`, `4`, `4m`, `6`, `6m`, `9`) via normalized `cells[]` in `collageTemplates.ts`. Strips: `strip-h` / `strip-v`, max 12 cells.
+- **JPEG decode (2026-07-22):** `load_image_for_layout` uses libjpeg-turbo scale-on-decode for `.jpg`/`.jpeg` (shared with photo-frame export).
+- Templates: equal + magazine freeform cells (`2`, `2v`, `3a`, `3b`, `4`, `4m`, `6`, `6m`, `9`) via normalized `cells[]` in `collageTemplates.ts`. Strips: `strip-h` / `strip-v`, max **48** cells (was 12).
 - Host freeform export: `template: "cells"` + `cells: [{x,y,w,h}]` (normalized 0–1). Free canvas: `template: "free"` + `items[]`.
 - Free mode: items use normalized 0–1 geometry; max 20 items; z-order draw; optional snap.
 - Fill: `cover` or `contain`. Radius/stroke applied per cell/item in export space.
@@ -41,6 +42,7 @@ last_updated: 2026-07-20
 - Free export empty-guard: `exportDisabled` + `doExport` both check `freeItems.length === 0` before host invoke.
 - Free rotate source budget: host `rotated_box_source_need` uses true AABB (`|w·cos|+|h·sin|`) so ~45° does not undersample (was fixed 1.15×).
 - **No silent truncation (2026-07-20):** fixed-grid / cells export returns `Err` when non-empty source paths exceed cell count. UI still shows `using_n_of_m` and should slice before invoke; host is the hard guard. Strips expand with `image_count` and are unaffected.
+- **Atomic save (2026-07-22):** `save_collage_image` writes `{dest}.picaipic-collage.tmp` then rename (same pattern as batch/photo-frame).
 
 ## Verify
 
@@ -49,3 +51,4 @@ last_updated: 2026-07-20
 - Manual: multi-select → 拼图 → magazine 3a/4m preview is non-equal grid → export
 - Manual: free mode drag/resize/rotate/reorder → save draft → load → export
 - Manual: large originals export without multi-second freezes (cell downscale)
+- Manual: overwrite existing dest path mid-failure leaves previous file intact (temp+rename)

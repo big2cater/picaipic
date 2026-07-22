@@ -183,6 +183,9 @@ pub struct AiPluginProfileState {
     pub model_dir_bindings: HashMap<String, String>,
 }
 
+/// Cap in-memory setup job log lines (verbose plugins otherwise grow without bound).
+const SETUP_JOB_LOG_MAX_LINES: usize = 2000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiPluginSetupJob {
@@ -201,6 +204,17 @@ pub struct AiPluginSetupJob {
     pub error: Option<String>,
     #[serde(default)]
     pub log: Vec<String>,
+}
+
+impl AiPluginSetupJob {
+    /// Append a log line, keeping only the newest `SETUP_JOB_LOG_MAX_LINES`.
+    fn push_log(&mut self, line: impl Into<String>) {
+        self.log.push(line.into());
+        if self.log.len() > SETUP_JOB_LOG_MAX_LINES {
+            let drop_n = self.log.len() - SETUP_JOB_LOG_MAX_LINES;
+            self.log.drain(0..drop_n);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1466,8 +1480,9 @@ fn load_registry() -> Result<AiPluginRegistry, String> {
 
     let content =
         fs::read_to_string(&path).map_err(|e| format!("Failed to read plugin registry: {}", e))?;
-    let mut registry = serde_json::from_str::<AiPluginRegistry>(content.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("Failed to parse plugin registry: {}", e))?;
+    let mut registry =
+        serde_json::from_str::<AiPluginRegistry>(content.trim_start_matches('\u{feff}'))
+            .map_err(|e| format!("Failed to parse plugin registry: {}", e))?;
     normalize_registry_trust(&mut registry);
     Ok(registry)
 }
@@ -1531,9 +1546,11 @@ fn publisher_accepts_public_key(tp: &AiPluginTrustedPublisher, public_key: &str)
     if pk.is_empty() {
         return false;
     }
-    if tp.keys.iter().any(|k| {
-        k.public_key.trim() == pk && k.status.eq_ignore_ascii_case("active")
-    }) {
+    if tp
+        .keys
+        .iter()
+        .any(|k| k.public_key.trim() == pk && k.status.eq_ignore_ascii_case("active"))
+    {
         return true;
     }
     // Legacy single-key field when keys list empty/unnormalized.
@@ -2248,13 +2265,12 @@ fn prepare_profile_local_artifacts(
         }
         let env_path =
             profile_runtime_dir(&job.plugin_id, profile)?.unwrap_or_else(|| root.join(env_dir));
-        job.log.push(format!(
+        job.push_log(format!(
             "Profile environment directory declared: {}",
             env_path.display()
         ));
     } else {
-        job.log
-            .push("No envDir declared for this profile.".to_string());
+        job.push_log("No envDir declared for this profile.".to_string());
     }
 
     if let Some(requirements) = profile_requirements(profile) {
@@ -2266,12 +2282,12 @@ fn prepare_profile_local_artifacts(
         }
         let requirements_path = root.join(requirements);
         if requirements_path.is_file() {
-            job.log.push(format!(
+            job.push_log(format!(
                 "Requirements file is present: {}",
                 requirements_path.display()
             ));
         } else {
-            job.log.push(format!(
+            job.push_log(format!(
                 "Requirements file is not present yet: {}",
                 requirements_path.display()
             ));
@@ -2279,8 +2295,7 @@ fn prepare_profile_local_artifacts(
     }
 
     let setup_log_path = plugin_logs_dir(&job.plugin_id)?.join(format!("setup-{}.log", job.id));
-    job.log
-        .push(format!("Wrote setup log: {}", setup_log_path.display()));
+    job.push_log(format!("Wrote setup log: {}", setup_log_path.display()));
     append_setup_log(&job.plugin_id, job)?;
     Ok(())
 }
@@ -2882,15 +2897,12 @@ async fn run_setup_command(
         return Err(format!("setup command '{}' does not exist", command));
     }
 
-    job.log
-        .push(format!("Executing setup command: {}", command));
-    job.log.push("Injected setup environment:".to_string());
-    job.log.push(format!("PICAIPIC_PLUGIN_ID={}", plugin_id));
-    job.log
-        .push(format!("PICAIPIC_PLUGIN_PROFILE_ID={}", profile.id));
-    job.log.push(format!("PICAIPIC_PLUGIN_BACKEND={}", backend));
-    job.log
-        .push(format!("PICAIPIC_PLUGIN_CAPABILITY={}", capability));
+    job.push_log(format!("Executing setup command: {}", command));
+    job.push_log("Injected setup environment:".to_string());
+    job.push_log(format!("PICAIPIC_PLUGIN_ID={}", plugin_id));
+    job.push_log(format!("PICAIPIC_PLUGIN_PROFILE_ID={}", profile.id));
+    job.push_log(format!("PICAIPIC_PLUGIN_BACKEND={}", backend));
+    job.push_log(format!("PICAIPIC_PLUGIN_CAPABILITY={}", capability));
     let environment = build_setup_environment(
         root,
         plugin_id,
@@ -2917,7 +2929,7 @@ async fn run_setup_command(
         "PICAIPIC_PLUGIN_REQUIREMENTS_PATH",
     ] {
         if let Some(value) = environment.get(key) {
-            job.log.push(format!("{}={}", key, value));
+            job.push_log(format!("{}={}", key, value));
         }
     }
     append_setup_log(plugin_id, job)?;
@@ -2930,8 +2942,7 @@ async fn run_setup_command(
     // Phase 5: clear ambient secrets first, then re-inject setup env map.
     let hygiene = t_sandbox::apply_env_hygiene(&mut cmd);
     if hygiene.applied {
-        job.log
-            .push(format!("env_hygiene: {}", hygiene.summary()));
+        job.push_log(format!("env_hygiene: {}", hygiene.summary()));
         let _ = append_setup_log(plugin_id, job);
     }
     for (key, value) in &environment {
@@ -2971,7 +2982,7 @@ async fn run_setup_command(
                 }
             } => match stdout_line {
                 Ok(Some(line)) => {
-                    job.log.push(line);
+                    job.push_log(line);
                     line_counter += 1;
                 }
                 Ok(None) => {
@@ -2988,7 +2999,7 @@ async fn run_setup_command(
                 }
             } => match stderr_line {
                 Ok(Some(line)) => {
-                    job.log.push(line);
+                    job.push_log(line);
                     line_counter += 1;
                 }
                 Ok(None) => {
@@ -3015,7 +3026,7 @@ async fn run_setup_command(
                 job.status = "cancelled".to_string();
                 job.progress = 100;
                 job.message = Some("Setup command was cancelled.".to_string());
-                job.log.push("Setup command cancelled by user.".to_string());
+                job.push_log("Setup command cancelled by user.".to_string());
                 job.updated_at = Utc::now().to_rfc3339();
                 if let Some(cancel_state) = cancel_state {
                     cancel_state.clear(&job_id).await;
@@ -3042,7 +3053,7 @@ async fn run_setup_command(
                     job.status = "cancelled".to_string();
                     job.progress = 100;
                     job.message = Some("Setup command was cancelled.".to_string());
-                    job.log.push("Setup command cancelled by user.".to_string());
+                    job.push_log("Setup command cancelled by user.".to_string());
                     job.updated_at = Utc::now().to_rfc3339();
                     cancel_state.clear(&job_id).await;
                     append_setup_log(plugin_id, job)?;
@@ -3051,8 +3062,7 @@ async fn run_setup_command(
                 }
             }
             if !status.success() {
-                job.log
-                    .push(format!("Setup command exited with {}", status));
+                job.push_log(format!("Setup command exited with {}", status));
                 return Err(format!(
                     "setup command '{}' exited with {}",
                     command, status
@@ -3076,7 +3086,7 @@ async fn run_setup_command(
             job.status = "cancelled".to_string();
             job.progress = 100;
             job.message = Some("Setup command was cancelled.".to_string());
-            job.log.push("Setup command cancelled by user.".to_string());
+            job.push_log("Setup command cancelled by user.".to_string());
             job.updated_at = Utc::now().to_rfc3339();
             if let Some(cancel_state) = cancel_state {
                 cancel_state.clear(&job_id).await;
@@ -7893,12 +7903,11 @@ pub fn mark_ai_plugin_profile_setup_needed(
             job.updated_at = Utc::now().to_rfc3339();
             job.message =
                 Some("Runtime setup artifacts are ready. Run Verify or Smoke next.".to_string());
-            job.log.push(
+            job.push_log(
                 "Dependency installation is not implemented yet; no setup command was executed."
                     .to_string(),
             );
-            job.log
-                .push("Run Verify or Smoke to validate the existing runtime.".to_string());
+            job.push_log("Run Verify or Smoke to validate the existing runtime.".to_string());
         }
         Err(error) => {
             job.status = "failed".to_string();
@@ -7906,7 +7915,7 @@ pub fn mark_ai_plugin_profile_setup_needed(
             job.updated_at = Utc::now().to_rfc3339();
             job.message = Some("Runtime setup artifact preparation failed.".to_string());
             job.error = Some(error.clone());
-            job.log.push(format!("Setup failed: {}", error));
+            job.push_log(format!("Setup failed: {}", error));
         }
     }
     save_setup_job(job.clone())?;
@@ -8069,10 +8078,8 @@ pub async fn run_ai_plugin_profile_setup_command(
                 job.progress = 100;
                 job.message =
                     Some("Setup command completed. Run Verify or Smoke next.".to_string());
-                job.log
-                    .push("Setup command completed successfully.".to_string());
-                job.log
-                    .push("Run Verify or Smoke to validate this profile.".to_string());
+                job.push_log("Setup command completed successfully.".to_string());
+                job.push_log("Run Verify or Smoke to validate this profile.".to_string());
             }
             Ok(SetupCommandOutcome::Cancelled) => {
                 status = "cancelled".to_string();
@@ -8088,8 +8095,7 @@ pub async fn run_ai_plugin_profile_setup_command(
                 job.progress = 100;
                 job.message = Some("Setup command failed.".to_string());
                 job.error = Some(command_error.clone());
-                job.log
-                    .push(format!("Setup command failed: {}", command_error));
+                job.push_log(format!("Setup command failed: {}", command_error));
             }
         },
         Err(artifact_error) => {
@@ -8099,7 +8105,7 @@ pub async fn run_ai_plugin_profile_setup_command(
             job.progress = 100;
             job.message = Some("Runtime setup artifact preparation failed.".to_string());
             job.error = Some(artifact_error.clone());
-            job.log.push(format!("Setup failed: {}", artifact_error));
+            job.push_log(format!("Setup failed: {}", artifact_error));
         }
     }
     job.updated_at = Utc::now().to_rfc3339();
@@ -8576,11 +8582,8 @@ pub async fn start_ai_plugin(
     // the experimental flag is on without explicit user deny.
     let runtime_network_granted =
         plugin_runtime_network_granted(&plugin_id, &manifest).unwrap_or(true);
-    let network_sandbox = t_sandbox::apply_network_sandbox(
-        &plugin_id,
-        &command_path,
-        runtime_network_granted,
-    );
+    let network_sandbox =
+        t_sandbox::apply_network_sandbox(&plugin_id, &command_path, runtime_network_granted);
     let _ = writeln!(start_log, "{}", network_sandbox.summary());
     for line in t_sandbox::experimental_confinement_log_lines(runtime_network_granted) {
         // Final network/landlock status is logged from apply_* helpers.

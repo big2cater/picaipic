@@ -53,12 +53,9 @@ pub fn extract_prompt_for_path(
     }
 
     if looks_like_jpeg(file_path, header) {
-        if let Some(p) = extract_jpeg_prompt(
-            file_path,
-            header,
-            exif_user_comment,
-            exif_image_description,
-        ) {
+        if let Some(p) =
+            extract_jpeg_prompt(file_path, header, exif_user_comment, exif_image_description)
+        {
             return Some(truncate_comment(&p));
         }
     }
@@ -149,11 +146,7 @@ pub fn decode_exif_user_comment(data: &[u8]) -> Option<String> {
         .trim_end_matches('\0')
         .trim()
         .to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn decode_utf16_bytes(data: &[u8]) -> Option<String> {
@@ -184,11 +177,7 @@ fn decode_utf16_bytes(data: &[u8]) -> Option<String> {
         .take_while(|&u| u != 0)
         .collect();
     let s = String::from_utf16_lossy(&units).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn extract_jpeg_prompt(
@@ -388,20 +377,12 @@ pub fn extract_user_comment_from_exif(exif: &exif::Exif) -> Option<String> {
                 bytes.extend(line.iter().cloned().take_while(|&b| b != 0));
             }
             let s = String::from_utf8_lossy(&bytes).trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
+            if s.is_empty() { None } else { Some(s) }
         }
         _ => {
             let s = field.display_value().to_string();
             let s = s.trim().trim_matches('"').trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
+            if s.is_empty() { None } else { Some(s) }
         }
     }
 }
@@ -488,8 +469,8 @@ fn parse_png_text_from_bytes(bytes: &[u8], map: &mut HashMap<String, String>) {
     }
     let mut i = 8usize;
     while i + 12 <= bytes.len() {
-        let data_len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
-            as usize;
+        let data_len =
+            u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
         i += 4;
         if i + 4 > bytes.len() {
             break;
@@ -667,13 +648,11 @@ pub fn parse_ai_prompt(chunks: &HashMap<String, String>) -> Option<String> {
 }
 
 fn get_ci<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
-    map.get(key)
-        .map(|s| s.as_str())
-        .or_else(|| {
-            map.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                .map(|(_, v)| v.as_str())
-        })
+    map.get(key).map(|s| s.as_str()).or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    })
 }
 
 fn parse_a1111_parameters(raw: &str) -> Option<String> {
@@ -783,7 +762,11 @@ fn parse_comfy_prompt(raw: &str) -> Option<String> {
         }
     }
     // Join up to two distinct prompts (positive-ish)
-    let joined = unique.into_iter().take(2).collect::<Vec<_>>().join("\n---\n");
+    let joined = unique
+        .into_iter()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n---\n");
     if joined.trim().is_empty() {
         None
     } else {
@@ -794,10 +777,7 @@ fn parse_comfy_prompt(raw: &str) -> Option<String> {
 fn collect_comfy_texts(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::Object(map) => {
-            let class = map
-                .get("class_type")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
+            let class = map.get("class_type").and_then(|c| c.as_str()).unwrap_or("");
             let is_clip = class.contains("CLIPText")
                 || class.contains("TextEncode")
                 || class.eq_ignore_ascii_case("CLIPTextEncode");
@@ -849,7 +829,10 @@ fn truncate_comment(s: &str) -> String {
     if count <= MAX_COMMENT_CHARS {
         return s.to_string();
     }
-    let truncated: String = s.chars().take(MAX_COMMENT_CHARS.saturating_sub(1)).collect();
+    let truncated: String = s
+        .chars()
+        .take(MAX_COMMENT_CHARS.saturating_sub(1))
+        .collect();
     format!("{truncated}…")
 }
 
@@ -926,7 +909,8 @@ mod tests {
         // Minimal PNG: signature + tEXt + IEND
         let mut png = PNG_SIG.to_vec();
         // tEXt: keyword "parameters\0" + value
-        let mut text_data = b"parameters\0a red fox, detailed fur\nNegative prompt: blur\nSteps: 10".to_vec();
+        let mut text_data =
+            b"parameters\0a red fox, detailed fur\nNegative prompt: blur\nSteps: 10".to_vec();
         let mut chunk = Vec::new();
         chunk.extend_from_slice(&(text_data.len() as u32).to_be_bytes());
         chunk.extend_from_slice(b"tEXt");
@@ -985,7 +969,9 @@ mod tests {
     #[test]
     fn decode_user_comment_ascii_header() {
         let mut data = b"ASCII\0\0\0".to_vec();
-        data.extend_from_slice(b"a red fox in snow, detailed fur\nNegative prompt: blur\nSteps: 10");
+        data.extend_from_slice(
+            b"a red fox in snow, detailed fur\nNegative prompt: blur\nSteps: 10",
+        );
         let s = decode_exif_user_comment(&data).unwrap();
         assert!(s.contains("red fox"));
         let p = parse_a1111_parameters(&s).unwrap();

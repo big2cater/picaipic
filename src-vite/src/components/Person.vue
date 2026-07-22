@@ -445,8 +445,9 @@ async function clickIndexFaces() {
     // Use getter for thresholds to ensure we get the latest values, even if state is old
     const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
     const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
-    console.log('clusterEpsilon', clusterEpsilon);
-    await indexFaces(clusterEpsilon);
+    const clusterMode = face?.clusterMode ?? 'auto';
+    console.log('clusterEpsilon', clusterEpsilon, 'clusterMode', clusterMode);
+    await indexFaces(clusterEpsilon, clusterMode);
     await loadPersons();
     await checkFaceStats();
   } catch (e) {

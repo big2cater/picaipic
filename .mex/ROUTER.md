@@ -16,7 +16,7 @@ edges:
     condition: when touching AI plugins, manifests, runtimes, permissions, tasks, packaging, or sandboxing
   - target: patterns/INDEX.md
     condition: before any implementation or diagnosis task
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 ---
 
 
@@ -42,7 +42,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - Merged to main (2026-07-18): Live Photo polish (#1), sandbox Phase 0–2 + runtime/model UX (#2).
 - Built-in **Phase A crop presets** (2026-07-18): ImageEditor ratios + photo-size catalog + custom favorites — `photoSizePresets.ts`, `patterns/change-crop-presets.md`.
 - Built-in **Phase B collage** (refined 2026-07-19): multi-select 拼图 — equal + magazine freeform cells (ids 2, 2v, 3a, 3b, 4, 4m, 6, 6m, 9; NeoImaging-style), strip, free canvas + free drafts; host `export_collage` with `template: "cells"` + cell-sized source downscale — `patterns/change-collage.md`.
-- Built-in **Phase C1–C2 batch** (2026-07-18): multi-select 批处理 wizard — composable actions including border/expand/watermark/text; templates; progress/cancel; host `batch_process_images` — `patterns/change-batch-process.md`.
+- Built-in **Phase C1–C2 batch** (2026-07-18): multi-select 批处理 wizard — composable actions including border/expand/watermark/text (+ optional EXIF capture-time stamp); templates; progress/cancel; host `batch_process_images` — `patterns/change-batch-process.md`.
 - Dialog safety (2026-07-19): collage draft save/delete + batch template save/delete/overwrite use `MessageBox` / plugin-dialog `ask` only — no `window.prompt`/`window.confirm` (WebView no-op risk). Free collage rotate source headroom uses true AABB.
 - Batch process **parallel workers** (2026-07-19): serial dest planning + JoinSet concurrency (2–8); GridView VirtualScroll buffer 4→8. SearchBox submits on Enter only (no per-key SQLite). Face index **CPU parallel** (2026-07-19): 2–4 worker engines + batched SQLite writes; GPU EP still future.
 - **Smart Albums / 智能相册** (2026-07-19): rule SQL + sidebar list/editor + Content smart source — `patterns/change-smart-albums.md`. Inserted at absolute sidebar index 1 (`SIDEBAR.SMART`); later panels shifted — always use `SIDEBAR` constants.
@@ -63,6 +63,18 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **G10 FileInfo Live hover** (2026-07-20): info-panel preview hover/long-press plays Live/Motion; i18n labels — `FileInfo.vue`, `patterns/change-live-photo.md`.
 - **G11 print magazine pack** (2026-07-20): free-rect `magazine` strategy + auto scoring — `printLayout.ts`.
 - **G12 export-only DPI** (2026-07-20): DPI under Export options; Export DPI copy — `PrintLayoutDialog.vue`.
+- **Photo style / 照片格调 + LUT library** (2026-07-21): presets+manual merge; geometry-aware host preview (flip/rotate/crop); decode/JPEG caches; combined color-match+style; crop-aligned compare in editor — `photoStylePresets.ts`, `t_lut.rs`, `t_image.rs`, `patterns/change-photo-style.md`.
+- **Traditional color match / 追色 + style LUT** (2026-07-20/21; **perf pack 2026-07-22**): host global Lab stats match (no segmentation); ImageEditor **调色→追色** + batch `colorMatch`; preview `color_match_preview`; **single-image style 33³ `.cube`** via `export_color_match_lut` (reference preferred, else current; not dual-image match map; not G7 SA-LUT). Stats downsample both images to 1024 max-edge; single-pass full-res grade (no multi-plane 50MP buffers); Lab a/b full 0–255; LUT size 17–65 errors instead of silent clamp — `t_color_match.rs`, `patterns/change-color-match.md`.
+- **Batch cancel atomic write (2026-07-22):** `{dest}.picaipic-batch.tmp` then rename; cancel cleans temps only; progress `current` clamped to `total` — `t_image.rs`, `patterns/change-batch-process.md`.
+- **Audit follow-ups (2026-07-22):** SQLite pool path normalize + max 8 idle; `update_column` allow-lists; face cancel progress→100% + safer model Err; plugin setup log ring 2000 lines — `t_sqlite.rs`, `t_face.rs`, `t_plugin.rs`.
+- **Collage/cluster/watermark audit pack (2026-07-22):** collage atomic temp+rename; JPEG turbo scale-on-decode in `load_image_for_layout`; strip max 48; cluster linear top-k + cancel `Err`; watermark ISO datetime + batch watermark/time caches — `t_image.rs`, `t_cluster.rs`, `t_face.rs`.
+- **Multi-image compare library entry** (2026-07-21): context menu “Compare with next / selected” → `forceSplit` 2-up viewer — `Content.vue`, `fileMenu.ts`, `patterns/change-compare-viewer.md`.
+- **ImageViewer Edit toolbar** (2026-07-21): built-in Edit button; `image.toolbar` plugin buttons no longer rendered (plugins remain on context menu) — `MediaViewer.vue`, `ImageViewer.vue`.
+- **Batch capture-time watermark** (2026-07-21): text/image watermark optional EXIF time stamp — `batchProcess.ts`, `BatchProcessDialog.vue`, `t_image.rs`, `patterns/change-batch-process.md`.
+- **Photo frame / 相框 G-Frame-1+G2** (2026-07-22; **bug pack + presets same day**): classic white/black + float/sink blur+shadow; host `photo_frame_preview` / `export_photo_frame`; dialog + optional library import. Custom presets in `config.photoFrame.presets`; **frame** default logo = `resources/branding/default-frame-logo.png` (`logo-pic.png` wordmark). **App chrome icons** = neural-cat from **`favicon1.ico`** → `src-tauri/icons/*` (not frame logo). Package: `build-exe.bat` passes `-Clean`; `package_windows.ps1` regenerates icons then `cargo clean -p PicAiPic`. — `photoFrameTemplates.ts`, `PhotoFrameDialog.vue`, `t_image.rs`, `patterns/change-photo-frame.md`, `scripts/regenerate_app_icons.ps1`.
+- **Face cluster ANN pack (2026-07-22):** P0 logs + exact/blocked/ANN adaptive + `face.clusterMode`; `instant-distance` HNSW; P3 deferred — `docs/guide/face-cluster-ann-plan.md`, `patterns/change-face-index.md`.
+- **LIVE filter bit 8 + AI threshold honor + smart-tag 0.28 (2026-07-22):** toolbar LIVE; search floors 0.40/0.34/0.28/0.22; no force 0.25 on text search.
+- **Settings hydrate gate + mediaBadges equal-noop (2026-07-22):** `patterns/settings-cross-window-sync.md`; import/updateFileInfo rethrow.
 - **G13 system print UX** (2026-07-20): hint that printer/tray is system dialog only; no host `print_file`.
 - **Correctness fixes (2026-07-20):**
   - Face clustering is **incremental**: preserves existing person names/assignments; only unassigned faces join clusters or create new `Person N` — `t_cluster.rs`, `Face::get_all_for_clustering` includes `person_id`.
@@ -80,14 +92,16 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **G9** optional whole-library empty-comment AI-prompt backfill — not doing (scan-time empty-only remains).
 
 **Not yet built / future work:**
+- **Large-library face clustering** — plan `docs/guide/face-cluster-ann-plan.md`; **P0–P2 + HNSW ANN done** (`instant-distance`, blocked fallback, `face.clusterMode`). **P3 disk/incremental ANN deferred** (low ROI; measure first; prefer embedding cache over graph serde if needed). Ops: `patterns/change-face-index.md`.
 - Sandbox deeper enforcement: Linux netns / real WFP; seccomp; Landlock×ROCm matrix; optional cache ref-range (Phase 3–5 flags exist, default off).
 - Remote signing CRL / dual-sign key-transition artifacts; recurring release-exe plugin regression after host changes.
 - Broader HEIC sequence sample coverage; broader automated coverage outside plugin-host + current Rust unit tests.
 - Publish v1.1.0 draft release (owner decision; repo remains private for now).
-- Commit remaining G10–G13 + correctness pack + calendar SIDEBAR fix if not yet on `main` tip.
+- Commit remaining G10–G13 + correctness pack + calendar SIDEBAR fix + color match / photo style / photo frame / face-cluster ANN / LIVE filter / settings sync / favicon1 app icons if not yet on `main` tip.
+- In-app updater UX polish deferred until public Release (endpoint already configured).
 
 **Known issues / active risks:**
-- `api.js` still swallows many non-mutating IPC errors as `null`/`false`. Mutating metadata paths (`setFileRating` / `setFileFavorite` / `setFileRotate` / `batchUpdateFileMetadata`) now rethrow; broader get-* cleanup is still open.
+- `api.js` still maps many **query** IPC failures to `null`/`false`/`[]` (empty-vs-error debt). Mutating paths rethrow for rating/favorite/rotate/batch metadata and for `importFile` / `importUrl` / `updateFileInfo`. Settings cross-window: hydrate-gated emits + equal-noop object setters (`patterns/settings-cross-window-sync.md`).
 - Adding a new left-sidebar button **shifts absolute indices** — update `SIDEBAR` in `constants.ts` and every `updateContent` / shortcut branch; never hard-code calendar as `3`.
 - Packaged-plugin behavior must be checked in the release executable; dev-mode success alone does not prove installer/resource/runtime correctness.
 - GitHub Actions **artifact storage quota** can fail uploads even when builds succeed; prefer Release assets for installers; PR upload is best-effort.
@@ -110,12 +124,17 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Change AI plugin host, manifest, runtime, task, trust, or sandbox | `context/plugin-runtime.md` |
 | Change Live Photo / Motion Photo detection, pairing, or preview | `patterns/change-live-photo.md` |
 | Change face indexing performance, clustering, or scan DB batching | `patterns/change-face-index.md` |
+| Plan large-library face clustering (ANN / blocked KNN, O(n²) removal) | `docs/guide/face-cluster-ann-plan.md` then `patterns/change-face-index.md` |
 | Change calendar dots, day/month selection, or empty calendar content | `patterns/change-calendar.md` |
 | Change AI PNG prompt import into comments | `patterns/change-ai-prompt-import.md` |
 | Change thumbnail media-info badges | `patterns/change-media-badges.md` |
+| Main↔settings Pinia emit/listen, hydrate gate, object equal-noop | `patterns/settings-cross-window-sync.md` |
+| Regenerate Windows app icons from favicon1.ico | `scripts/regenerate_app_icons.ps1` then `build-exe.bat` / `package_windows.ps1 -Clean` |
 | Change image viewer background modes | `patterns/change-viewer-background.md` |
 | Change AI search filters or result grouping | `patterns/change-ai-search-filters.md` |
-| Plan or implement built-in crop presets, collage, batch, or print layout | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` |
+| Change traditional color match / 追色 / host style `.cube` | `patterns/change-color-match.md` |
+| Plan or implement built-in crop presets, collage, batch, print layout, color match / style LUT, photo style, or photo frame / 相框 | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` / `patterns/change-color-match.md` / `patterns/change-photo-style.md` / `patterns/change-photo-frame.md` |
+| Change EXIF photo frame / 相框 (classic, float/sink blur, logo) | `patterns/change-photo-frame.md` + roadmap Phase G |
 | Build/release installers or plugin packages | `patterns/release-build.md` |
 | Perform any recurring task | `patterns/INDEX.md` |
 

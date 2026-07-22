@@ -73,3 +73,13 @@ pub const MIN_BLUR_SCORE: f32 = 200.0; // Standard Laplacian variance threshold.
 // Clustering Constants
 pub const K_NEIGHBORS: usize = 80; // Prune edges to Top-K (K-NN)
 pub const MIN_SAMPLES: usize = 1; // Minimum samples per cluster
+/// Face count below this (in `auto` mode) uses classic row-wise all-pairs graph build.
+/// At/above: HNSW ANN Top-K (`instant-distance`), with blocked exact fallback on ANN failure.
+/// See `docs/guide/face-cluster-ann-plan.md`.
+pub const CLUSTER_N_EXACT: usize = 8000;
+/// Tile size for blocked exact KNN (fallback / forced exact-distance path).
+pub const CLUSTER_BLOCK_SIZE: usize = 2048;
+/// HNSW `efSearch` floor (also raised to at least `3 * K_NEIGHBORS` at query time).
+pub const CLUSTER_ANN_EF_SEARCH: usize = 120;
+/// HNSW `efConstruction` — higher = better graph quality / slower build.
+pub const CLUSTER_ANN_EF_CONSTRUCTION: usize = 200;

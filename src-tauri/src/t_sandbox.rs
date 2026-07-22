@@ -539,14 +539,10 @@ pub fn experimental_confinement_log_lines(runtime_network_granted: bool) -> Vec<
         lines.push("landlock: not_enforced (PICAIPIC_DISABLE_PLUGIN_SANDBOX is set)".to_string());
     } else if !linux_landlock_flag_enabled() {
         lines.push(
-            "landlock: not_enforced (set PICAIPIC_ENABLE_LINUX_LANDLOCK=1 to enable)"
-                .to_string(),
+            "landlock: not_enforced (set PICAIPIC_ENABLE_LINUX_LANDLOCK=1 to enable)".to_string(),
         );
     } else {
-        lines.push(
-            "landlock: enable_requested (apply_linux_landlock runs on spawn)"
-                .to_string(),
-        );
+        lines.push("landlock: enable_requested (apply_linux_landlock runs on spawn)".to_string());
     }
 
     // Phase 5 — env hygiene (real allowlist when flag on; still opt-in)
@@ -1065,11 +1061,7 @@ mod landlock_linux {
         if rw_ok == 0 && ro_ok == 0 {
             return LandlockStatus {
                 mode: "soft_fail".to_string(),
-                detail: format!(
-                    "no path rules added (abi={}); {}",
-                    abi,
-                    errors.join("; ")
-                ),
+                detail: format!("no path rules added (abi={}); {}", abi, errors.join("; ")),
                 ro_paths: 0,
                 rw_paths: 0,
             };

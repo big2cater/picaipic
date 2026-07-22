@@ -1545,9 +1545,7 @@ pub fn delete_temp_file(path: &str) -> Result<(), String> {
     }
 
     let temp_dir = std::env::temp_dir();
-    let temp_canon = temp_dir
-        .canonicalize()
-        .unwrap_or_else(|_| temp_dir.clone());
+    let temp_canon = temp_dir.canonicalize().unwrap_or_else(|_| temp_dir.clone());
 
     // Prefer canonical path when the file exists; otherwise require parent under temp.
     if target.exists() {
@@ -1566,7 +1564,9 @@ pub fn delete_temp_file(path: &str) -> Result<(), String> {
 
     // Already gone is success (idempotent cleanup).
     if let Some(parent) = target.parent() {
-        let parent_canon = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        let parent_canon = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
         if parent_canon.starts_with(&temp_canon) || parent == temp_dir {
             return Ok(());
         }
@@ -1621,19 +1621,31 @@ pub fn get_folder_files(
     folder_path: &str,
     from_db_only: bool,
 ) -> (Vec<AFile>, u32, u32) {
-    fn matches_file_type_filter(filter: i64, file_type: i64) -> bool {
+    /// Bitmask: 1=image, 2=video, 4=raw, 8=Live/Motion still (`live_photo_type` 1/3/4).
+    fn matches_file_type_filter(filter: i64, file_type: i64, live_photo_type: i64) -> bool {
         if filter <= 0 {
             return true;
         }
+        // All traditional kinds selected ≡ no filter (LIVE bit alone would still apply, but
+        // traditional==7 is treated as full library — same as SQL `build_file_type_condition`).
+        if (filter & 7) == 7 {
+            return true;
+        }
 
+        let mut matched = false;
         let bit = match file_type {
             1 => 1,
             2 => 2,
             3 => 4,
             _ => 0,
         };
-
-        bit > 0 && (filter & bit) == bit
+        if bit > 0 && (filter & bit) == bit {
+            matched = true;
+        }
+        if (filter & 8) == 8 && matches!(live_photo_type, 1 | 3 | 4) {
+            matched = true;
+        }
+        matched
     }
 
     let mut new_count = 0;
@@ -1657,7 +1669,11 @@ pub fn get_folder_files(
             Ok(files) => files
                 .into_iter()
                 .filter(|file| {
-                    matches_file_type_filter(file_type, file.file_type.unwrap_or_default())
+                    matches_file_type_filter(
+                        file_type,
+                        file.file_type.unwrap_or_default(),
+                        file.live_photo_type.unwrap_or(0),
+                    )
                 })
                 .collect(),
             Err(e) => {
@@ -1682,16 +1698,25 @@ pub fn get_folder_files(
             };
 
             if let Some(ftype) = get_file_type(file_path_str) {
-                if matches_file_type_filter(file_type, ftype) {
+                // When LIVE is in the mask, still ingest candidates so live_photo_type can be known;
+                // final filter uses DB live_photo_type after add_to_db.
+                let may_need_live = (file_type & 8) == 8;
+                if matches_file_type_filter(file_type, ftype, 0) || may_need_live {
                     let now = Utc::now().timestamp_millis();
                     match AFile::add_to_db(resolved_folder_id, file_path_str, ftype, now) {
                         Ok((file, status)) => {
-                            if status == 1 {
-                                new_count += 1;
-                            } else if status == 2 {
-                                updated_count += 1;
+                            if matches_file_type_filter(
+                                file_type,
+                                file.file_type.unwrap_or(ftype),
+                                file.live_photo_type.unwrap_or(0),
+                            ) {
+                                if status == 1 {
+                                    new_count += 1;
+                                } else if status == 2 {
+                                    updated_count += 1;
+                                }
+                                file_list.push(file);
                             }
-                            file_list.push(file);
                         }
                         Err(e) => {
                             eprintln!("Failed to add file to DB: {} ({})", file_path_str, e);

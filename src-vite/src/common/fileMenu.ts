@@ -22,6 +22,7 @@ import {
   IconHeartFilled,
   IconPalette,
   IconDownload,
+  IconSplitOn,
 } from '@/common/icons';
 
 type PluginMenuItem = {
@@ -74,6 +75,14 @@ export const useFileMenuItems = (
         icon: markRaw(IconMonitor),
         shortcut: shortcut('file.openNewWindow'),
         action: createAction('open')
+      },
+      {
+        label: localeMsg.value.menu.file.compare_with_next
+          || localeMsg.value.image_viewer?.toolbar?.split_to_2
+          || 'Compare with next...',
+        icon: markRaw(IconSplitOn),
+        disabled: !isImage,
+        action: createAction('compare-with-next')
       },
       {
         label: (

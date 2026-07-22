@@ -24,7 +24,9 @@ export type BatchActionType =
   | 'border'
   | 'expand'
   | 'watermark'
-  | 'text';
+  | 'text'
+  | 'colorMatch'
+  | 'photoStyle';
 
 export type BatchResizeMode = 'longEdge' | 'width' | 'height' | 'percent' | 'exact';
 export type BatchCropMode = 'aspect' | 'photo';
@@ -132,6 +134,8 @@ export interface BatchWatermarkAction extends BatchActionBase {
   /** Opacity 0–100. */
   opacity: number;
   margin: number;
+  includeCaptureTime?: boolean;
+  captureTimeFormat?: 'datetime' | 'date' | 'time';
 }
 
 export interface BatchTextAction extends BatchActionBase {
@@ -143,6 +147,42 @@ export interface BatchTextAction extends BatchActionBase {
   color: string;
   opacity: number;
   margin: number;
+  /** Stamp EXIF DateTimeOriginal (per file). */
+  includeCaptureTime?: boolean;
+  /** datetime | date | time */
+  captureTimeFormat?: 'datetime' | 'date' | 'time';
+}
+
+export interface BatchColorMatchAction extends BatchActionBase {
+  type: 'colorMatch';
+  referenceFilePath: string;
+  /** 0–100 UI percent */
+  intensity: number;
+  /** 0–100 UI percent */
+  tonePreservation: number;
+  autoWb: boolean;
+  /** 0–100 UI percent */
+  highlightProtection: number;
+  /** 0–100 UI percent */
+  shadowProtection: number;
+}
+
+export interface BatchPhotoStyleAction extends BatchActionBase {
+  type: 'photoStyle';
+  styleId: string;
+  /** Optional inline style overrides; host uses style* fields when present. */
+  styleBrightness?: number;
+  styleContrast?: number;
+  styleSaturation?: number;
+  styleHue?: number;
+  highlights?: number;
+  shadows?: number;
+  fade?: number;
+  vignette?: number;
+  grain?: number;
+  filter?: string;
+  lutId?: string;
+  lutIntensity?: number;
 }
 
 export type BatchAction =
@@ -159,7 +199,9 @@ export type BatchAction =
   | BatchBorderAction
   | BatchExpandAction
   | BatchWatermarkAction
-  | BatchTextAction;
+  | BatchTextAction
+  | BatchColorMatchAction
+  | BatchPhotoStyleAction;
 
 export interface BatchActionTemplate {
   id: string;
@@ -254,6 +296,8 @@ export const BATCH_ACTION_PALETTE: readonly {
       scale: 18,
       opacity: 70,
       margin: 24,
+      includeCaptureTime: false,
+      captureTimeFormat: 'datetime',
     }),
   },
   {
@@ -266,6 +310,20 @@ export const BATCH_ACTION_PALETTE: readonly {
       color: '#ffffff',
       opacity: 85,
       margin: 24,
+      includeCaptureTime: false,
+      captureTimeFormat: 'datetime',
+    }),
+  },
+  {
+    type: 'colorMatch',
+    defaultFactory: () => ({
+      type: 'colorMatch',
+      referenceFilePath: '',
+      intensity: 100,
+      tonePreservation: 50,
+      autoWb: true,
+      highlightProtection: 80,
+      shadowProtection: 80,
     }),
   },
 ] as const;
@@ -372,8 +430,18 @@ export function describeAction(
         pos: t(`batch.pos_${(action.position || 'bottom-right').replace('-', '_')}`),
       });
     case 'text': {
+      if ((action as any).includeCaptureTime) {
+        return t('batch.action_text_capture_time');
+      }
       const sample = String(action.text || '').slice(0, 16);
       return t('batch.action_text', { text: sample || '…' });
+    }
+    case 'colorMatch': {
+      const path = String(action.referenceFilePath || '');
+      const name = path
+        ? path.replace(/\\/g, '/').split('/').pop() || path
+        : '…';
+      return t('batch.action_colorMatch', { name });
     }
     default:
       return t('batch.action_unknown');
@@ -405,6 +473,34 @@ export function normalizeBatchTemplates(raw: unknown): BatchActionTemplate[] {
 export function actionsForHost(actions: BatchAction[]) {
   return actions.map((a) => {
     const { id: _id, ...rest } = a as any;
+    if (a.type === 'colorMatch') {
+      return {
+        type: 'colorMatch',
+        referenceFilePath: a.referenceFilePath,
+        intensity: (a.intensity ?? 100) / 100,
+        tonePreservation: (a.tonePreservation ?? 50) / 100,
+        autoWb: a.autoWb !== false,
+        highlightProtection: (a.highlightProtection ?? 80) / 100,
+        shadowProtection: (a.shadowProtection ?? 80) / 100,
+      };
+    }
+    if (a.type === 'photoStyle') {
+      return {
+        type: 'photoStyle',
+        styleBrightness: a.styleBrightness ?? 0,
+        styleContrast: a.styleContrast ?? 0,
+        styleSaturation: a.styleSaturation ?? 100,
+        styleHue: a.styleHue ?? 0,
+        highlights: a.highlights ?? 0,
+        shadows: a.shadows ?? 0,
+        fade: a.fade ?? 0,
+        vignette: a.vignette ?? 0,
+        grain: a.grain ?? 0,
+        filter: a.filter || null,
+        lutId: a.lutId || null,
+        lutIntensity: a.lutIntensity ?? 100,
+      };
+    }
     return rest;
   });
 }

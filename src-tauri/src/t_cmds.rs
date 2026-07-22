@@ -666,6 +666,62 @@ pub async fn edit_image(params: t_image::EditParams) -> Result<bool, String> {
     Ok(t_image::edit_image(params).await)
 }
 
+/// traditional color-match preview (JPEG bytes)
+#[tauri::command]
+pub async fn color_match_preview(
+    params: t_image::ColorMatchPreviewParams,
+) -> Result<Vec<u8>, String> {
+    t_image::color_match_preview(params).await
+}
+
+/// export traditional color-match `.cube` LUT (default 33^3)
+#[tauri::command]
+pub async fn export_color_match_lut(
+    params: t_image::ColorMatchLutExportParams,
+) -> Result<bool, String> {
+    t_image::export_color_match_lut(params).await
+}
+
+/// list imported LUT library entries
+#[tauri::command]
+pub fn list_lut_library() -> Result<Vec<crate::t_lut::LutLibraryEntry>, String> {
+    crate::t_lut::load_lut_index()
+}
+
+/// import a .cube into the app LUT library
+#[tauri::command]
+pub fn import_lut_file(
+    source_path: String,
+    display_name: Option<String>,
+) -> Result<crate::t_lut::LutLibraryEntry, String> {
+    crate::t_lut::import_lut_file(&source_path, display_name)
+}
+
+/// delete a LUT library entry
+#[tauri::command]
+pub fn delete_lut_entry(lut_id: String) -> Result<bool, String> {
+    crate::t_lut::delete_lut_entry(&lut_id)
+}
+
+/// update LUT library entry metadata
+#[tauri::command]
+pub fn update_lut_entry(
+    lut_id: String,
+    name: Option<String>,
+    favorite: Option<bool>,
+    category: Option<String>,
+) -> Result<crate::t_lut::LutLibraryEntry, String> {
+    crate::t_lut::update_lut_entry(&lut_id, name, favorite, category)
+}
+
+/// photo-style preview JPEG (downscaled)
+#[tauri::command]
+pub async fn apply_photo_style_preview(
+    params: t_image::PhotoStylePreviewParams,
+) -> Result<Vec<u8>, String> {
+    t_image::apply_photo_style_preview(params).await
+}
+
 /// export a template collage
 #[tauri::command]
 pub async fn export_collage(params: t_image::CollageExportParams) -> Result<bool, String> {
@@ -692,6 +748,30 @@ pub fn cancel_batch_process() -> Result<(), String> {
 #[tauri::command]
 pub async fn export_print_layout(params: t_image::PrintLayoutExportParams) -> Result<bool, String> {
     t_image::export_print_layout(params).await
+}
+
+/// preview classic EXIF photo frame (JPEG bytes)
+#[tauri::command]
+pub async fn photo_frame_preview(
+    params: t_image::PhotoFramePreviewParams,
+) -> Result<Vec<u8>, String> {
+    t_image::photo_frame_preview(params).await
+}
+
+/// export EXIF photo frames for multiple images
+#[tauri::command]
+pub async fn export_photo_frame(
+    app_handle: tauri::AppHandle,
+    params: t_image::PhotoFrameExportParams,
+) -> Result<t_image::PhotoFrameExportResult, String> {
+    t_image::export_photo_frame(app_handle, params).await
+}
+
+/// cancel an in-flight photo frame export
+#[tauri::command]
+pub fn cancel_photo_frame_export() -> Result<(), String> {
+    t_image::cancel_photo_frame_export();
+    Ok(())
 }
 
 /// copy an edited image to clipboard
@@ -1917,6 +1997,7 @@ pub fn index_faces(
     status_state: State<t_face::FaceIndexingStatus>,
     progress_state: State<t_face::FaceIndexProgressState>,
     cluster_epsilon: Option<f32>,
+    cluster_mode: Option<String>,
 ) -> Result<(), String> {
     t_face::run_face_indexing(
         app_handle,
@@ -1925,6 +2006,7 @@ pub fn index_faces(
         (*status_state).clone(),
         (*progress_state).clone(),
         cluster_epsilon,
+        cluster_mode,
     )
 }
 
@@ -2352,4 +2434,3 @@ pub fn get_smart_query_files(
 ) -> Result<Vec<AFile>, String> {
     AFile::get_smart_query_files(&params, offset, limit)
 }
-

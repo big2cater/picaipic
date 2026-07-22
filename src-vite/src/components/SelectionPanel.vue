@@ -185,6 +185,13 @@
           >
             {{ $t('info_panel.print_layout') }}
           </PanelActionButton>
+          <PanelActionButton
+            :icon="IconCard"
+            :disabled="!canPhotoFrame"
+            @click="$emit('photoFrame')"
+          >
+            {{ $t('info_panel.photo_frame') }}
+          </PanelActionButton>
         </div>
 
       </div>
@@ -205,6 +212,7 @@ import {
   IconMove,
   IconRotate,
   IconTag,
+  IconCard,
   IconFiles,
   IconStack,
   IconTile,
@@ -212,6 +220,7 @@ import {
 } from '@/common/icons';
 import { filterCollageSourceFiles } from '@/common/collageTemplates';
 import { filterBatchImageFiles } from '@/common/batchProcess';
+import { filterPhotoFrameImageFiles } from '@/common/photoFrameTemplates';
 import { config } from '@/common/config';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
@@ -249,6 +258,7 @@ defineEmits([
   'collage',
   'batch',
   'printLayout',
+  'photoFrame',
   'favoriteAll',
   'unfavoriteAll',
   'setRatingAll',
@@ -263,6 +273,9 @@ const localeMsg = computed(() => messages.value[locale.value] as any);
 const SELECTED_THUMBNAIL_LIMIT = 19;
 const canCollage = computed(() => filterCollageSourceFiles(props.selectedFiles as any[]).length >= 1);
 const canBatch = computed(() => filterBatchImageFiles(props.selectedFiles as any[]).length >= 1);
+const canPhotoFrame = computed(
+  () => filterPhotoFrameImageFiles(props.selectedFiles as any[]).length >= 1,
+);
 
 const openExternalLabel = computed(() => {
   const count = Number(props.selectedCount || 0);

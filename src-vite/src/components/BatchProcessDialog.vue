@@ -161,9 +161,42 @@
                   <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.opacity') }}: {{ action.opacity }}%</label>
                   <input v-model.number="action.opacity" type="range" min="5" max="100" class="range range-xs range-primary col-span-2" />
                   <input v-model.number="action.margin" type="number" min="0" class="input input-bordered input-xs col-span-2" :placeholder="$t('batch.margin')" />
+                
+                  <label class="col-span-2 flex items-center gap-2 text-[11px] opacity-80 cursor-pointer select-none">
+                    <input v-model="action.includeCaptureTime" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
+                    {{ $t('batch.include_capture_time') }}
+                  </label>
+                  <select
+                    v-if="action.includeCaptureTime"
+                    v-model="action.captureTimeFormat"
+                    class="select select-bordered select-xs col-span-2"
+                  >
+                    <option value="datetime">{{ $t('batch.capture_fmt_datetime') }}</option>
+                    <option value="date">{{ $t('batch.capture_fmt_date') }}</option>
+                    <option value="time">{{ $t('batch.capture_fmt_time') }}</option>
+                  </select>
                 </template>
                 <template v-else-if="action.type === 'text'">
-                  <input v-model="action.text" type="text" maxlength="120" class="input input-bordered input-xs col-span-2" :placeholder="$t('batch.text_content')" />
+                  <label class="col-span-2 flex items-center gap-2 text-[11px] opacity-80 cursor-pointer select-none">
+                    <input v-model="action.includeCaptureTime" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
+                    {{ $t('batch.include_capture_time') }}
+                  </label>
+                  <select
+                    v-if="action.includeCaptureTime"
+                    v-model="action.captureTimeFormat"
+                    class="select select-bordered select-xs col-span-2"
+                  >
+                    <option value="datetime">{{ $t('batch.capture_fmt_datetime') }}</option>
+                    <option value="date">{{ $t('batch.capture_fmt_date') }}</option>
+                    <option value="time">{{ $t('batch.capture_fmt_time') }}</option>
+                  </select>
+                  <input
+                    v-model="action.text"
+                    type="text"
+                    maxlength="120"
+                    class="input input-bordered input-xs col-span-2"
+                    :placeholder="action.includeCaptureTime ? $t('batch.text_prefix_optional') : $t('batch.text_content')"
+                  />
                   <select v-model="action.position" class="select select-bordered select-xs col-span-2">
                     <option v-for="pos in anchorOptions" :key="pos" :value="pos">{{ $t(`batch.pos_${pos.replace('-', '_')}`) }}</option>
                   </select>
@@ -172,6 +205,48 @@
                   <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.opacity') }}: {{ action.opacity }}%</label>
                   <input v-model.number="action.opacity" type="range" min="5" max="100" class="range range-xs range-primary col-span-2" />
                   <input v-model.number="action.margin" type="number" min="0" class="input input-bordered input-xs col-span-2" :placeholder="$t('batch.margin')" />
+                </template>
+                <template v-else-if="action.type === 'photoStyle'">
+                  <input v-model="action.styleId" type="text" class="input input-bordered input-xs col-span-2" :placeholder="$t('batch.type_photoStyle')" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.contrast') }}: {{ action.styleContrast ?? 0 }}</label>
+                  <input v-model.number="action.styleContrast" type="range" min="-100" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.saturation') }}: {{ action.styleSaturation ?? 100 }}</label>
+                  <input v-model.number="action.styleSaturation" type="range" min="0" max="200" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.fade') }}: {{ action.fade ?? 0 }}</label>
+                  <input v-model.number="action.fade" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.vignette') }}: {{ action.vignette ?? 0 }}</label>
+                  <input v-model.number="action.vignette" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.grain') }}: {{ action.grain ?? 0 }}</label>
+                  <input v-model.number="action.grain" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <input v-model="action.lutId" type="text" class="input input-bordered input-xs col-span-2" :placeholder="$t('photo_style.lut')" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('photo_style.lut_intensity') }}: {{ action.lutIntensity ?? 100 }}</label>
+                  <input v-model.number="action.lutIntensity" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                </template>
+                <template v-else-if="action.type === 'colorMatch'">
+                  <div class="col-span-2 flex gap-1">
+                    <input
+                      v-model="action.referenceFilePath"
+                      type="text"
+                      class="input input-bordered input-xs flex-1 min-w-0"
+                      :placeholder="$t('batch.color_match_ref')"
+                      readonly
+                    />
+                    <button type="button" class="t-button-default text-[10px]" @click.stop="pickColorMatchRef(action)">
+                      {{ $t('batch.color_match_pick_ref') }}
+                    </button>
+                  </div>
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.color_match_intensity') }}: {{ action.intensity }}%</label>
+                  <input v-model.number="action.intensity" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.color_match_tone') }}: {{ action.tonePreservation }}%</label>
+                  <input v-model.number="action.tonePreservation" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.color_match_highlight') }}: {{ action.highlightProtection }}%</label>
+                  <input v-model.number="action.highlightProtection" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 text-[11px] opacity-60">{{ $t('batch.color_match_shadow') }}: {{ action.shadowProtection }}%</label>
+                  <input v-model.number="action.shadowProtection" type="range" min="0" max="100" class="range range-xs range-primary col-span-2" />
+                  <label class="col-span-2 flex items-center gap-2 text-[11px] opacity-70 cursor-pointer">
+                    <input v-model="action.autoWb" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
+                    {{ $t('batch.color_match_auto_wb') }}
+                  </label>
                 </template>
                 <template v-else>
                   <input v-model.number="action.value" type="range" class="range range-xs range-primary col-span-2" :min="sliderMin(action)" :max="sliderMax(action)" :step="1" />
@@ -555,6 +630,18 @@ async function pickWatermark(action: BatchAction) {
   if (selected) action.imagePath = String(selected);
 }
 
+async function pickColorMatchRef(action: BatchAction) {
+  if (action.type !== 'colorMatch') return;
+  const selected = await openDialog({
+    multiple: false,
+    filters: [{
+      name: 'Images',
+      extensions: ['png', 'jpg', 'jpeg', 'webp', 'tif', 'tiff', 'bmp', 'heic', 'heif', 'jxl'],
+    }],
+  });
+  if (selected) action.referenceFilePath = String(selected);
+}
+
 function persistTemplates(list: BatchActionTemplate[]) {
   ensureTemplatesConfig();
   (config as any).batchProcess.templates = normalizeBatchTemplates(list);
@@ -604,6 +691,34 @@ async function deleteTemplate() {
 
 function hostActions() {
   return actions.value.map((a) => {
+    if (a.type === 'photoStyle') {
+      return {
+        type: 'photoStyle',
+        styleBrightness: a.styleBrightness ?? 0,
+        styleContrast: a.styleContrast ?? 0,
+        styleSaturation: a.styleSaturation ?? 100,
+        styleHue: a.styleHue ?? 0,
+        highlights: a.highlights ?? 0,
+        shadows: a.shadows ?? 0,
+        fade: a.fade ?? 0,
+        vignette: a.vignette ?? 0,
+        grain: a.grain ?? 0,
+        filter: a.filter || null,
+        lutId: a.lutId || null,
+        lutIntensity: a.lutIntensity ?? 100,
+      };
+    }
+    if (a.type === 'colorMatch') {
+      return {
+        type: 'colorMatch',
+        referenceFilePath: a.referenceFilePath,
+        intensity: (a.intensity ?? 100) / 100,
+        tonePreservation: (a.tonePreservation ?? 50) / 100,
+        autoWb: a.autoWb !== false,
+        highlightProtection: (a.highlightProtection ?? 80) / 100,
+        shadowProtection: (a.shadowProtection ?? 80) / 100,
+      };
+    }
     const base: any = { ...a };
     delete base.id;
     if (a.type === 'crop') {
@@ -627,6 +742,13 @@ async function startBatch() {
   lastResult.value = null;
   if (files.value.length === 0 || actions.value.length === 0) {
     errorMessage.value = t('batch.need_files_actions');
+    return;
+  }
+  const missingColorRef = actions.value.some(
+    (a) => a.type === 'colorMatch' && !String(a.referenceFilePath || '').trim(),
+  );
+  if (missingColorRef) {
+    errorMessage.value = t('batch.color_match_need_ref');
     return;
   }
   if (outputMode.value === 'saveAs' && !outputDir.value) {

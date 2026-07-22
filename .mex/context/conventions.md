@@ -18,7 +18,9 @@ edges:
     condition: when persistent schema or storage behavior changes
   - target: patterns/change-live-photo.md
     condition: when working on Live Photo / Motion Photo features
-last_updated: 2026-07-20
+  - target: patterns/change-photo-frame.md
+    condition: when changing EXIF photo frame / 相框
+last_updated: 2026-07-22
 ---
 
 
@@ -55,7 +57,9 @@ export async function operationName(value) {
   }
 }
 ```
-The Rust command must be registered in `main.rs`; event listeners must return/clean up the unlisten function when component-scoped. Mutating metadata (`setFileRating` / favorite / rotate / batch metadata) must rethrow; do not map failures to `null` when the UI optimistically updates. Query helpers may still return `null` for empty-vs-error ambiguity (known debt).
+The Rust command must be registered in `main.rs`; event listeners must return/clean up the unlisten function when component-scoped. Mutating metadata (`setFileRating` / favorite / rotate / batch metadata) must rethrow; do not map failures to `null` when the UI optimistically updates. Query helpers may still return `null` for empty-vs-error ambiguity (known debt). Prefer rethrow on **mutating** IPC (`importFile` / `updateFileInfo` / rating / favorite / rotate / batch metadata).
+
+**Settings cross-window pattern:** main and settings webviews each own Pinia and listen for `settings-*-changed`. Settings.vue must gate emits with a mount hydrate flag (`emitSettings` / `settingsHydrating`) so opening Settings does not fan out every current value. Object settings need equal-noop setters (see `setGridMediaBadges`, `patterns/settings-cross-window-sync.md`, `patterns/change-media-badges.md`).
 
 **Sidebar routing pattern:** `Content.vue` `updateContent` switches on `config.main.sidebarIndex` using `SIDEBAR.*`. Calendar date selection only updates `libConfig.calendar`; Content must be on `SIDEBAR.CALENDAR` or the grid will not load that range. See `patterns/change-calendar.md`.
 
@@ -74,6 +78,8 @@ The Rust command must be registered in `main.rs`; event listeners must return/cl
 **Search file-type mask pattern:** Library, filename, and AI/similar search share the same bitmask (0 all, 1 image, 2 video, 4 raw). Pass as `searchFileType` / `search_file_type`; apply in SQL (`build_file_type_condition`) before ranking when possible. See `patterns/change-ai-search-filters.md`.
 
 **Viewer presentation pattern:** Thumbnail media badges and viewer canvas background are Pinia presentation flags only—no schema. Prefer helpers in `utils.ts` and existing settings event sync across main/settings windows. See `patterns/change-media-badges.md` and `patterns/change-viewer-background.md`.
+
+**Photo frame / 相框 pattern:** Multi-select creative dialog (not ImageEditor tab). Host reads EXIF/LibRaw, composites classic bar or float/sink blur+shadow, optional local logo. IPC camelCase options via `photoFramePreview` / `exportPhotoFrame`; progress event `photo-frame-progress`. Save-as only; optional import copies outputs into the open album. See `patterns/change-photo-frame.md` and roadmap Phase G.
 
 ## Verify Checklist
 

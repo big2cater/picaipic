@@ -24,13 +24,14 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::{t_jxl, t_libraw, t_utils};
+use crate::{t_color_match, t_jxl, t_libraw, t_lut, t_utils};
 
 #[derive(Default)]
 pub struct CaptureSettings {
@@ -895,6 +896,96 @@ pub struct EditParams {
     blur: Option<f32>,       // sigma > 0
     hue_rotate: Option<i32>, // degrees
     saturation: Option<f32>, // multiplier, 1.0 is normal
+    /// Optional traditional global Lab color match against a reference image.
+    #[serde(default)]
+    #[serde(rename = "colorMatch")]
+    color_match: Option<ColorMatchEditSpec>,
+    /// Optional photo style recipe (params + effects + LUT).
+    #[serde(default)]
+    #[serde(rename = "photoStyle")]
+    photo_style: Option<t_lut::PhotoStyleParams>,
+}
+
+/// Color-match fields embedded in edit_image / batch actions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ColorMatchEditSpec {
+    #[serde(rename = "referenceFilePath")]
+    pub reference_file_path: String,
+    #[serde(default = "default_cm_intensity")]
+    pub intensity: f32,
+    #[serde(default = "default_cm_tone")]
+    #[serde(rename = "tonePreservation")]
+    pub tone_preservation: f32,
+    #[serde(default = "default_cm_true")]
+    #[serde(rename = "autoWb")]
+    pub auto_wb: bool,
+    #[serde(default = "default_cm_protection")]
+    #[serde(rename = "highlightProtection")]
+    pub highlight_protection: f32,
+    #[serde(default = "default_cm_protection")]
+    #[serde(rename = "shadowProtection")]
+    pub shadow_protection: f32,
+}
+
+fn default_cm_intensity() -> f32 {
+    1.0
+}
+fn default_cm_tone() -> f32 {
+    0.5
+}
+fn default_cm_true() -> bool {
+    true
+}
+fn default_cm_protection() -> f32 {
+    0.8
+}
+
+impl ColorMatchEditSpec {
+    fn to_params(&self) -> t_color_match::ColorMatchParams {
+        t_color_match::ColorMatchParams {
+            intensity: self.intensity,
+            tone_preservation: self.tone_preservation,
+            auto_wb: self.auto_wb,
+            highlight_protection: self.highlight_protection,
+            shadow_protection: self.shadow_protection,
+        }
+        .clamped()
+    }
+}
+
+/// Preview-only traditional color match (returns JPEG bytes).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ColorMatchPreviewParams {
+    #[serde(rename = "sourceFilePath")]
+    pub source_file_path: String,
+    #[serde(rename = "referenceFilePath")]
+    pub reference_file_path: String,
+    #[serde(default)]
+    pub orientation: Option<i32>,
+    /// Cap longest edge for interactive preview (default 1600).
+    #[serde(default)]
+    #[serde(rename = "maxEdge")]
+    pub max_edge: Option<u32>,
+    #[serde(default = "default_cm_intensity")]
+    pub intensity: f32,
+    #[serde(default = "default_cm_tone")]
+    #[serde(rename = "tonePreservation")]
+    pub tone_preservation: f32,
+    #[serde(default = "default_cm_true")]
+    #[serde(rename = "autoWb")]
+    pub auto_wb: bool,
+    #[serde(default = "default_cm_protection")]
+    #[serde(rename = "highlightProtection")]
+    pub highlight_protection: f32,
+    #[serde(default = "default_cm_protection")]
+    #[serde(rename = "shadowProtection")]
+    pub shadow_protection: f32,
+    /// Optional photo-style recipe applied after color match (matches edit_image order).
+    #[serde(default)]
+    #[serde(rename = "photoStyle")]
+    pub photo_style: Option<t_lut::PhotoStyleParams>,
+    #[serde(default)]
+    pub geometry: Option<PreviewGeometry>,
 }
 
 /// edit an image and save to dest file
@@ -1772,7 +1863,11 @@ async fn export_collage_free(params: CollageExportParams) -> Result<bool, String
 }
 
 fn save_collage_image(params: &CollageExportParams, img: DynamicImage) -> Result<bool, String> {
-    let path = Path::new(&params.dest_file_path);
+    let dest = params.dest_file_path.trim();
+    if dest.is_empty() {
+        return Err("destFilePath is required".to_string());
+    }
+    let path = Path::new(dest);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
@@ -1786,22 +1881,39 @@ fn save_collage_image(params: &CollageExportParams, img: DynamicImage) -> Result
         _ => image::ImageFormat::Jpeg,
     };
     let quality = params.quality.unwrap_or(90).clamp(1, 100);
+    // Same atomic pattern as batch/photo-frame: write temp then rename.
+    let temp = format!("{dest}.picaipic-collage.tmp");
+    let temp_path = Path::new(&temp);
 
-    let save_ok = if format == image::ImageFormat::Jpeg {
-        let rgb = img.to_rgb8();
-        match std::fs::File::create(path) {
-            Ok(file) => {
-                let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
-                encoder.encode_image(&rgb).is_ok()
-            }
-            Err(_) => false,
+    let write_temp = || -> Result<(), String> {
+        if format == image::ImageFormat::Jpeg {
+            let rgb = img.to_rgb8();
+            let file = std::fs::File::create(temp_path)
+                .map_err(|e| format!("create collage temp: {}", e))?;
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
+            encoder
+                .encode_image(&rgb)
+                .map_err(|e| format!("encode collage jpeg: {}", e))?;
+        } else {
+            img.save_with_format(temp_path, format)
+                .map_err(|e| format!("write collage temp: {}", e))?;
         }
-    } else {
-        img.save_with_format(path, format).is_ok()
+        Ok(())
     };
 
-    if !save_ok {
-        return Err("Failed to write collage image".to_string());
+    if let Err(e) = write_temp() {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+    if let Err(e) = fs::rename(&temp, path) {
+        if let Err(copy_err) = fs::copy(&temp, path) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!("finalize collage: {e}; copy fallback: {copy_err}"));
+        }
+        let _ = fs::remove_file(&temp);
     }
     Ok(true)
 }
@@ -1892,7 +2004,8 @@ fn parse_fill_mode(raw: Option<&str>) -> CollageFillMode {
 }
 
 fn collage_grid_dims(template: &str, image_count: usize) -> Result<(u32, u32), String> {
-    let n = image_count.max(1).min(12) as u32;
+    // Strip layouts expand with image count; keep a practical desktop cap (was 12).
+    let n = image_count.max(1).min(48) as u32;
     match template.trim() {
         "2" | "2h" => Ok((2, 1)),
         "2v" => Ok((1, 2)),
@@ -1949,6 +2062,8 @@ async fn load_image_for_layout(file_path: &str, max_edge: u32) -> Result<Dynamic
         return Err("Not an image file".to_string());
     }
 
+    let max_edge = max_edge.clamp(64, 8192);
+
     let mut img = if should_generate_preview_for_file(file_path, file_type) {
         let preview = get_generated_preview_bytes(file_path)
             .await?
@@ -1968,13 +2083,29 @@ async fn load_image_for_layout(file_path: &str, max_edge: u32) -> Result<Dynamic
         {
             img
         }
+    } else if is_jpeg_path(file_path) {
+        // libjpeg-turbo scale-on-decode: avoid full-res RGBA peak on 50MP+ JPEGs.
+        match crate::t_jpeg::decode_rgb8_scaled(file_path, max_edge, max_edge) {
+            Ok((bytes, w, h)) => {
+                let rgb = image::RgbImage::from_raw(w, h, bytes).ok_or_else(|| {
+                    "libjpeg-turbo returned buffer size mismatch".to_string()
+                })?;
+                let img = DynamicImage::ImageRgb8(rgb);
+                apply_orientation(img, get_image_orientation(file_path))
+            }
+            Err(_) => {
+                // Fallback: full open + resize (non-turbo builds / exotic JPEGs).
+                let path = Path::new(file_path);
+                let img = image::open(path).map_err(|e| e.to_string())?;
+                apply_orientation(img, get_image_orientation(file_path))
+            }
+        }
     } else {
         let path = Path::new(file_path);
         let img = image::open(path).map_err(|e| e.to_string())?;
         apply_orientation(img, get_image_orientation(file_path))
     };
 
-    let max_edge = max_edge.clamp(64, 8192);
     let (w, h) = img.dimensions();
     let longest = w.max(h).max(1);
     if longest > max_edge {
@@ -2024,10 +2155,7 @@ fn downscale_image_for_fit_cells(
     let nh = ((ih as f32) * s).round().max(1.0) as u32;
     // For cover, keep at least cell dimensions on the covering axes.
     let (nw, nh) = match fill {
-        CollageFillMode::Cover => (
-            nw.max(max_cw).min(iw),
-            nh.max(max_ch).min(ih),
-        ),
+        CollageFillMode::Cover => (nw.max(max_cw).min(iw), nh.max(max_ch).min(ih)),
         CollageFillMode::Contain => (nw.min(iw), nh.min(ih)),
     };
     if nw >= iw && nh >= ih {
@@ -2217,21 +2345,297 @@ async fn get_edited_image(params: &EditParams) -> Result<DynamicImage, String> {
         }
     }
 
-    // 5. Adjustments & Filters
+    // 5. Traditional color match (before CSS-style adjustments so sliders still refine the grade).
+    if let Some(spec) = params.color_match.as_ref() {
+        let ref_path = spec.reference_file_path.trim();
+        if !ref_path.is_empty() {
+            let reference = load_image_for_layout(ref_path, 2048).await?;
+            img = t_color_match::apply_traditional_color_match(&img, &reference, &spec.to_params());
+        }
+    }
+
+    // 5b. Photo style (recipe + optional LUT + effects).
+    let photo_style = params.photo_style.clone();
+    if let Some(style) = photo_style.as_ref() {
+        img = t_lut::apply_photo_style(img, style);
+    }
+
+    // 6. Adjustments & Filters
     // NOTE: Implementations match CSS filter semantics so preview == saved result.
-    // Brightness/contrast (and saturation when no blur/hue) are fused into one pass.
-    img = apply_edit_color_adjustments(
-        img,
-        params.brightness,
-        params.contrast,
-        params.blur,
-        params.hue_rotate,
-        params.saturation,
-        params.filter.as_deref(),
-    );
+    // When photoStyle is set, base color fields are applied inside it; keep blur only.
+    if photo_style.is_some() {
+        img = apply_edit_color_adjustments(img, None, None, params.blur, None, None, None);
+    } else {
+        img = apply_edit_color_adjustments(
+            img,
+            params.brightness,
+            params.contrast,
+            params.blur,
+            params.hue_rotate,
+            params.saturation,
+            params.filter.as_deref(),
+        );
+    }
 
     Ok(img)
 }
+
+/// Interactive traditional color-match preview as JPEG bytes.
+pub async fn color_match_preview(params: ColorMatchPreviewParams) -> Result<Vec<u8>, String> {
+    let max_edge = params.max_edge.unwrap_or(1600).clamp(256, 4096);
+    // orientation field accepted for API symmetry; load path orients via EXIF.
+    let _ = params.orientation;
+    let cache_key = color_match_preview_cache_key(&params, max_edge);
+    if let Ok(mut cache) = PREVIEW_JPEG_CACHE.lock() {
+        if let Some(bytes) = cache.get(cache_key) {
+            return Ok(bytes);
+        }
+    }
+    let geom = params.geometry.clone().unwrap_or_default();
+    let target = load_image_for_color_preview(&params.source_file_path, max_edge, &geom).await?;
+    let reference = load_image_for_layout_cached(&params.reference_file_path, 1024).await?;
+    let cm = t_color_match::ColorMatchParams {
+        intensity: params.intensity,
+        tone_preservation: params.tone_preservation,
+        auto_wb: params.auto_wb,
+        highlight_protection: params.highlight_protection,
+        shadow_protection: params.shadow_protection,
+    };
+    let mut out = t_color_match::apply_traditional_color_match(&target, &reference, &cm);
+    // Match edit_image order: color match, then photo style recipe.
+    if let Some(style) = params.photo_style.as_ref() {
+        out = t_lut::apply_photo_style(out, style);
+    }
+    let bytes = encode_jpeg_rgb8(&out.to_rgb8())?;
+    if let Ok(mut cache) = PREVIEW_JPEG_CACHE.lock() {
+        cache.put(cache_key, bytes.clone());
+    }
+    Ok(bytes)
+}
+
+
+
+/// Export a single-image style `.cube` LUT (default 33^3).
+///
+/// `sourceFilePath` is the image whose look is baked into the LUT
+/// (typically the reference/style image the user selected, or the current photo).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ColorMatchLutExportParams {
+    /// Image to sample for style (required).
+    #[serde(rename = "sourceFilePath")]
+    pub source_file_path: String,
+    #[serde(rename = "destFilePath")]
+    pub dest_file_path: String,
+    /// Lattice size; default 33. Clamped 17..=65.
+    #[serde(default)]
+    #[serde(rename = "lutSize")]
+    pub lut_size: Option<u32>,
+}
+
+pub async fn export_color_match_lut(params: ColorMatchLutExportParams) -> Result<bool, String> {
+    let dest = params.dest_file_path.trim();
+    if dest.is_empty() {
+        return Err("destFilePath is required".to_string());
+    }
+    if !dest.to_ascii_lowercase().ends_with(".cube") {
+        return Err("destFilePath must end with .cube".to_string());
+    }
+    let src = params.source_file_path.trim();
+    if src.is_empty() {
+        return Err("sourceFilePath is required".to_string());
+    }
+
+    // Style image only — no paired color-match mapping.
+    let image = load_image_for_layout(src, 2048).await?;
+    let size = params.lut_size.unwrap_or(33);
+    t_color_match::write_style_cube_from_image(&image, size, dest)?;
+    Ok(true)
+}
+
+/// Optional geometry for interactive previews (matches edit_image order before color ops).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PreviewGeometry {
+    #[serde(default)]
+    pub rotate: i32,
+    #[serde(default)]
+    #[serde(rename = "flipHorizontal")]
+    pub flip_horizontal: bool,
+    #[serde(default)]
+    #[serde(rename = "flipVertical")]
+    pub flip_vertical: bool,
+    #[serde(default)]
+    pub crop: Option<PreviewCropRect>,
+    /// Oriented full pixel size of the crop coordinate space (editor imageWidth/Height).
+    #[serde(default)]
+    #[serde(rename = "fullWidth")]
+    pub full_width: Option<u32>,
+    #[serde(default)]
+    #[serde(rename = "fullHeight")]
+    pub full_height: Option<u32>,
+}
+
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PreviewCropRect {
+    #[serde(default)]
+    pub x: u32,
+    #[serde(default)]
+    pub y: u32,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
+fn apply_preview_geometry(
+    mut img: DynamicImage,
+    geom: &PreviewGeometry,
+    full_w: u32,
+    full_h: u32,
+) -> DynamicImage {
+    if geom.flip_horizontal {
+        img = img.fliph();
+    }
+    if geom.flip_vertical {
+        img = img.flipv();
+    }
+    match geom.rotate {
+        90 => img = img.rotate90(),
+        180 => img = img.rotate180(),
+        270 => img = img.rotate270(),
+        -90 => img = img.rotate270(),
+        -180 => img = img.rotate180(),
+        -270 => img = img.rotate90(),
+        _ => {}
+    }
+    if let Some(c) = geom.crop.as_ref() {
+        if c.width > 0 && c.height > 0 {
+            let (w, h) = img.dimensions();
+            if w > 0 && h > 0 {
+                // Crop is authored in full oriented pixel space; scale into decoded raster.
+                let fw = full_w.max(1) as f32;
+                let fh = full_h.max(1) as f32;
+                let sx = w as f32 / fw;
+                let sy = h as f32 / fh;
+                let x = ((c.x as f32) * sx).round().max(0.0) as u32;
+                let y = ((c.y as f32) * sy).round().max(0.0) as u32;
+                let width = ((c.width as f32) * sx).round().max(1.0) as u32;
+                let height = ((c.height as f32) * sy).round().max(1.0) as u32;
+                let x = x.min(w.saturating_sub(1));
+                let y = y.min(h.saturating_sub(1));
+                let width = width.min(w.saturating_sub(x)).max(1);
+                let height = height.min(h.saturating_sub(y)).max(1);
+                img = img.crop_imm(x, y, width, height);
+            }
+        }
+    }
+    img
+}
+
+fn downscale_for_preview(mut img: DynamicImage, max_edge: u32) -> DynamicImage {
+    let max_edge = max_edge.clamp(64, 8192);
+    let (w, h) = img.dimensions();
+    let longest = w.max(h).max(1);
+    if longest > max_edge {
+        let scale = max_edge as f32 / longest as f32;
+        let nw = ((w as f32) * scale).round().max(1.0) as u32;
+        let nh = ((h as f32) * scale).round().max(1.0) as u32;
+        img = img.resize(nw, nh, image::imageops::FilterType::Triangle);
+    }
+    img
+}
+
+/// Load oriented full-ish raster, apply geometry, then downscale for interactive color work.
+async fn load_image_for_color_preview(
+    file_path: &str,
+    max_edge: u32,
+    geom: &PreviewGeometry,
+) -> Result<DynamicImage, String> {
+    // Choose decode budget so a cropped region still has ~max_edge detail after extract.
+    // Without crop: modest oversample. With crop: scale decode so crop_long maps near max_edge.
+    let max_edge = max_edge.clamp(64, 8192);
+    let full_w_hint = geom.full_width.unwrap_or(0).max(1);
+    let full_h_hint = geom.full_height.unwrap_or(0).max(1);
+    let full_long = full_w_hint.max(full_h_hint).max(1);
+    let crop_long = geom
+        .crop
+        .as_ref()
+        .map(|c| c.width.max(c.height).max(1))
+        .unwrap_or(full_long);
+    let decode_edge = if geom.crop.as_ref().is_some_and(|c| c.width > 0 && c.height > 0) {
+        // full_long / crop_long * max_edge  => crop region ≈ max_edge on its long side
+        let needed = ((full_long as u64) * (max_edge as u64) / (crop_long as u64))
+            .clamp(max_edge as u64, 8192);
+        needed as u32
+    } else {
+        max_edge.saturating_mul(2).clamp(1024, 4096)
+    };
+
+    let mut img = load_image_for_layout_cached(file_path, decode_edge).await?;
+    let (dw, dh) = img.dimensions();
+    let full_w = geom.full_width.unwrap_or(dw).max(1);
+    let full_h = geom.full_height.unwrap_or(dh).max(1);
+    img = apply_preview_geometry(img, geom, full_w, full_h);
+    Ok(downscale_for_preview(img, max_edge))
+}
+
+
+fn geometry_cache_bits(geom: &PreviewGeometry) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    geom.rotate.hash(&mut h);
+    geom.flip_horizontal.hash(&mut h);
+    geom.flip_vertical.hash(&mut h);
+    geom.full_width.unwrap_or(0).hash(&mut h);
+    geom.full_height.unwrap_or(0).hash(&mut h);
+    if let Some(c) = geom.crop.as_ref() {
+        c.x.hash(&mut h);
+        c.y.hash(&mut h);
+        c.width.hash(&mut h);
+        c.height.hash(&mut h);
+    } else {
+        0u8.hash(&mut h);
+    }
+    h.finish()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PhotoStylePreviewParams {
+    #[serde(rename = "sourceFilePath")]
+    pub source_file_path: String,
+    #[serde(default)]
+    #[serde(rename = "maxEdge")]
+    pub max_edge: Option<u32>,
+    #[serde(default)]
+    pub style: t_lut::PhotoStyleParams,
+    #[serde(default)]
+    pub geometry: Option<PreviewGeometry>,
+}
+
+pub async fn apply_photo_style_preview(params: PhotoStylePreviewParams) -> Result<Vec<u8>, String> {
+    let max_edge = params.max_edge.unwrap_or(1600).clamp(256, 4096);
+    let geom = params.geometry.clone().unwrap_or_default();
+    let cache_key = photo_style_preview_cache_key(
+        &params.source_file_path,
+        max_edge,
+        &params.style,
+        &geom,
+    );
+    if let Ok(mut cache) = PREVIEW_JPEG_CACHE.lock() {
+        if let Some(bytes) = cache.get(cache_key) {
+            return Ok(bytes);
+        }
+    }
+    let img = load_image_for_color_preview(&params.source_file_path, max_edge, &geom).await?;
+    let out = t_lut::apply_photo_style(img, &params.style);
+    let bytes = encode_jpeg_rgb8(&out.to_rgb8())?;
+    if let Ok(mut cache) = PREVIEW_JPEG_CACHE.lock() {
+        cache.put(cache_key, bytes.clone());
+    }
+    Ok(bytes)
+}
+
+
 
 /// Choose a resize filter that balances quality vs cost for the edit/export path.
 /// Heavy downscales (common for photo-size exports) use Triangle; mild changes use CatmullRom.
@@ -2502,6 +2906,219 @@ impl FileImageResultCache {
 static FILE_IMAGE_RESULT_CACHE: Lazy<Mutex<FileImageResultCache>> =
     Lazy::new(|| Mutex::new(FileImageResultCache::new()));
 
+/// Small LRU of decoded layout/preview rasters so interactive photo-style / color-match
+/// previews do not re-decode the same source on every slider tick.
+struct LayoutImageCacheEntry {
+    path: String,
+    max_edge: u32,
+    len: u64,
+    modified_ms: u128,
+    image: DynamicImage,
+}
+
+struct LayoutImageCache {
+    entries: VecDeque<LayoutImageCacheEntry>,
+    cap: usize,
+}
+
+impl LayoutImageCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    fn get(&mut self, path: &str, max_edge: u32, len: u64, modified_ms: u128) -> Option<DynamicImage> {
+        let idx = self.entries.iter().position(|e| {
+            e.path == path
+                && e.max_edge == max_edge
+                && e.len == len
+                && e.modified_ms == modified_ms
+        })?;
+        if idx > 0 {
+            if let Some(entry) = self.entries.remove(idx) {
+                self.entries.push_front(entry);
+            }
+        }
+        self.entries.front().map(|e| e.image.clone())
+    }
+
+    fn put(&mut self, path: String, max_edge: u32, len: u64, modified_ms: u128, image: DynamicImage) {
+        self.entries.retain(|e| !(e.path == path && e.max_edge == max_edge));
+        self.entries.push_front(LayoutImageCacheEntry {
+            path,
+            max_edge,
+            len,
+            modified_ms,
+            image,
+        });
+        while self.entries.len() > self.cap {
+            self.entries.pop_back();
+        }
+    }
+}
+
+static LAYOUT_IMAGE_CACHE: Lazy<Mutex<LayoutImageCache>> =
+    Lazy::new(|| Mutex::new(LayoutImageCache::new(6)));
+
+
+/// Short LRU of encoded interactive preview JPEGs (slider repeats / undo-ish ticks).
+struct PreviewJpegCacheEntry {
+    key: u64,
+    bytes: Vec<u8>,
+}
+
+struct PreviewJpegCache {
+    entries: VecDeque<PreviewJpegCacheEntry>,
+    cap: usize,
+}
+
+impl PreviewJpegCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    fn get(&mut self, key: u64) -> Option<Vec<u8>> {
+        let idx = self.entries.iter().position(|e| e.key == key)?;
+        if idx > 0 {
+            if let Some(entry) = self.entries.remove(idx) {
+                self.entries.push_front(entry);
+            }
+        }
+        self.entries.front().map(|e| e.bytes.clone())
+    }
+
+    fn put(&mut self, key: u64, bytes: Vec<u8>) {
+        self.entries.retain(|e| e.key != key);
+        self.entries.push_front(PreviewJpegCacheEntry { key, bytes });
+        while self.entries.len() > self.cap {
+            self.entries.pop_back();
+        }
+    }
+}
+
+static PREVIEW_JPEG_CACHE: Lazy<Mutex<PreviewJpegCache>> =
+    Lazy::new(|| Mutex::new(PreviewJpegCache::new(10)));
+
+fn hash_mix_u64(state: &mut impl Hasher, v: u64) {
+    v.hash(state);
+}
+
+fn hash_mix_str(state: &mut impl Hasher, s: &str) {
+    s.hash(state);
+}
+
+fn hash_photo_style_params(style: &t_lut::PhotoStyleParams) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    style.brightness.hash(&mut h);
+    style.contrast.to_bits().hash(&mut h);
+    style.saturation.to_bits().hash(&mut h);
+    style.hue.hash(&mut h);
+    style.highlights.to_bits().hash(&mut h);
+    style.shadows.to_bits().hash(&mut h);
+    style.fade.to_bits().hash(&mut h);
+    style.vignette.to_bits().hash(&mut h);
+    style.grain.to_bits().hash(&mut h);
+    style
+        .filter
+        .as_deref()
+        .unwrap_or("")
+        .hash(&mut h);
+    style
+        .lut_id
+        .as_deref()
+        .unwrap_or("")
+        .hash(&mut h);
+    style
+        .lut_path
+        .as_deref()
+        .unwrap_or("")
+        .hash(&mut h);
+    style.lut_intensity.to_bits().hash(&mut h);
+    h.finish()
+}
+
+fn preview_file_fingerprint(path: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    hash_mix_str(&mut h, path);
+    if let Ok((len, modified_ms)) = get_file_signature(path) {
+        hash_mix_u64(&mut h, len);
+        hash_mix_u64(&mut h, modified_ms as u64);
+        hash_mix_u64(&mut h, (modified_ms >> 64) as u64);
+    }
+    h.finish()
+}
+
+fn photo_style_preview_cache_key(
+    path: &str,
+    max_edge: u32,
+    style: &t_lut::PhotoStyleParams,
+    geom: &PreviewGeometry,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    hash_mix_u64(&mut h, 0x5053_5052); // "PSPR"
+    hash_mix_u64(&mut h, preview_file_fingerprint(path));
+    hash_mix_u64(&mut h, max_edge as u64);
+    hash_mix_u64(&mut h, hash_photo_style_params(style));
+    hash_mix_u64(&mut h, geometry_cache_bits(geom));
+    h.finish()
+}
+
+fn color_match_preview_cache_key(params: &ColorMatchPreviewParams, max_edge: u32) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    hash_mix_u64(&mut h, 0x434D_5052); // "CMPR"
+    hash_mix_u64(&mut h, preview_file_fingerprint(&params.source_file_path));
+    hash_mix_u64(&mut h, preview_file_fingerprint(&params.reference_file_path));
+    hash_mix_u64(&mut h, max_edge as u64);
+    params.intensity.to_bits().hash(&mut h);
+    params.tone_preservation.to_bits().hash(&mut h);
+    params.auto_wb.hash(&mut h);
+    params.highlight_protection.to_bits().hash(&mut h);
+    params.shadow_protection.to_bits().hash(&mut h);
+    if let Some(style) = params.photo_style.as_ref() {
+        hash_mix_u64(&mut h, 1);
+        hash_mix_u64(&mut h, hash_photo_style_params(style));
+    } else {
+        hash_mix_u64(&mut h, 0);
+    }
+    let geom = params.geometry.clone().unwrap_or_default();
+    hash_mix_u64(&mut h, geometry_cache_bits(&geom));
+    h.finish()
+}
+
+async fn load_image_for_layout_cached(file_path: &str, max_edge: u32) -> Result<DynamicImage, String> {
+    let signature = get_file_signature(file_path).ok();
+    if let Some((len, modified_ms)) = signature {
+        if let Ok(mut cache) = LAYOUT_IMAGE_CACHE.lock() {
+            if let Some(cached) = cache.get(file_path, max_edge, len, modified_ms) {
+                return Ok(cached);
+            }
+        }
+    }
+
+    let img = load_image_for_layout(file_path, max_edge).await?;
+    if let Some((len, modified_ms)) = signature {
+        if let Ok(mut cache) = LAYOUT_IMAGE_CACHE.lock() {
+            cache.put(
+                file_path.to_string(),
+                max_edge,
+                len,
+                modified_ms,
+                img.clone(),
+            );
+        }
+    }
+    Ok(img)
+}
+
 fn get_file_signature(file_path: &str) -> Result<(u64, u128), String> {
     let metadata = fs::metadata(file_path)
         .map_err(|e| format!("Failed to read file metadata for cache: {}", e))?;
@@ -2613,7 +3230,7 @@ pub struct BatchFileInput {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BatchActionSpec {
-    /// resize | crop | rotate | flip | brightness | contrast | saturation | hue | blur | filter | border | expand | watermark | text
+    /// resize | crop | rotate | flip | brightness | contrast | saturation | hue | blur | filter | border | expand | watermark | text | colorMatch | photoStyle
     #[serde(rename = "type")]
     action_type: String,
     // resize
@@ -2651,6 +3268,47 @@ pub struct BatchActionSpec {
     text: Option<String>,
     #[serde(rename = "fontSize")]
     font_size: Option<f32>,
+    /// When true, text watermark uses EXIF capture time (optionally with `text` as prefix).
+    #[serde(default)]
+    #[serde(rename = "includeCaptureTime")]
+    include_capture_time: Option<bool>,
+    /// datetime | date | time  (default datetime)
+    #[serde(default)]
+    #[serde(rename = "captureTimeFormat")]
+    capture_time_format: Option<String>,
+    // colorMatch
+    #[serde(rename = "referenceFilePath")]
+    reference_file_path: Option<String>,
+    intensity: Option<f32>,
+    #[serde(rename = "tonePreservation")]
+    tone_preservation: Option<f32>,
+    #[serde(rename = "autoWb")]
+    auto_wb: Option<bool>,
+    #[serde(rename = "highlightProtection")]
+    highlight_protection: Option<f32>,
+    #[serde(rename = "shadowProtection")]
+    shadow_protection: Option<f32>,
+    // photoStyle
+    #[serde(rename = "lutId")]
+    lut_id: Option<String>,
+    #[serde(rename = "lutPath")]
+    lut_path: Option<String>,
+    #[serde(rename = "lutIntensity")]
+    lut_intensity: Option<f32>,
+    highlights: Option<f32>,
+    shadows: Option<f32>,
+    fade: Option<f32>,
+    vignette: Option<f32>,
+    grain: Option<f32>,
+    /// photoStyle brightness (-100..100); falls back to `value` if absent
+    #[serde(rename = "styleBrightness")]
+    style_brightness: Option<f32>,
+    #[serde(rename = "styleContrast")]
+    style_contrast: Option<f32>,
+    #[serde(rename = "styleSaturation")]
+    style_saturation: Option<f32>,
+    #[serde(rename = "styleHue")]
+    style_hue: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2806,9 +3464,20 @@ pub async fn batch_process_images(
     }
 
     let worker_limit = batch_worker_limit().min(work.len().max(1));
-    let mut join_set: JoinSet<(usize, String, Result<BatchFileOutcome, String>)> = JoinSet::new();
+    // (index, src, dest, outcome) — dest is for temp cleanup on cancel/abort only.
+    let mut join_set: JoinSet<(
+        usize,
+        String,
+        Option<String>,
+        Result<BatchFileOutcome, String>,
+    )> = JoinSet::new();
     let mut next_work = 0usize;
     let work_total = work.len();
+
+    let progress_current = |completed: usize, in_flight: usize| -> usize {
+        // Clamp so small batches never report current > total while workers fill.
+        (completed + in_flight).min(total)
+    };
 
     while completed < total || !join_set.is_empty() {
         if batch_is_cancelled() {
@@ -2831,11 +3500,12 @@ pub async fn batch_process_images(
             let dest = item.dest.clone();
             let actions = actions.clone();
             let ext = ext.to_string();
+            let dest_for_task = dest.clone();
 
             let _ = app_handle.emit(
                 "batch-process-progress",
                 serde_json::json!({
-                    "current": completed + join_set.len() + 1,
+                    "current": progress_current(completed, join_set.len() + 1),
                     "total": total,
                     "status": "processing",
                     "filePath": src,
@@ -2844,8 +3514,10 @@ pub async fn batch_process_images(
             );
 
             join_set.spawn(async move {
-                let outcome = process_one_batch_file(&file, &actions, dest, &ext, quality).await;
-                (item_index, src, outcome)
+                let outcome =
+                    process_one_batch_file(&file, &actions, dest_for_task.clone(), &ext, quality)
+                        .await;
+                (item_index, src, dest_for_task, outcome)
             });
         }
 
@@ -2859,7 +3531,7 @@ pub async fn batch_process_images(
         }
 
         match join_set.join_next().await {
-            Some(Ok((_index, src, outcome))) => {
+            Some(Ok((_index, src, dest, outcome))) => {
                 completed += 1;
                 match outcome {
                     Ok(BatchFileOutcome::Ok(path)) => {
@@ -2868,6 +3540,10 @@ pub async fn batch_process_images(
                     }
                     Ok(BatchFileOutcome::Skipped) => skipped += 1,
                     Err(err) => {
+                        // Temp write may remain after cancel/error; never touch final dest here.
+                        if let Some(ref d) = dest {
+                            remove_batch_temp(d);
+                        }
                         if err == "cancelled" {
                             cancelled = true;
                             join_set.abort_all();
@@ -2877,7 +3553,7 @@ pub async fn batch_process_images(
                             let _ = app_handle.emit(
                                 "batch-process-progress",
                                 serde_json::json!({
-                                    "current": completed,
+                                    "current": completed.min(total),
                                     "total": total,
                                     "status": "error",
                                     "filePath": src,
@@ -2891,7 +3567,7 @@ pub async fn batch_process_images(
                     let _ = app_handle.emit(
                         "batch-process-progress",
                         serde_json::json!({
-                            "current": completed,
+                            "current": completed.min(total),
                             "total": total,
                             "status": "processing",
                             "filePath": src,
@@ -2913,19 +3589,27 @@ pub async fn batch_process_images(
         }
     }
 
-    // Drain stragglers after cancel.
+    // Drain stragglers after cancel; drop incomplete temps only.
     while let Some(joined) = join_set.join_next().await {
         match joined {
-            Ok((_index, src, outcome)) => {
+            Ok((_index, src, dest, outcome)) => {
                 completed += 1;
                 match outcome {
                     Ok(BatchFileOutcome::Ok(path)) => {
+                        // Finished before abort — keep the final file.
                         succeeded += 1;
                         output_paths.push(path);
                     }
                     Ok(BatchFileOutcome::Skipped) => skipped += 1,
-                    Err(err) if err == "cancelled" => {}
+                    Err(err) if err == "cancelled" => {
+                        if let Some(ref d) = dest {
+                            remove_batch_temp(d);
+                        }
+                    }
                     Err(err) => {
+                        if let Some(ref d) = dest {
+                            remove_batch_temp(d);
+                        }
                         failed += 1;
                         errors.push(format!("{}: {}", src, err));
                     }
@@ -2936,6 +3620,15 @@ pub async fn batch_process_images(
                 completed += 1;
                 failed += 1;
                 errors.push(format!("worker failed: {}", join_err));
+            }
+        }
+    }
+
+    // Aborted workers may leave sidecars without a join result — scrub known temps.
+    if cancelled {
+        for item in &work {
+            if let Some(ref dest) = item.dest {
+                remove_batch_temp(dest);
             }
         }
     }
@@ -2969,6 +3662,17 @@ enum BatchFileOutcome {
     Skipped,
 }
 
+/// Sidecar temp for batch writes: `{dest}.picaipic-batch.tmp`.
+/// Cancel/abort only deletes this path — never a pre-existing final dest.
+fn batch_temp_path(dest: &str) -> String {
+    format!("{dest}.picaipic-batch.tmp")
+}
+
+fn remove_batch_temp(dest: &str) {
+    let tmp = batch_temp_path(dest);
+    let _ = fs::remove_file(&tmp);
+}
+
 async fn process_one_batch_file(
     file: &BatchFileInput,
     actions: &[BatchActionSpec],
@@ -2977,10 +3681,47 @@ async fn process_one_batch_file(
     quality: u8,
 ) -> Result<BatchFileOutcome, String> {
     let src = file.source_file_path.as_str();
+    // Prefetch shared color-match references once per file (same ref reused across actions).
+    let mut color_match_refs: HashMap<String, DynamicImage> = HashMap::new();
+    // Shared watermark source images + capture-time labels across actions for this file/worker.
+    let mut watermark_sources: HashMap<String, DynamicImage> = HashMap::new();
+    let mut capture_time_cache: HashMap<(String, String), Option<String>> = HashMap::new();
+    for action in actions {
+        if action.action_type.eq_ignore_ascii_case("colormatch")
+            || action.action_type.eq_ignore_ascii_case("color_match")
+        {
+            if let Some(path) = action
+                .reference_file_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if !color_match_refs.contains_key(path) {
+                    let reference = load_image_for_layout(path, 2048).await?;
+                    color_match_refs.insert(path.to_string(), reference);
+                }
+            }
+        }
+        if action.action_type.eq_ignore_ascii_case("watermark") {
+            if let Some(path) = action
+                .image_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if !watermark_sources.contains_key(path) {
+                    if let Ok(mark) = load_batch_watermark_source(path) {
+                        watermark_sources.insert(path.to_string(), mark);
+                    }
+                }
+            }
+        }
+    }
     if dest.is_none() {
         return Ok(BatchFileOutcome::Skipped);
     }
     let dest = dest.unwrap();
+    let temp = batch_temp_path(&dest);
 
     let mut img = load_image_for_edit(src).await?;
     // Prefer EXIF from host when provided; load_image_for_edit already orients for normal open path.
@@ -2988,9 +3729,22 @@ async fn process_one_batch_file(
 
     for action in actions {
         if batch_is_cancelled() {
+            remove_batch_temp(&dest);
             return Err("cancelled".to_string());
         }
-        img = apply_batch_action(img, action)?;
+        img = apply_batch_action(
+            img,
+            action,
+            &color_match_refs,
+            &mut watermark_sources,
+            &mut capture_time_cache,
+            src,
+        )?;
+    }
+
+    if batch_is_cancelled() {
+        remove_batch_temp(&dest);
+        return Err("cancelled".to_string());
     }
 
     if let Some(parent) = Path::new(&dest).parent() {
@@ -2999,7 +3753,28 @@ async fn process_one_batch_file(
         }
     }
 
-    save_dynamic_image(&img, &dest, ext, quality)?;
+    // Write temp then rename so cancel never leaves a half-written final dest,
+    // and overwrite mode never corrupts an existing file mid-encode.
+    if let Err(e) = save_dynamic_image(&img, &temp, ext, quality) {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+    if batch_is_cancelled() {
+        let _ = fs::remove_file(&temp);
+        return Err("cancelled".to_string());
+    }
+    // Prefer atomic replace; fall back to copy+remove on platforms without rename-over.
+    if Path::new(&dest).exists() {
+        let _ = fs::remove_file(&dest);
+    }
+    if let Err(e) = fs::rename(&temp, &dest) {
+        // Cross-device rename can fail; copy then delete temp.
+        if let Err(copy_err) = fs::copy(&temp, &dest) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!("finalize dest: {e}; copy fallback: {copy_err}"));
+        }
+        let _ = fs::remove_file(&temp);
+    }
     Ok(BatchFileOutcome::Ok(dest))
 }
 
@@ -3097,6 +3872,10 @@ fn save_dynamic_image(
 fn apply_batch_action(
     mut img: DynamicImage,
     action: &BatchActionSpec,
+    color_match_refs: &HashMap<String, DynamicImage>,
+    watermark_sources: &mut HashMap<String, DynamicImage>,
+    capture_time_cache: &mut HashMap<(String, String), Option<String>>,
+    source_file_path: &str,
 ) -> Result<DynamicImage, String> {
     let kind = action.action_type.to_ascii_lowercase();
     match kind.as_str() {
@@ -3289,8 +4068,57 @@ fn apply_batch_action(
         }
         "border" => apply_batch_border(img, action),
         "expand" => apply_batch_expand(img, action),
-        "watermark" => apply_batch_watermark(img, action),
-        "text" => apply_batch_text(img, action),
+        "watermark" => apply_batch_watermark(
+            img,
+            action,
+            source_file_path,
+            watermark_sources,
+            capture_time_cache,
+        ),
+        "text" => apply_batch_text(img, action, source_file_path, capture_time_cache),
+        "colormatch" | "color_match" => {
+            let path = action
+                .reference_file_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "colorMatch referenceFilePath is required".to_string())?;
+            let reference = color_match_refs
+                .get(path)
+                .ok_or_else(|| format!("colorMatch reference not loaded: {}", path))?;
+            let cm = t_color_match::ColorMatchParams {
+                intensity: action.intensity.unwrap_or(1.0),
+                tone_preservation: action.tone_preservation.unwrap_or(0.5),
+                auto_wb: action.auto_wb.unwrap_or(true),
+                highlight_protection: action.highlight_protection.unwrap_or(0.8),
+                shadow_protection: action.shadow_protection.unwrap_or(0.8),
+            };
+            Ok(t_color_match::apply_traditional_color_match(
+                &img, reference, &cm,
+            ))
+        }
+                "photostyle" | "photo_style" => {
+            let style = t_lut::PhotoStyleParams {
+                brightness: action
+                    .style_brightness
+                    .or(action.value)
+                    .unwrap_or(0.0)
+                    .round() as i32,
+                contrast: action.style_contrast.unwrap_or(0.0),
+                saturation: action.style_saturation.unwrap_or(100.0),
+                hue: action.style_hue.unwrap_or(0.0).round() as i32,
+                highlights: action.highlights.unwrap_or(0.0),
+                shadows: action.shadows.unwrap_or(0.0),
+                fade: action.fade.unwrap_or(0.0),
+                vignette: action.vignette.unwrap_or(0.0),
+                grain: action.grain.unwrap_or(0.0),
+                filter: action.filter.clone(),
+                lut_id: action.lut_id.clone(),
+                lut_path: action.lut_path.clone(),
+                lut_intensity: action.lut_intensity.unwrap_or(100.0),
+            };
+            Ok(t_lut::apply_photo_style(img, &style))
+        }
         other => Err(format!("Unknown batch action: {}", other)),
     }
 }
@@ -3362,9 +4190,35 @@ fn apply_batch_expand(img: DynamicImage, action: &BatchActionSpec) -> Result<Dyn
     Ok(DynamicImage::ImageRgba8(canvas))
 }
 
+/// Decode watermark source once (capped); resize per host image size separately.
+fn load_batch_watermark_source(path: &str) -> Result<DynamicImage, String> {
+    // Cap decode budget for huge stamp files.
+    if is_jpeg_path(path) {
+        if let Ok((bytes, w, h)) = crate::t_jpeg::decode_rgb8_scaled(path, 2048, 2048) {
+            if let Some(rgb) = image::RgbImage::from_raw(w, h, bytes) {
+                return Ok(DynamicImage::ImageRgb8(rgb));
+            }
+        }
+    }
+    let mark = image::open(Path::new(path)).map_err(|e| format!("open watermark: {}", e))?;
+    let (mw, mh) = mark.dimensions();
+    let longest = mw.max(mh).max(1);
+    if longest > 2048 {
+        let scale = 2048f32 / longest as f32;
+        let nw = ((mw as f32) * scale).round().max(1.0) as u32;
+        let nh = ((mh as f32) * scale).round().max(1.0) as u32;
+        Ok(mark.resize(nw, nh, image::imageops::FilterType::Triangle))
+    } else {
+        Ok(mark)
+    }
+}
+
 fn apply_batch_watermark(
     img: DynamicImage,
     action: &BatchActionSpec,
+    source_file_path: &str,
+    watermark_sources: &mut HashMap<String, DynamicImage>,
+    capture_time_cache: &mut HashMap<(String, String), Option<String>>,
 ) -> Result<DynamicImage, String> {
     let path = action
         .image_path
@@ -3372,7 +4226,13 @@ fn apply_batch_watermark(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "watermark imagePath is required".to_string())?;
-    let mark = image::open(Path::new(path)).map_err(|e| format!("open watermark: {}", e))?;
+    if !watermark_sources.contains_key(path) {
+        let mark = load_batch_watermark_source(path)?;
+        watermark_sources.insert(path.to_string(), mark);
+    }
+    let mark = watermark_sources
+        .get(path)
+        .ok_or_else(|| "watermark cache miss".to_string())?;
     let (cw, ch) = img.dimensions();
     let short = cw.min(ch).max(1) as f32;
     let scale_pct = action.scale.unwrap_or(18.0).clamp(1.0, 100.0);
@@ -3403,18 +4263,95 @@ fn apply_batch_watermark(
     let (x, y) = batch_anchor_xy(pos, cw, ch, stamp.width(), stamp.height(), margin);
     let mut canvas = img.to_rgba8();
     image::imageops::overlay(&mut canvas, &stamp, x, y);
-    Ok(DynamicImage::ImageRgba8(canvas))
+    let mut out = DynamicImage::ImageRgba8(canvas);
+    if action.include_capture_time.unwrap_or(false) {
+        let mut stamp_action = action.clone();
+        stamp_action.text = Some(String::new());
+        stamp_action.include_capture_time = Some(true);
+        if stamp_action.font_size.is_none() {
+            stamp_action.font_size = Some(28.0);
+        }
+        out = apply_batch_text(out, &stamp_action, source_file_path, capture_time_cache)?;
+    }
+    Ok(out)
 }
 
-fn apply_batch_text(img: DynamicImage, action: &BatchActionSpec) -> Result<DynamicImage, String> {
-    use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 
-    let text = action
+/// Read EXIF capture datetime label for watermark/text stamping.
+/// Uses the same ISO/EXIF normalizer as photo-frame (`format_frame_date_time`).
+fn read_capture_time_label(file_path: &str, format: &str) -> Option<String> {
+    let data = read_file_head(file_path, 256 * 1024)?;
+    let exif = read_exif_from_bytes_permissive(&data)?;
+    let raw = exif
+        .get_field(Tag::DateTimeOriginal, In::PRIMARY)
+        .or_else(|| exif.get_field(Tag::DateTimeDigitized, In::PRIMARY))
+        .or_else(|| exif.get_field(Tag::DateTime, In::PRIMARY))
+        .map(|field| field.display_value().with_unit(&exif).to_string())
+        .or_else(|| {
+            exif.get_field(Tag::DateTimeOriginal, In::PRIMARY)
+                .or_else(|| exif.get_field(Tag::DateTimeDigitized, In::PRIMARY))
+                .map(|f| f.display_value().to_string())
+        })?;
+    let normalized = format_frame_date_time(&raw);
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut parts = normalized.split_whitespace();
+    let date = parts.next().unwrap_or("").to_string();
+    let time = parts.next().unwrap_or("00:00:00").to_string();
+    match format {
+        "date" => (!date.is_empty()).then_some(date),
+        "time" => Some(time),
+        _ => Some(normalized),
+    }
+}
+
+fn resolve_batch_stamp_text(
+    action: &BatchActionSpec,
+    source_file_path: &str,
+    capture_time_cache: &mut HashMap<(String, String), Option<String>>,
+) -> String {
+    let base = action
         .text
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("PicAiPic");
+        .unwrap_or("")
+        .to_string();
+    if !action.include_capture_time.unwrap_or(false) {
+        return if base.is_empty() {
+            "PicAiPic".to_string()
+        } else {
+            base
+        };
+    }
+    let fmt = action
+        .capture_time_format
+        .as_deref()
+        .unwrap_or("datetime")
+        .to_string();
+    let key = (source_file_path.to_string(), fmt.clone());
+    let cap = capture_time_cache
+        .entry(key)
+        .or_insert_with(|| read_capture_time_label(source_file_path, &fmt))
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
+    if base.is_empty() || base == "PicAiPic" {
+        cap
+    } else {
+        format!("{} {}", base, cap)
+    }
+}
+
+fn apply_batch_text(
+    img: DynamicImage,
+    action: &BatchActionSpec,
+    source_file_path: &str,
+    capture_time_cache: &mut HashMap<(String, String), Option<String>>,
+) -> Result<DynamicImage, String> {
+    use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+
+    let text = resolve_batch_stamp_text(action, source_file_path, capture_time_cache);
     let font_size = action.font_size.unwrap_or(36.0).clamp(8.0, 400.0);
     let color = batch_parse_color(action.color.as_deref(), [255, 255, 255]);
     let opacity = (action.opacity.unwrap_or(85.0).clamp(0.0, 100.0) / 100.0) as f32;
@@ -3490,7 +4427,23 @@ fn apply_batch_text(img: DynamicImage, action: &BatchActionSpec) -> Result<Dynam
     Ok(DynamicImage::ImageRgba8(canvas))
 }
 
+static SYSTEM_FONT_BYTES: Lazy<Mutex<Option<Result<Vec<u8>, String>>>> =
+    Lazy::new(|| Mutex::new(None));
+
 fn load_system_font_bytes() -> Result<Vec<u8>, String> {
+    if let Ok(guard) = SYSTEM_FONT_BYTES.lock() {
+        if let Some(cached) = guard.as_ref() {
+            return cached.clone();
+        }
+    }
+    let loaded = load_system_font_bytes_uncached();
+    if let Ok(mut guard) = SYSTEM_FONT_BYTES.lock() {
+        *guard = Some(loaded.clone());
+    }
+    loaded
+}
+
+fn load_system_font_bytes_uncached() -> Result<Vec<u8>, String> {
     #[cfg(target_os = "windows")]
     {
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
@@ -3652,11 +4605,7 @@ pub async fn export_print_layout(params: PrintLayoutExportParams) -> Result<bool
         for (path, (max_cw, max_ch)) in path_max_cell.clone() {
             // Cover-fit may need slightly more than max(cw,ch) on the long side when
             // aspects differ; 1.25× is enough margin without keeping full-res masters.
-            let max_edge = max_cw
-                .max(max_ch)
-                .saturating_mul(5)
-                .saturating_add(4)
-                / 4; // ceil * 1.25
+            let max_edge = max_cw.max(max_ch).saturating_mul(5).saturating_add(4) / 4; // ceil * 1.25
             let max_edge = max_edge.clamp(64, 4096);
             set.spawn(async move {
                 let result = load_image_for_layout(&path, max_edge).await;
@@ -3788,5 +4737,1724 @@ fn draw_rect_stroke(
         for xx in x2.saturating_sub(t)..x2 {
             canvas.put_pixel(xx, yy, px);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Photo frame / EXIF info bar (Phase G-Frame-1, photix-inspired classic bar)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PhotoFrameOptions {
+    /// classic-white | classic-black | float-blur | sink-blur
+    #[serde(default)]
+    #[serde(rename = "templateId")]
+    pub template_id: Option<String>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showBrand")]
+    pub show_brand: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showModel")]
+    pub show_model: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showLens")]
+    pub show_lens: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showFocalLength")]
+    pub show_focal_length: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showAperture")]
+    pub show_aperture: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showShutter")]
+    pub show_shutter: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showISO")]
+    pub show_iso: Option<bool>,
+    #[serde(default = "default_true")]
+    #[serde(rename = "showDateTime")]
+    pub show_date_time: Option<bool>,
+    /// Bar height as fraction of min(image w,h). Default ~0.11.
+    #[serde(default)]
+    #[serde(rename = "barRatio")]
+    pub bar_ratio: Option<f32>,
+    /// Outer margin / pad as fraction of min(image w,h). Classic default 0; blur templates use pad.
+    #[serde(default)]
+    #[serde(rename = "marginRatio")]
+    pub margin_ratio: Option<f32>,
+    #[serde(default)]
+    #[serde(rename = "backgroundColor")]
+    pub background_color: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "textColor")]
+    pub text_color: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "secondaryTextColor")]
+    pub secondary_text_color: Option<String>,
+    /// Gaussian blur sigma for blur-background templates (approx).
+    #[serde(default)]
+    #[serde(rename = "blurSigma")]
+    pub blur_sigma: Option<f32>,
+    /// Soft drop-shadow blur sigma under the floating photo.
+    #[serde(default)]
+    #[serde(rename = "shadowBlur")]
+    pub shadow_blur: Option<f32>,
+    /// Shadow vertical offset as fraction of photo height (0–0.12).
+    #[serde(default)]
+    #[serde(rename = "shadowOffsetRatio")]
+    pub shadow_offset_ratio: Option<f32>,
+    /// Shadow opacity 0–1.
+    #[serde(default)]
+    #[serde(rename = "shadowOpacity")]
+    pub shadow_opacity: Option<f32>,
+    /// Optional brand/logo image path (PNG/JPEG/WebP).
+    #[serde(default)]
+    #[serde(rename = "logoPath")]
+    pub logo_path: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "showLogo")]
+    pub show_logo: Option<bool>,
+    /// Logo long-edge as fraction of short photo edge (0.04–0.20).
+    #[serde(default)]
+    #[serde(rename = "logoScale")]
+    pub logo_scale: Option<f32>,
+    /// bar-center | top-left | top-right  (legacy bar-left/bar-right map to center)
+    #[serde(default)]
+    #[serde(rename = "logoPosition")]
+    pub logo_position: Option<String>,
+}
+
+fn default_true() -> Option<bool> {
+    Some(true)
+}
+
+#[derive(Debug, Clone, Default)]
+struct FrameExifSummary {
+    make: Option<String>,
+    model: Option<String>,
+    lens: Option<String>,
+    focal_length: Option<String>,
+    aperture: Option<String>,
+    shutter: Option<String>,
+    iso: Option<String>,
+    date_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PhotoFramePreviewParams {
+    #[serde(rename = "sourceFilePath")]
+    pub source_file_path: String,
+    #[serde(default)]
+    #[serde(rename = "maxEdge")]
+    pub max_edge: Option<u32>,
+    #[serde(default)]
+    pub options: PhotoFrameOptions,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PhotoFrameFileInput {
+    #[serde(rename = "sourceFilePath")]
+    pub source_file_path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PhotoFrameExportParams {
+    pub files: Vec<PhotoFrameFileInput>,
+    #[serde(default)]
+    pub options: PhotoFrameOptions,
+    #[serde(rename = "outputDir")]
+    pub output_dir: String,
+    #[serde(rename = "outputFormat")]
+    pub output_format: String,
+    pub quality: Option<u8>,
+    /// original | prefix | suffix | sequence
+    #[serde(rename = "nameMode")]
+    pub name_mode: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    /// skip | overwrite | rename
+    #[serde(rename = "overwritePolicy")]
+    pub overwrite_policy: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PhotoFrameExportResult {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub cancelled: bool,
+    pub errors: Vec<String>,
+    #[serde(rename = "outputPaths")]
+    pub output_paths: Vec<String>,
+}
+
+static PHOTO_FRAME_CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
+
+pub fn cancel_photo_frame_export() {
+    PHOTO_FRAME_CANCEL_FLAG.store(true, Ordering::SeqCst);
+}
+
+fn reset_photo_frame_cancel_flag() {
+    PHOTO_FRAME_CANCEL_FLAG.store(false, Ordering::SeqCst);
+}
+
+fn photo_frame_is_cancelled() -> bool {
+    PHOTO_FRAME_CANCEL_FLAG.load(Ordering::SeqCst)
+}
+
+fn frame_opt_bool(v: Option<bool>, default: bool) -> bool {
+    v.unwrap_or(default)
+}
+
+fn clean_exif_display(raw: &str) -> String {
+    raw.replace(['"', '\''], "")
+        .lines()
+        .map(|line| {
+            let mut s = line.trim().to_string();
+            while let Some(last) = s.chars().last() {
+                if last.is_ascii_punctuation() && last != ')' && last != '(' {
+                    s.pop();
+                } else {
+                    break;
+                }
+            }
+            s
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn exif_field_string(exif: &exif::Exif, tag: Tag) -> Option<String> {
+    let field = exif
+        .get_field(tag, In::PRIMARY)
+        .or_else(|| exif.fields().find(|f| f.tag == tag))?;
+    let raw = match &field.value {
+        exif::Value::Ascii(vec) => {
+            let mut bytes = Vec::new();
+            for line in vec {
+                let cleaned: Vec<u8> = line.iter().cloned().take_while(|&b| b != 0).collect();
+                bytes.extend(cleaned);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        _ => field.display_value().with_unit(exif).to_string(),
+    };
+    let cleaned = clean_exif_display(&raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn normalize_camera_make(make: &str) -> String {
+    make.replace("CORPORATION", "")
+        .replace("Corporation", "")
+        .replace("COMPANY", "")
+        .replace("Company", "")
+        .trim()
+        .to_string()
+}
+
+/// Normalize EXIF/ISO datetime strings to `YYYY-MM-DD HH:MM:SS` for the info bar.
+/// Handles classic EXIF (`2023:08:15 14:30:00`) and ISO-8601 (`2023-08-15T14:30:00`).
+/// Cache EXIF summary per source path (invalidates on size/mtime change).
+static FRAME_EXIF_CACHE: Lazy<Mutex<HashMap<String, (u64, u128, FrameExifSummary)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Cache resized logos: key = path + target long edge.
+static FRAME_LOGO_CACHE: Lazy<Mutex<HashMap<(String, u32), RgbaImage>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn frame_exif_summary_cached(file_path: &str) -> FrameExifSummary {
+    let sig = get_file_signature(file_path).ok();
+    if let Some((len, mtime)) = sig {
+        if let Ok(cache) = FRAME_EXIF_CACHE.lock() {
+            if let Some((c_len, c_mtime, summary)) = cache.get(file_path) {
+                if *c_len == len && *c_mtime == mtime {
+                    return summary.clone();
+                }
+            }
+        }
+    }
+    let summary = read_frame_exif_summary(file_path);
+    if let Some((len, mtime)) = sig {
+        if let Ok(mut cache) = FRAME_EXIF_CACHE.lock() {
+            // Bound cache size simply: drop all if large.
+            if cache.len() > 64 {
+                cache.clear();
+            }
+            cache.insert(file_path.to_string(), (len, mtime, summary.clone()));
+        }
+    }
+    summary
+}
+
+fn load_frame_logo_cached(path: &str, target_long: u32) -> Option<RgbaImage> {
+    let path = path.trim();
+    if path.is_empty() || target_long < 4 {
+        return None;
+    }
+    let key = (path.to_string(), target_long);
+    if let Ok(cache) = FRAME_LOGO_CACHE.lock() {
+        if let Some(img) = cache.get(&key) {
+            return Some(img.clone());
+        }
+    }
+    let logo = load_frame_logo(path, target_long)?;
+    if let Ok(mut cache) = FRAME_LOGO_CACHE.lock() {
+        if cache.len() > 32 {
+            cache.clear();
+        }
+        cache.insert(key, logo.clone());
+    }
+    Some(logo)
+}
+
+fn format_frame_date_time(raw: &str) -> String {
+    let s = raw.trim().trim_matches('"');
+    if s.is_empty() {
+        return String::new();
+    }
+    // ISO uses T between date and time; some writers use space already.
+    let normalized = s.replace('T', " ").replace('t', " ");
+    let mut parts = normalized.split_whitespace();
+    let Some(date_raw) = parts.next() else {
+        return s.to_string();
+    };
+    let time_raw = parts.next().unwrap_or("00:00:00");
+    // Date: EXIF colon separators → dashes; keep already-hyphenated ISO dates.
+    let date = date_raw.replace(':', "-");
+    // Time: strip fractional seconds and trailing timezone (Z / +08:00 / -05:00).
+    let time_core = time_raw
+        .split(['.', '+'])
+        .next()
+        .unwrap_or(time_raw)
+        .trim_end_matches(['Z', 'z']);
+    // If timezone was "-05:00" attached without +, the split on '+' alone leaves
+    // "14:30:00-05:00" — peel trailing ±HH:MM when present.
+    let time = if let Some(idx) = time_core.rfind('-') {
+        // Keep date-like hyphens out: time uses colons, so a '-' near the end is TZ.
+        if idx > 0 && time_core[idx + 1..].contains(':') {
+            &time_core[..idx]
+        } else {
+            time_core
+        }
+    } else {
+        time_core
+    };
+    format!("{} {}", date, time)
+}
+
+/// Read up to `max_bytes` from the start of a file (one open).
+fn read_file_head(file_path: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut f = File::open(file_path).ok()?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if buf.is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
+fn format_frame_iso_label(raw: &str) -> String {
+    let t = raw.trim();
+    if t.to_ascii_uppercase().starts_with("ISO") {
+        t.to_string()
+    } else {
+        format!("ISO {}", t)
+    }
+}
+
+fn format_frame_aperture_label(raw: &str) -> String {
+    let s = raw.trim();
+    if s.to_ascii_lowercase().starts_with('f') {
+        s.to_string()
+    } else {
+        format!("f/{}", s.trim_start_matches(['f', 'F', '/']))
+    }
+}
+
+fn format_frame_focal_label(raw: &str) -> String {
+    let s = raw.trim();
+    if s.to_ascii_lowercase().contains("mm") {
+        s.to_string()
+    } else {
+        format!("{} mm", s)
+    }
+}
+
+fn fill_frame_summary_from_kamadak(summary: &mut FrameExifSummary, exif: &exif::Exif) {
+    if summary.make.is_none() {
+        summary.make = exif_field_string(exif, Tag::Make).map(|s| normalize_camera_make(&s));
+    }
+    if summary.model.is_none() {
+        summary.model = exif_field_string(exif, Tag::Model);
+    }
+    if summary.lens.is_none() {
+        summary.lens = exif_field_string(exif, Tag::LensModel)
+            .or_else(|| exif_field_string(exif, Tag::LensMake));
+    }
+    if summary.focal_length.is_none() {
+        summary.focal_length = exif_field_string(exif, Tag::FocalLength);
+    }
+    if summary.aperture.is_none() {
+        summary.aperture = exif_field_string(exif, Tag::FNumber).map(|s| format_frame_aperture_label(&s));
+    }
+    if summary.shutter.is_none() {
+        summary.shutter = exif_field_string(exif, Tag::ExposureTime);
+    }
+    if summary.iso.is_none() {
+        summary.iso = exif_field_string(exif, Tag::PhotographicSensitivity)
+            .or_else(|| exif_field_string(exif, Tag::ISOSpeed))
+            .map(|s| format_frame_iso_label(&s));
+    }
+    if summary.date_time.is_none() {
+        summary.date_time = exif_field_string(exif, Tag::DateTimeOriginal)
+            .or_else(|| exif_field_string(exif, Tag::DateTimeDigitized))
+            .or_else(|| exif_field_string(exif, Tag::DateTime))
+            .map(|s| format_frame_date_time(&s));
+    }
+}
+
+fn frame_summary_needs_capture(summary: &FrameExifSummary) -> bool {
+    summary.shutter.is_none()
+        || summary.aperture.is_none()
+        || summary.focal_length.is_none()
+        || summary.iso.is_none()
+}
+
+fn frame_summary_needs_identity_or_capture(summary: &FrameExifSummary) -> bool {
+    summary.make.is_none()
+        || summary.model.is_none()
+        || summary.lens.is_none()
+        || frame_summary_needs_capture(summary)
+}
+
+/// little_exif capture settings from an in-memory JPEG buffer (no second open).
+fn read_capture_settings_from_jpeg_bytes(data: &[u8]) -> CaptureSettings {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return CaptureSettings::default();
+    }
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let file_buffer = data.to_vec();
+        let metadata =
+            match LittleExifMetadata::new_from_vec(&file_buffer, FileExtension::JPEG) {
+                Ok(m) => m,
+                Err(_) => return CaptureSettings::default(),
+            };
+        CaptureSettings {
+            exposure_time: metadata
+                .get_tag_by_hex(0x829a, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .and_then(format_little_exif_shutter_speed),
+            f_number: metadata
+                .get_tag_by_hex(0x829d, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .map(|value| format!("f/{value}")),
+            focal_length: metadata
+                .get_tag_by_hex(0x920a, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .map(|value| format!("{value} mm")),
+            iso_speed: metadata
+                .get_tag_by_hex(0x8827, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_iso_value)
+                .filter(|value| value != "0")
+                .or_else(|| {
+                    metadata
+                        .get_tag_by_hex(0x8833, Some(ExifTagGroup::EXIF))
+                        .next()
+                        .and_then(little_exif_iso_value)
+                        .filter(|value| value != "0")
+                }),
+        }
+    }))
+    .unwrap_or_default()
+}
+
+fn merge_capture_settings_into_frame(summary: &mut FrameExifSummary, caps: CaptureSettings) {
+    if summary.shutter.is_none() {
+        summary.shutter = caps.exposure_time;
+    }
+    if summary.aperture.is_none() {
+        summary.aperture = caps.f_number;
+    }
+    if summary.focal_length.is_none() {
+        summary.focal_length = caps.focal_length;
+    }
+    if summary.iso.is_none() {
+        summary.iso = caps.iso_speed.map(|s| format_frame_iso_label(&s));
+    }
+}
+
+fn fill_frame_summary_from_libraw(summary: &mut FrameExifSummary, file_path: &str) {
+    let Ok(meta) = t_libraw::get_raw_meta(file_path) else {
+        return;
+    };
+    if summary.make.is_none() {
+        if let Some(m) = meta.make.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            summary.make = Some(normalize_camera_make(m));
+        }
+    }
+    if summary.model.is_none() {
+        if let Some(m) = meta.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            summary.model = Some(m.to_string());
+        }
+    }
+    if summary.lens.is_none() {
+        summary.lens = meta
+            .lens_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                meta.lens_make
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+    }
+    if summary.shutter.is_none() {
+        summary.shutter = meta
+            .shutter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    if summary.aperture.is_none() {
+        summary.aperture = meta
+            .aperture
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(format_frame_aperture_label);
+    }
+    if summary.focal_length.is_none() {
+        summary.focal_length = meta
+            .focal_len
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(format_frame_focal_label);
+    }
+    if summary.iso.is_none() {
+        summary.iso = meta
+            .iso_speed
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(format_frame_iso_label);
+    }
+}
+
+/// Frame EXIF summary with **one primary open** of the file head for JPEG/common images.
+/// RAW still uses LibRaw (native open) only when needed.
+fn read_frame_exif_summary(file_path: &str) -> FrameExifSummary {
+    let mut summary = FrameExifSummary::default();
+    let file_type = t_utils::get_file_type(file_path).unwrap_or(0);
+    let is_raw = file_type == 3;
+    let is_jpeg = is_jpeg_path(file_path);
+
+    // RAW: LibRaw is the source of truth — skip redundant JPEG head scans.
+    if is_raw {
+        fill_frame_summary_from_libraw(&mut summary, file_path);
+        return summary;
+    }
+
+    // Single head read shared by kamadak + little_exif (+ datetime).
+    const HEAD_BYTES: usize = 512 * 1024;
+    if let Some(head) = read_file_head(file_path, HEAD_BYTES) {
+        if let Some(exif) = read_exif_from_bytes_permissive(&head) {
+            fill_frame_summary_from_kamadak(&mut summary, &exif);
+        }
+        if is_jpeg && frame_summary_needs_capture(&summary) {
+            let caps = read_capture_settings_from_jpeg_bytes(&head);
+            merge_capture_settings_into_frame(&mut summary, caps);
+        }
+        // Datetime may sit only in a second EXIF IFD; if still missing, re-scan same buffer.
+        if summary.date_time.is_none() {
+            if let Some(exif) = read_exif_from_bytes_permissive(&head) {
+                summary.date_time = exif_field_string(&exif, Tag::DateTimeOriginal)
+                    .or_else(|| exif_field_string(&exif, Tag::DateTimeDigitized))
+                    .or_else(|| exif_field_string(&exif, Tag::DateTime))
+                    .map(|s| format_frame_date_time(&s));
+            }
+        }
+    } else {
+        // Head read failed — last-resort path-based readers (still fewer than before).
+        if let Some(exif) = read_exif_permissive(file_path) {
+            fill_frame_summary_from_kamadak(&mut summary, &exif);
+        }
+        if is_jpeg && frame_summary_needs_capture(&summary) {
+            merge_capture_settings_into_frame(
+                &mut summary,
+                read_capture_settings_with_little_exif(file_path),
+            );
+        }
+        if summary.date_time.is_none() {
+            summary.date_time = read_capture_time_label(file_path, "datetime");
+        }
+    }
+
+    // Non-RAW rarely needs LibRaw; only if identity/capture still empty (e.g. TIFF/DNG edge).
+    if frame_summary_needs_identity_or_capture(&summary) && crate::t_libraw::is_tiff_path(file_path)
+    {
+        fill_frame_summary_from_libraw(&mut summary, file_path);
+    }
+
+    summary
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameLayoutKind {
+    Classic,
+    FloatBlur,
+    SinkBlur,
+}
+
+fn frame_layout_kind(options: &PhotoFrameOptions) -> FrameLayoutKind {
+    // Exact ids only — avoid substring traps like "blur-classic" → FloatBlur.
+    let tid = options
+        .template_id
+        .as_deref()
+        .unwrap_or("classic-white")
+        .to_ascii_lowercase();
+    match tid.as_str() {
+        "sink-blur" => FrameLayoutKind::SinkBlur,
+        "float-blur" => FrameLayoutKind::FloatBlur,
+        _ => FrameLayoutKind::Classic,
+    }
+}
+
+fn resolve_frame_palette(options: &PhotoFrameOptions) -> ([u8; 3], [u8; 3], [u8; 3]) {
+    let tid = options
+        .template_id
+        .as_deref()
+        .unwrap_or("classic-white")
+        .to_ascii_lowercase();
+    let layout = frame_layout_kind(options);
+    let (def_bg, def_text, def_sec) = match layout {
+        FrameLayoutKind::Classic if tid.contains("black") => {
+            ([18, 18, 18], [245, 245, 245], [180, 180, 180])
+        }
+        FrameLayoutKind::Classic => ([255, 255, 255], [36, 36, 36], [100, 100, 100]),
+        // Blur layouts: solid fallback only used under text bar strip; text prefers light.
+        FrameLayoutKind::FloatBlur | FrameLayoutKind::SinkBlur => {
+            ([20, 20, 20], [250, 250, 250], [210, 210, 210])
+        }
+    };
+    let bg = parse_hex_color(options.background_color.as_deref().unwrap_or(""))
+        .unwrap_or(def_bg);
+    let text =
+        parse_hex_color(options.text_color.as_deref().unwrap_or("")).unwrap_or(def_text);
+    let sec = parse_hex_color(options.secondary_text_color.as_deref().unwrap_or(""))
+        .unwrap_or(def_sec);
+    (bg, text, sec)
+}
+
+fn make_cover_blur_bg(img: &DynamicImage, out_w: u32, out_h: u32, sigma: f32) -> RgbaImage {
+    let filled = img.resize_to_fill(out_w, out_h, image::imageops::FilterType::Triangle);
+    // Blur is expensive at full res — downsample, blur, upsample for soft look.
+    let max_blur_edge = 720u32;
+    let (fw, fh) = filled.dimensions();
+    let long = fw.max(fh).max(1);
+    let blur_src = if long > max_blur_edge {
+        let scale = max_blur_edge as f32 / long as f32;
+        let sw = ((fw as f32) * scale).round().max(1.0) as u32;
+        let sh = ((fh as f32) * scale).round().max(1.0) as u32;
+        filled.resize_exact(sw, sh, image::imageops::FilterType::Triangle)
+    } else {
+        filled.clone()
+    };
+    let sigma = sigma.clamp(2.0, 48.0);
+    // Scale sigma with downsample so visual softness is stable.
+    let (sw, sh) = blur_src.dimensions();
+    let scaled_sigma = if long > max_blur_edge {
+        (sigma * (sw.max(sh) as f32 / long as f32)).max(1.5)
+    } else {
+        sigma
+    };
+    let blurred = blur_src.blur(scaled_sigma);
+    if (sw, sh) != (out_w, out_h) {
+        blurred
+            .resize_exact(out_w, out_h, image::imageops::FilterType::Triangle)
+            .to_rgba8()
+    } else {
+        blurred.to_rgba8()
+    }
+}
+
+fn make_soft_shadow(
+    photo_w: u32,
+    photo_h: u32,
+    blur_sigma: f32,
+    opacity: f32,
+) -> RgbaImage {
+    let pad = ((blur_sigma * 3.0).ceil() as u32).max(8).saturating_mul(2);
+    let sw = photo_w.saturating_add(pad).max(1);
+    let sh = photo_h.saturating_add(pad).max(1);
+    let mut layer = RgbaImage::from_pixel(sw, sh, Rgba([0, 0, 0, 0]));
+    let ox = (pad / 2) as i64;
+    let oy = (pad / 2) as i64;
+    let a = (opacity.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    // Slightly inset soft rect so blur softens edges.
+    let inset = (photo_w.min(photo_h) as f32 * 0.01).round() as u32;
+    let rw = photo_w.saturating_sub(inset.saturating_mul(2)).max(1);
+    let rh = photo_h.saturating_sub(inset.saturating_mul(2)).max(1);
+    for y in 0..rh {
+        for x in 0..rw {
+            layer.put_pixel(
+                (ox as u32).saturating_add(inset).saturating_add(x),
+                (oy as u32).saturating_add(inset).saturating_add(y),
+                Rgba([0, 0, 0, a]),
+            );
+        }
+    }
+    // Downsample blur for speed
+    let max_edge = 480u32;
+    let long = sw.max(sh).max(1);
+    let work = if long > max_edge {
+        let scale = max_edge as f32 / long as f32;
+        let dw = ((sw as f32) * scale).round().max(1.0) as u32;
+        let dh = ((sh as f32) * scale).round().max(1.0) as u32;
+        DynamicImage::ImageRgba8(layer).resize_exact(dw, dh, image::imageops::FilterType::Triangle)
+    } else {
+        DynamicImage::ImageRgba8(layer)
+    };
+    let (ww, wh) = work.dimensions();
+    let sigma = if long > max_edge {
+        (blur_sigma.clamp(2.0, 40.0) * (ww.max(wh) as f32 / long as f32)).max(1.2)
+    } else {
+        blur_sigma.clamp(2.0, 40.0)
+    };
+    let blurred = work.blur(sigma);
+    if (ww, wh) != (sw, sh) {
+        blurred
+            .resize_exact(sw, sh, image::imageops::FilterType::Triangle)
+            .to_rgba8()
+    } else {
+        blurred.to_rgba8()
+    }
+}
+
+/// Bundled default frame logo (shipped under resource `branding/`).
+const DEFAULT_FRAME_LOGO_REL: &str = "branding/default-frame-logo.png";
+
+fn default_frame_logo_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // Dev: src-tauri/resources/branding/...
+    out.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("branding")
+            .join("default-frame-logo.png"),
+    );
+    // Packaged / resource-relative next to exe (Tauri resource layout).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("resources").join(DEFAULT_FRAME_LOGO_REL));
+            out.push(dir.join(DEFAULT_FRAME_LOGO_REL));
+            // Windows NSIS/MSI often places resources under `_up_` sibling layouts — keep simple joins.
+            out.push(dir.join("branding").join("default-frame-logo.png"));
+        }
+    }
+    // Repo-root fallback (logo-pic.png) when developing outside resource packing.
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join("logo-pic.png"));
+        out.push(cwd.join("src-tauri/resources/branding/default-frame-logo.png"));
+    }
+    out
+}
+
+/// Resolve logo path: explicit file if present, else bundled default.
+fn resolve_frame_logo_path(requested: Option<&str>) -> Option<String> {
+    if let Some(p) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+        if Path::new(p).is_file() {
+            return Some(p.to_string());
+        }
+    }
+    for candidate in default_frame_logo_candidates() {
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn load_frame_logo(path: &str, target_long: u32) -> Option<RgbaImage> {
+    let path = path.trim();
+    if path.is_empty() || target_long < 4 {
+        return None;
+    }
+    let mark = image::open(Path::new(path)).ok()?;
+    let (mw, mh) = mark.dimensions();
+    if mw == 0 || mh == 0 {
+        return None;
+    }
+    let (nw, nh) = if mw >= mh {
+        let nh = ((mh as f64) * (target_long as f64) / (mw as f64))
+            .round()
+            .max(1.0) as u32;
+        (target_long, nh)
+    } else {
+        let nw = ((mw as f64) * (target_long as f64) / (mh as f64))
+            .round()
+            .max(1.0) as u32;
+        (nw, target_long)
+    };
+    Some(
+        mark.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+            .to_rgba8(),
+    )
+}
+
+fn place_frame_logo(
+    canvas: &mut RgbaImage,
+    logo: &RgbaImage,
+    position: &str,
+    photo_x: u32,
+    photo_y: u32,
+    photo_w: u32,
+    photo_h: u32,
+    bar_y: u32,
+    bar_h: u32,
+    pad_x: f32,
+) {
+    let (lw, lh) = logo.dimensions();
+    if lw == 0 || lh == 0 {
+        return;
+    }
+    let (cw, ch) = (canvas.width(), canvas.height());
+    let margin = pad_x.round().max(6.0) as u32;
+    let pos = position.to_ascii_lowercase();
+    // Default: centered on the info bar. Legacy bar-left/bar-right also center.
+    let (x, y) = match pos.as_str() {
+        "top-right" => (
+            photo_x
+                .saturating_add(photo_w)
+                .saturating_sub(lw)
+                .saturating_sub(margin),
+            photo_y.saturating_add(margin),
+        ),
+        "top-left" => (photo_x.saturating_add(margin), photo_y.saturating_add(margin)),
+        // bar-center (default) + legacy bar-left / bar-right
+        _ => {
+            let by = if bar_h > 0 {
+                bar_y + bar_h.saturating_sub(lh) / 2
+            } else {
+                photo_y.saturating_add(photo_h).saturating_add(margin / 2)
+            };
+            let bx = if cw > lw {
+                (cw - lw) / 2
+            } else {
+                0
+            };
+            (bx.min(cw.saturating_sub(lw)), by.min(ch.saturating_sub(lh)))
+        }
+    };
+    image::imageops::overlay(canvas, logo, x as i64, y as i64);
+}
+
+fn build_frame_corner_texts(
+    summary: &FrameExifSummary,
+    options: &PhotoFrameOptions,
+) -> (String, String, String, String) {
+    let mut left_top_parts = Vec::new();
+    if frame_opt_bool(options.show_brand, true) {
+        if let Some(m) = summary.make.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            left_top_parts.push(m.to_string());
+        }
+    }
+    if frame_opt_bool(options.show_model, true) {
+        if let Some(m) = summary.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            left_top_parts.push(m.to_string());
+        }
+    }
+    let left_top = left_top_parts.join(" ");
+
+    let left_bottom = if frame_opt_bool(options.show_lens, true) {
+        summary
+            .lens
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let mut right_top_parts = Vec::new();
+    if frame_opt_bool(options.show_focal_length, true) {
+        if let Some(v) = summary
+            .focal_length
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            right_top_parts.push(v.to_string());
+        }
+    }
+    if frame_opt_bool(options.show_aperture, true) {
+        if let Some(v) = summary
+            .aperture
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            right_top_parts.push(v.to_string());
+        }
+    }
+    if frame_opt_bool(options.show_shutter, true) {
+        if let Some(v) = summary
+            .shutter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            right_top_parts.push(v.to_string());
+        }
+    }
+    if frame_opt_bool(options.show_iso, true) {
+        if let Some(v) = summary
+            .iso
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            right_top_parts.push(v.to_string());
+        }
+    }
+    let right_top = right_top_parts.join("  ");
+
+    let right_bottom = if frame_opt_bool(options.show_date_time, true) {
+        summary
+            .date_time
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    (left_top, left_bottom, right_top, right_bottom)
+}
+
+fn measure_text_width(font: &ab_glyph::FontRef, scale: ab_glyph::PxScale, text: &str) -> f32 {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(scale);
+    let mut caret = 0.0f32;
+    for ch in text.chars() {
+        caret += scaled.h_advance(font.glyph_id(ch));
+    }
+    caret
+}
+
+/// Shrink font then ellipsis-truncate so `text` fits within `max_width`.
+fn fit_frame_text(
+    font: &ab_glyph::FontRef,
+    text: &str,
+    desired_size: f32,
+    max_width: f32,
+) -> (String, ab_glyph::PxScale) {
+    use ab_glyph::PxScale;
+    if text.is_empty() || max_width <= 1.0 {
+        return (String::new(), PxScale::from(desired_size.max(1.0)));
+    }
+    let mut size = desired_size.max(1.0);
+    // Lower bound only; never clamp(min, max) when desired_size < 8 (debug panic).
+    let min_size = (size * 0.55).max(1.0).min(size);
+    while size > min_size + 0.01 {
+        let w = measure_text_width(font, PxScale::from(size), text);
+        if w <= max_width {
+            return (text.to_string(), PxScale::from(size));
+        }
+        size = (size - 0.75).max(min_size);
+    }
+    let scale = PxScale::from(min_size);
+    if measure_text_width(font, scale, text) <= max_width {
+        return (text.to_string(), scale);
+    }
+    let ellipsis = "…";
+    let ell_w = measure_text_width(font, scale, ellipsis);
+    if ell_w >= max_width {
+        return (String::new(), scale);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut end = chars.len();
+    while end > 0 {
+        let mut candidate: String = chars[..end].iter().collect();
+        candidate.push_str(ellipsis);
+        if measure_text_width(font, scale, &candidate) <= max_width {
+            return (candidate, scale);
+        }
+        end -= 1;
+    }
+    (String::new(), scale)
+}
+
+fn draw_frame_text_line(
+    canvas: &mut RgbaImage,
+    font: &ab_glyph::FontRef,
+    text: &str,
+    x: f32,
+    baseline_y: f32,
+    scale: ab_glyph::PxScale,
+    color: [u8; 3],
+    align_right: bool,
+) {
+    use ab_glyph::{Font, ScaleFont};
+    if text.is_empty() {
+        return;
+    }
+    let scaled = font.as_scaled(scale);
+    let total_w = measure_text_width(font, scale, text);
+    let mut caret = if align_right {
+        x - total_w
+    } else {
+        x
+    };
+    // Keep glyphs inside canvas; fit_frame_text should already constrain width.
+    caret = caret.max(0.0);
+    let (cw, ch) = (canvas.width(), canvas.height());
+    for ch_c in text.chars() {
+        let id = font.glyph_id(ch_c);
+        let glyph = id.with_scale_and_position(scale, ab_glyph::point(caret, baseline_y));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, v| {
+                if v <= 0.0 {
+                    return;
+                }
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let px = px as u32;
+                let py = py as u32;
+                if px >= cw || py >= ch {
+                    return;
+                }
+                let a = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                if a == 0 {
+                    return;
+                }
+                let pixel = canvas.get_pixel_mut(px, py);
+                // alpha over solid bar
+                let inv = 255u16.saturating_sub(a as u16);
+                pixel[0] = (((a as u16) * (color[0] as u16) + inv * (pixel[0] as u16)) / 255) as u8;
+                pixel[1] = (((a as u16) * (color[1] as u16) + inv * (pixel[1] as u16)) / 255) as u8;
+                pixel[2] = (((a as u16) * (color[2] as u16) + inv * (pixel[2] as u16)) / 255) as u8;
+                pixel[3] = 255;
+            });
+        }
+        caret += scaled.h_advance(id);
+    }
+}
+
+fn draw_frame_info_bar(
+    canvas: &mut RgbaImage,
+    font: &ab_glyph::FontRef,
+    left_top: &str,
+    left_bottom: &str,
+    right_top: &str,
+    right_bottom: &str,
+    bar_y: u32,
+    bar_h: u32,
+    pad_x: f32,
+    text_color: [u8; 3],
+    secondary_color: [u8; 3],
+    fill_bar: Option<[u8; 3]>,
+) {
+    if bar_h == 0 {
+        return;
+    }
+    let out_w = canvas.width();
+    if let Some(bg) = fill_bar {
+        let y2 = bar_y.saturating_add(bar_h).min(canvas.height());
+        let px = Rgba([bg[0], bg[1], bg[2], 255]);
+        for y in bar_y..y2 {
+            for x in 0..out_w {
+                canvas.put_pixel(x, y, px);
+            }
+        }
+    }
+
+    let middle_gap = (bar_h as f32) * 0.08;
+    let large_font = ((bar_h as f32) * 0.25).clamp(12.0, 72.0);
+    let base_font = ((bar_h as f32) * 0.20).clamp(10.0, 56.0);
+    let left_count = (!left_top.is_empty() as u8) + (!left_bottom.is_empty() as u8);
+    let right_count = (!right_top.is_empty() as u8) + (!right_bottom.is_empty() as u8);
+    let single_mult = 1.12f32;
+    let bar_mid = bar_y as f32 + (bar_h as f32) / 2.0;
+    let text_top_y = bar_mid - middle_gap / 2.0;
+    let text_bottom_y = bar_mid + middle_gap / 2.0;
+
+    // Split bar into left/right columns with a minimum center gap so corners never overlap.
+    let content_w = ((out_w as f32) - pad_x * 2.0).max(0.0);
+    let min_center_gap = (content_w * 0.05).clamp(12.0, 48.0);
+    let has_left = left_count > 0;
+    let has_right = right_count > 0;
+    let (left_max, right_max) = if has_left && has_right {
+        let half = ((content_w - min_center_gap) / 2.0).max(0.0);
+        (half, half)
+    } else if has_left {
+        (content_w, 0.0)
+    } else {
+        (0.0, content_w)
+    };
+    let left_x = pad_x;
+    let right_x = (out_w as f32) - pad_x;
+
+    if !left_top.is_empty() {
+        let single = left_count == 1;
+        let size = if single {
+            large_font * single_mult
+        } else {
+            large_font
+        };
+        let baseline = if single { bar_mid } else { text_top_y };
+        let (text, scale) = fit_frame_text(font, left_top, size, left_max);
+        draw_frame_text_line(
+            canvas,
+            font,
+            &text,
+            left_x,
+            baseline,
+            scale,
+            text_color,
+            false,
+        );
+    }
+    if !left_bottom.is_empty() {
+        let single = left_count == 1;
+        let size = if single {
+            base_font * single_mult
+        } else {
+            base_font
+        };
+        let baseline = if single {
+            bar_mid
+        } else {
+            text_bottom_y + base_font * 0.7
+        };
+        let (text, scale) = fit_frame_text(font, left_bottom, size, left_max);
+        draw_frame_text_line(
+            canvas,
+            font,
+            &text,
+            left_x,
+            baseline,
+            scale,
+            secondary_color,
+            false,
+        );
+    }
+
+    if !right_top.is_empty() {
+        let single = right_count == 1;
+        let size = if single {
+            base_font * single_mult
+        } else {
+            base_font
+        };
+        let baseline = if single { bar_mid } else { text_top_y };
+        let (text, scale) = fit_frame_text(font, right_top, size, right_max);
+        draw_frame_text_line(
+            canvas,
+            font,
+            &text,
+            right_x,
+            baseline,
+            scale,
+            secondary_color,
+            true,
+        );
+    }
+    if !right_bottom.is_empty() {
+        let single = right_count == 1;
+        let size = if single {
+            base_font * single_mult
+        } else {
+            base_font
+        };
+        let baseline = if single {
+            bar_mid
+        } else {
+            text_bottom_y + base_font * 0.7
+        };
+        let (text, scale) = fit_frame_text(font, right_bottom, size, right_max);
+        draw_frame_text_line(
+            canvas,
+            font,
+            &text,
+            right_x,
+            baseline,
+            scale,
+            secondary_color,
+            true,
+        );
+    }
+}
+
+/// Photo-frame export holds full-res canvases; keep concurrency tight to avoid OOM.
+fn photo_frame_export_worker_limit() -> usize {
+    batch_worker_limit().min(2).max(1)
+}
+
+/// Soft cap long edge for export composition (text/shadow don't need 100MP).
+/// Decode path uses this budget so we never allocate a full 100MP plane first.
+const PHOTO_FRAME_EXPORT_MAX_EDGE: u32 = 8192;
+
+fn apply_photo_frame(
+    img: DynamicImage,
+    summary: &FrameExifSummary,
+    options: &PhotoFrameOptions,
+) -> Result<DynamicImage, String> {
+    use ab_glyph::{Font, FontRef};
+
+    let layout = frame_layout_kind(options);
+    let (bg, text_color, secondary_color) = resolve_frame_palette(options);
+    let (left_top, left_bottom, right_top, right_bottom) =
+        build_frame_corner_texts(summary, options);
+
+    let any_text = !left_top.is_empty()
+        || !left_bottom.is_empty()
+        || !right_top.is_empty()
+        || !right_bottom.is_empty();
+
+    // Logo on by default; empty path falls back to bundled branding logo.
+    let resolved_logo_path = if frame_opt_bool(options.show_logo, true) {
+        resolve_frame_logo_path(options.logo_path.as_deref())
+    } else {
+        None
+    };
+    let show_logo = resolved_logo_path.is_some();
+
+    // Single RGBA conversion for photo + blur source (avoid repeated to_rgba8 peaks).
+    let photo_rgba = img.to_rgba8();
+    let (iw, ih) = photo_rgba.dimensions();
+    let short = iw.min(ih).max(1) as f32;
+    // Bar height relative to short edge (panorama-friendly) with a floor vs width.
+    let bar_ratio = options.bar_ratio.unwrap_or(0.11).clamp(0.05, 0.22);
+    let bar_ref = short.max((iw as f32) * 0.18);
+    // Logo-only still reserves a thin bar strip for placement; text drives full height.
+    let bar_h = if any_text || show_logo {
+        let min_h = if any_text { 36.0 } else { 28.0 };
+        (bar_ref * bar_ratio)
+            .round()
+            .clamp(min_h, (ih as f32 * 0.22).max(min_h)) as u32
+    } else {
+        0
+    };
+
+    let canvas = match layout {
+        FrameLayoutKind::Classic => {
+            let margin_ratio = options.margin_ratio.unwrap_or(0.0).clamp(0.0, 0.12);
+            let margin_px = if margin_ratio > 0.0 {
+                (short * margin_ratio).round().max(0.0) as u32
+            } else {
+                0
+            };
+            let out_w = iw.saturating_add(margin_px.saturating_mul(2)).max(1);
+            let out_h = ih
+                .saturating_add(margin_px.saturating_mul(2))
+                .saturating_add(bar_h)
+                .max(1);
+            let mut canvas =
+                RgbaImage::from_pixel(out_w, out_h, Rgba([bg[0], bg[1], bg[2], 255]));
+            let photo_x = margin_px;
+            let photo_y = margin_px;
+            image::imageops::overlay(&mut canvas, &photo_rgba, photo_x as i64, photo_y as i64);
+            let bar_y = photo_y.saturating_add(ih);
+            (canvas, photo_x, photo_y, bar_y, true)
+        }
+        FrameLayoutKind::FloatBlur | FrameLayoutKind::SinkBlur => {
+            let pad_ratio = options
+                .margin_ratio
+                .unwrap_or(if layout == FrameLayoutKind::SinkBlur {
+                    0.08
+                } else {
+                    0.10
+                })
+                .clamp(0.04, 0.20);
+            let pad = (short * pad_ratio).round().max(12.0) as u32;
+            let blur_sigma = options.blur_sigma.unwrap_or(18.0).clamp(2.0, 48.0);
+            let shadow_blur = options.shadow_blur.unwrap_or(16.0).clamp(2.0, 40.0);
+            let shadow_opacity = options.shadow_opacity.unwrap_or(0.42).clamp(0.05, 0.9);
+            let shadow_off_ratio = options.shadow_offset_ratio.unwrap_or(
+                if layout == FrameLayoutKind::SinkBlur {
+                    0.06
+                } else {
+                    0.035
+                },
+            )
+            .clamp(0.0, 0.12);
+            let shadow_dy = ((ih as f32) * shadow_off_ratio).round() as i64;
+
+            let out_w = iw.saturating_add(pad.saturating_mul(2)).max(1);
+            // Sink: extra bottom breathing room under floating photo + bar.
+            let bottom_extra = if layout == FrameLayoutKind::SinkBlur {
+                pad.saturating_add((short * 0.06).round() as u32)
+            } else {
+                pad
+            };
+            let out_h = ih
+                .saturating_add(pad)
+                .saturating_add(bottom_extra)
+                .saturating_add(bar_h)
+                .max(1);
+
+            // Blur bg from DynamicImage view of the single RGBA buffer.
+            let photo_dyn = DynamicImage::ImageRgba8(photo_rgba.clone());
+            let mut canvas = make_cover_blur_bg(&photo_dyn, out_w, out_h, blur_sigma);
+            // Slight dim so text/shadow read better on busy backgrounds.
+            for px in canvas.pixels_mut() {
+                px[0] = ((px[0] as u16 * 88) / 100) as u8;
+                px[1] = ((px[1] as u16 * 88) / 100) as u8;
+                px[2] = ((px[2] as u16 * 88) / 100) as u8;
+            }
+
+            let photo_x = pad;
+            // Float: vertically centered-ish above bar; Sink: bias toward top.
+            let photo_y = if layout == FrameLayoutKind::SinkBlur {
+                pad
+            } else {
+                let free = out_h.saturating_sub(bar_h).saturating_sub(ih);
+                (free / 2).max(pad / 2)
+            };
+
+            let shadow = make_soft_shadow(iw, ih, shadow_blur, shadow_opacity);
+            let (sw, sh) = shadow.dimensions();
+            let shadow_ox = photo_x as i64 - ((sw as i64 - iw as i64) / 2);
+            let shadow_oy = photo_y as i64 - ((sh as i64 - ih as i64) / 2) + shadow_dy;
+            image::imageops::overlay(&mut canvas, &shadow, shadow_ox, shadow_oy);
+            image::imageops::overlay(&mut canvas, &photo_rgba, photo_x as i64, photo_y as i64);
+
+            let bar_y = if layout == FrameLayoutKind::SinkBlur {
+                // Bar sits in the large lower blur zone, not glued to the photo.
+                out_h.saturating_sub(bar_h).saturating_sub(pad / 3)
+            } else {
+                photo_y.saturating_add(ih).min(out_h.saturating_sub(bar_h))
+            };
+            (canvas, photo_x, photo_y, bar_y, false)
+        }
+    };
+
+    let (mut canvas, photo_x, photo_y, bar_y, solid_bar) = canvas;
+    let out_w = canvas.width();
+    let pad_x = ((out_w as f32) * 0.02).round().max(8.0);
+
+    if bar_h > 0 && (any_text || solid_bar) {
+        let font_bytes = load_system_font_bytes()?;
+        let font =
+            FontRef::try_from_slice(&font_bytes).map_err(|e| format!("font parse: {}", e))?;
+        let fill = if solid_bar { Some(bg) } else { None };
+        // On blur layouts, darken a translucent strip under text for readability.
+        if !solid_bar && any_text {
+            let y2 = bar_y.saturating_add(bar_h).min(canvas.height());
+            for y in bar_y..y2 {
+                for x in 0..out_w {
+                    let p = canvas.get_pixel_mut(x, y);
+                    p[0] = ((p[0] as u16 * 55) / 100) as u8;
+                    p[1] = ((p[1] as u16 * 55) / 100) as u8;
+                    p[2] = ((p[2] as u16 * 55) / 100) as u8;
+                }
+            }
+        }
+        draw_frame_info_bar(
+            &mut canvas,
+            &font,
+            &left_top,
+            &left_bottom,
+            &right_top,
+            &right_bottom,
+            bar_y,
+            bar_h,
+            pad_x,
+            text_color,
+            secondary_color,
+            fill,
+        );
+        let _ = font.glyph_id(' ');
+    }
+
+    if let Some(path) = resolved_logo_path.as_deref() {
+        let logo_scale = options.logo_scale.unwrap_or(0.10).clamp(0.04, 0.22);
+        let target = ((short * logo_scale).round() as u32).max(16);
+        if let Some(logo) = load_frame_logo_cached(path, target) {
+            let pos = options.logo_position.as_deref().unwrap_or("bar-center");
+            place_frame_logo(
+                &mut canvas,
+                &logo,
+                pos,
+                photo_x,
+                photo_y,
+                iw,
+                ih,
+                bar_y,
+                bar_h,
+                pad_x,
+            );
+        }
+    }
+
+    Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+/// Preview a photo frame as JPEG bytes (long edge limited).
+/// Uses layout-image cache + EXIF/logo caches so toggling logo/fields stays snappy.
+pub async fn photo_frame_preview(params: PhotoFramePreviewParams) -> Result<Vec<u8>, String> {
+    let path = params.source_file_path.trim();
+    if path.is_empty() {
+        return Err("sourceFilePath is required".to_string());
+    }
+    // Preview is UI-only; keep decode smaller for fast toggles (export still full-res).
+    let max_edge = params.max_edge.unwrap_or(1200).clamp(256, 2048);
+    let img = load_image_for_layout_cached(path, max_edge).await?;
+    let summary = frame_exif_summary_cached(path);
+    let framed = apply_photo_frame(img, &summary, &params.options)?;
+    encode_jpeg_rgb8(&framed.to_rgb8())
+}
+
+/// Export photo frames for multiple files into outputDir (save-as only).
+pub async fn export_photo_frame(
+    app_handle: tauri::AppHandle,
+    params: PhotoFrameExportParams,
+) -> Result<PhotoFrameExportResult, String> {
+    use tauri::Emitter;
+    use tokio::task::JoinSet;
+
+    reset_photo_frame_cancel_flag();
+    let total = params.files.len();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut cancelled = false;
+    let mut errors: Vec<String> = Vec::new();
+    let mut output_paths: Vec<String> = Vec::new();
+    let mut completed = 0usize;
+
+    let fmt = params.output_format.to_ascii_lowercase();
+    let ext = match fmt.as_str() {
+        "png" => "png",
+        "webp" => "webp",
+        _ => "jpg",
+    };
+    let quality = params.quality.unwrap_or(90).clamp(1, 100);
+    let name_mode = params.name_mode.as_str();
+    let prefix = params.prefix.as_deref().unwrap_or("frame");
+    let suffix = params.suffix.as_deref().unwrap_or("frame");
+    let overwrite_policy = params.overwrite_policy.to_ascii_lowercase();
+    let output_dir = params.output_dir.trim();
+    if output_dir.is_empty() {
+        return Err("outputDir is required".to_string());
+    }
+    fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output folder: {}", e))?;
+
+    let options = params.options.clone();
+    let _ = app_handle.emit(
+        "photo-frame-progress",
+        serde_json::json!({
+            "current": 0,
+            "total": total,
+            "status": "start",
+            "filePath": "",
+            "message": ""
+        }),
+    );
+
+    // Serial dest planning
+    let mut reserved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut work: Vec<(usize, String, Option<String>)> = Vec::with_capacity(total);
+    for (index, file) in params.files.iter().enumerate() {
+        if photo_frame_is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        let src = file.source_file_path.trim().to_string();
+        if src.is_empty() {
+            failed += 1;
+            errors.push(format!("#{}: empty source path", index + 1));
+            completed += 1;
+            continue;
+        }
+        match resolve_batch_dest_path(
+            &src,
+            "saveas",
+            Some(output_dir),
+            name_mode,
+            prefix,
+            suffix,
+            index,
+            ext,
+            &overwrite_policy,
+            &mut reserved,
+        ) {
+            Ok(dest) => work.push((index, src, dest)),
+            Err(e) => {
+                failed += 1;
+                errors.push(format!("{}: {}", src, e));
+                completed += 1;
+            }
+        }
+    }
+
+    // (index, src, dest, result) — dest used only for temp cleanup on cancel/fail.
+    let mut set: JoinSet<(usize, String, Option<String>, Result<String, String>)> = JoinSet::new();
+    let worker_limit = photo_frame_export_worker_limit();
+    let mut next = 0usize;
+
+    while next < work.len() || !set.is_empty() {
+        if photo_frame_is_cancelled() {
+            cancelled = true;
+            set.abort_all();
+            break;
+        }
+        while set.len() < worker_limit && next < work.len() {
+            if photo_frame_is_cancelled() {
+                cancelled = true;
+                break;
+            }
+            let (index, src, dest_opt) = work[next].clone();
+            next += 1;
+            if dest_opt.is_none() {
+                skipped += 1;
+                completed += 1;
+                let _ = app_handle.emit(
+                    "photo-frame-progress",
+                    serde_json::json!({
+                        "current": completed.min(total),
+                        "total": total,
+                        "status": "skip",
+                        "filePath": src,
+                        "message": "skipped"
+                    }),
+                );
+                continue;
+            }
+            let dest = dest_opt.unwrap();
+            let opts = options.clone();
+            let ext = ext.to_string();
+            let dest_for_task = dest.clone();
+            set.spawn(async move {
+                if photo_frame_is_cancelled() {
+                    return (index, src, Some(dest_for_task), Err("cancelled".to_string()));
+                }
+                let result = async {
+                    // Decode already capped to export max edge (avoids full-res peak then downscale).
+                    let img = load_image_for_layout(&src, PHOTO_FRAME_EXPORT_MAX_EDGE).await?;
+                    if photo_frame_is_cancelled() {
+                        return Err("cancelled".to_string());
+                    }
+                    let summary = read_frame_exif_summary(&src);
+                    let framed = apply_photo_frame(img, &summary, &opts)?;
+                    if photo_frame_is_cancelled() {
+                        return Err("cancelled".to_string());
+                    }
+                    if let Some(parent) = Path::new(&dest_for_task).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent)
+                                .map_err(|e| format!("create dest dir: {}", e))?;
+                        }
+                    }
+                    // Temp then rename so cancel never leaves a half-written final file.
+                    let temp = batch_temp_path(&dest_for_task);
+                    if let Err(e) = save_dynamic_image(&framed, &temp, &ext, quality) {
+                        let _ = fs::remove_file(&temp);
+                        return Err(e);
+                    }
+                    if photo_frame_is_cancelled() {
+                        let _ = fs::remove_file(&temp);
+                        return Err("cancelled".to_string());
+                    }
+                    if Path::new(&dest_for_task).exists() {
+                        let _ = fs::remove_file(&dest_for_task);
+                    }
+                    if let Err(e) = fs::rename(&temp, &dest_for_task) {
+                        if let Err(copy_err) = fs::copy(&temp, &dest_for_task) {
+                            let _ = fs::remove_file(&temp);
+                            return Err(format!("finalize dest: {e}; copy fallback: {copy_err}"));
+                        }
+                        let _ = fs::remove_file(&temp);
+                    }
+                    Ok::<String, String>(dest_for_task.clone())
+                }
+                .await;
+                if result.is_err() {
+                    remove_batch_temp(&dest_for_task);
+                }
+                (index, src, Some(dest_for_task), result)
+            });
+        }
+
+        if cancelled {
+            set.abort_all();
+            break;
+        }
+
+        if set.is_empty() {
+            break;
+        }
+
+        if let Some(joined) = set.join_next().await {
+            completed += 1;
+            match joined {
+                Ok((_index, src, _dest, Ok(path))) => {
+                    succeeded += 1;
+                    output_paths.push(path.clone());
+                    let _ = app_handle.emit(
+                        "photo-frame-progress",
+                        serde_json::json!({
+                            "current": completed.min(total),
+                            "total": total,
+                            "status": "ok",
+                            "filePath": src,
+                            "message": path
+                        }),
+                    );
+                }
+                Ok((_index, src, dest, Err(err))) => {
+                    if let Some(ref d) = dest {
+                        remove_batch_temp(d);
+                    }
+                    if err == "cancelled" {
+                        cancelled = true;
+                        set.abort_all();
+                    } else {
+                        failed += 1;
+                        errors.push(format!("{}: {}", src, err));
+                    }
+                    let _ = app_handle.emit(
+                        "photo-frame-progress",
+                        serde_json::json!({
+                            "current": completed.min(total),
+                            "total": total,
+                            "status": if err == "cancelled" { "cancelled" } else { "error" },
+                            "filePath": src,
+                            "message": err
+                        }),
+                    );
+                }
+                Err(e) if e.is_cancelled() => {
+                    cancelled = true;
+                }
+                Err(e) => {
+                    failed += 1;
+                    errors.push(format!("worker join: {}", e));
+                }
+            }
+        }
+    }
+
+    // Drain stragglers; scrub temps only.
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_index, _src, _dest, Ok(path))) => {
+                completed += 1;
+                succeeded += 1;
+                output_paths.push(path);
+            }
+            Ok((_index, src, dest, Err(err))) => {
+                completed += 1;
+                if let Some(ref d) = dest {
+                    remove_batch_temp(d);
+                }
+                if err != "cancelled" {
+                    failed += 1;
+                    errors.push(format!("{}: {}", src, err));
+                }
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                completed += 1;
+                failed += 1;
+                errors.push(format!("worker join: {}", e));
+            }
+        }
+    }
+    if cancelled {
+        for (_index, _src, dest) in &work {
+            if let Some(d) = dest {
+                remove_batch_temp(d);
+            }
+        }
+    }
+
+    let result = PhotoFrameExportResult {
+        total,
+        succeeded,
+        failed,
+        skipped,
+        cancelled,
+        errors,
+        output_paths,
+    };
+    let _ = app_handle.emit(
+        "photo-frame-progress",
+        serde_json::json!({
+            "current": completed.min(total),
+            "total": total,
+            "status": if cancelled { "cancelled" } else { "done" },
+            "filePath": "",
+            "message": "",
+            "result": result
+        }),
+    );
+    Ok(result)
+}
+
+#[cfg(test)]
+mod photo_frame_tests {
+    use super::format_frame_date_time;
+
+    #[test]
+    fn frame_date_classic_exif() {
+        assert_eq!(
+            format_frame_date_time("2023:08:15 14:30:00"),
+            "2023-08-15 14:30:00"
+        );
+    }
+
+    #[test]
+    fn frame_date_iso_t_separator() {
+        assert_eq!(
+            format_frame_date_time("2023-08-15T14:30:00"),
+            "2023-08-15 14:30:00"
+        );
+    }
+
+    #[test]
+    fn frame_date_iso_with_fraction_and_z() {
+        assert_eq!(
+            format_frame_date_time("2023-08-15T14:30:00.123Z"),
+            "2023-08-15 14:30:00"
+        );
+    }
+
+    #[test]
+    fn frame_date_iso_with_offset() {
+        assert_eq!(
+            format_frame_date_time("2023-08-15T14:30:00+08:00"),
+            "2023-08-15 14:30:00"
+        );
+        assert_eq!(
+            format_frame_date_time("2023-08-15T14:30:00-05:00"),
+            "2023-08-15 14:30:00"
+        );
     }
 }

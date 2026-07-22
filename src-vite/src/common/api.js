@@ -770,7 +770,7 @@ export async function getFolderThumbCount(folderId) {
 }
 
 // edit an image
-// params: { sourceFilePath, destFilePath, outputFormat, orientation, flipHorizontal, flipVertical, rotate, crop, resize, quality, filter, brightness, contrast, blur }
+// params: { sourceFilePath, destFilePath, outputFormat, orientation, flipHorizontal, flipVertical, rotate, crop, resize, quality, filter, brightness, contrast, blur, colorMatch? }
 export async function editImage(params) {
   try {
     return await invoke('edit_image', { params });
@@ -780,8 +780,83 @@ export async function editImage(params) {
   }
 }
 
+// traditional global Lab color-match preview (returns JPEG bytes)
+// params: { sourceFilePath, referenceFilePath, maxEdge?, intensity, tonePreservation, autoWb, highlightProtection, shadowProtection }
+export async function colorMatchPreview(params) {
+  try {
+    return await invoke('color_match_preview', { params });
+  } catch (error) {
+    console.error('colorMatchPreview error:', error);
+    throw error;
+  }
+}
+
+// export single-image style .cube LUT (default lutSize 33)
+// params: { sourceFilePath, destFilePath, lutSize? }
+// sourceFilePath = the image whose look is baked into the LUT (style/reference image)
+export async function exportColorMatchLut(params) {
+  try {
+    return await invoke('export_color_match_lut', { params });
+  } catch (error) {
+    console.error('exportColorMatchLut error:', error);
+    throw error;
+  }
+}
+
 // export a template/strip/free collage (Phase B)
 // params: { sourceFilePaths, destFilePath, outputFormat, quality, template, outputWidth, outputHeight, gap, margin, background, fillMode, radius, strokeWidth, strokeColor, items? }
+
+// --- LUT library + photo style (PhotonCamera-inspired) ---
+
+export async function listLutLibrary() {
+  try {
+    return await invoke('list_lut_library');
+  } catch (error) {
+    console.error('listLutLibrary error:', error);
+    throw error;
+  }
+}
+
+export async function importLutFile(sourcePath, displayName = null) {
+  try {
+    return await invoke('import_lut_file', {
+      sourcePath,
+      displayName,
+    });
+  } catch (error) {
+    console.error('importLutFile error:', error);
+    throw error;
+  }
+}
+
+export async function deleteLutEntry(lutId) {
+  try {
+    return await invoke('delete_lut_entry', { lutId });
+  } catch (error) {
+    console.error('deleteLutEntry error:', error);
+    throw error;
+  }
+}
+
+export async function updateLutEntry(lutId, { name = null, favorite = null, category = null } = {}) {
+  try {
+    return await invoke('update_lut_entry', { lutId, name, favorite, category });
+  } catch (error) {
+    console.error('updateLutEntry error:', error);
+    throw error;
+  }
+}
+
+// params: { sourceFilePath, maxEdge?, style }
+export async function applyPhotoStylePreview(params) {
+  try {
+    return await invoke('apply_photo_style_preview', { params });
+  } catch (error) {
+    console.error('applyPhotoStylePreview error:', error);
+    throw error;
+  }
+}
+
 export async function exportCollage(params) {
   try {
     return await invoke('export_collage', { params });
@@ -816,6 +891,35 @@ export async function exportPrintLayout(params) {
     return await invoke('export_print_layout', { params });
   } catch (error) {
     console.error('exportPrintLayout error:', error);
+    throw error;
+  }
+}
+
+// classic EXIF photo frame preview (JPEG bytes)
+export async function photoFramePreview(params) {
+  try {
+    return await invoke('photo_frame_preview', { params });
+  } catch (error) {
+    console.error('photoFramePreview error:', error);
+    throw error;
+  }
+}
+
+// export EXIF photo frames (multi-file save-as)
+export async function exportPhotoFrame(params) {
+  try {
+    return await invoke('export_photo_frame', { params });
+  } catch (error) {
+    console.error('exportPhotoFrame error:', error);
+    throw error;
+  }
+}
+
+export async function cancelPhotoFrameExport() {
+  try {
+    return await invoke('cancel_photo_frame_export');
+  } catch (error) {
+    console.error('cancelPhotoFrameExport error:', error);
     throw error;
   }
 }
@@ -995,59 +1099,51 @@ export async function getFileThumbs(files, thumbnailSize, forceRegenerate = fals
   return [];
 }
 
-// get file info
+// get file info — null means missing/empty; IPC failures are logged (query-debt: still null)
 export async function getFileInfo(fileId) {
   try {
     const result = await invoke('get_file_info', { fileId });
-    if(result) {
-      return result;
-    };
+    return result ?? null;
   } catch (error) {
-    console.log('Failed to get file info:', error);
+    console.error('Failed to get file info:', error);
+    return null;
   }
-  return null;
 }
 
-// update file info
+// update file info (mutating — rethrow so UI does not treat failure as "no file")
 export async function updateFileInfo(fileId, filePath) {
   try {
-    const result = await invoke("update_file_info", { fileId, filePath });
-    if(result) {
-      return result;
-    };
+    return await invoke("update_file_info", { fileId, filePath });
   } catch (error) {
-    console.log('Failed to update file info:', error);
+    console.error('Failed to update file info:', error);
+    throw error;
   }
-  return null;
 }
 
 export async function importFile(filePath, folderId, folderPath) {
   try {
-    const result = await invoke('import_file', { filePath, folderId, folderPath });
-    return result;
+    return await invoke('import_file', { filePath, folderId, folderPath });
   } catch (error) {
     console.error('importFile error:', error);
-    return null;
+    throw error;
   }
 }
 
 export async function importUrl(url, folderId, folderPath) {
   try {
-    const result = await invoke('import_url', { url, folderId, folderPath });
-    return result;
+    return await invoke('import_url', { url, folderId, folderPath });
   } catch (error) {
     console.error('importUrl error:', error);
-    return null;
+    throw error;
   }
 }
 
 export async function importFileBytes(bytes, name, folderId, folderPath) {
   try {
-    const result = await invoke('import_file_bytes', { bytes, name, folderId, folderPath });
-    return result;
+    return await invoke('import_file_bytes', { bytes, name, folderId, folderPath });
   } catch (error) {
     console.error('importFileBytes error:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -2056,9 +2152,13 @@ export async function listenIndexFinished(callback) {
 }
 
 // index faces for all images in library
-export async function indexFaces(clusterEpsilon) {
+// clusterMode: 'auto' | 'exact' | 'fast' (optional; default auto on host)
+export async function indexFaces(clusterEpsilon, clusterMode) {
   try {
-    const result = await invoke('index_faces', { clusterEpsilon });
+    const result = await invoke('index_faces', {
+      clusterEpsilon,
+      clusterMode: clusterMode ?? null,
+    });
     return result;
   } catch (error) {
     console.error('Failed to index faces:', error);

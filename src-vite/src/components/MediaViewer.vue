@@ -141,25 +141,14 @@
             :shortcut="shortcut('meta.rotate')"
             @click="$emit('item-action', { action: 'rotate', index: fileIndex })"
           />
-          <template v-if="pluginToolbarItems.length > 0">
-            <IconSeparator class="t-icon-size-sm text-base-content/30" />
-            <TButton
-              v-for="menu in pluginToolbarItems"
-              :key="`${menu.pluginId}:${menu.id}`"
-              :icon="getPluginIcon(menu.icon)"
-              :disabled="fileIndex < 0 || isSlideShow || !canInteract || !isImageFile"
-              :tooltip="menu.label"
-              @click="$emit('item-action', {
-                action: {
-                  type: 'plugin-menu',
-                  pluginId: menu.pluginId,
-                  capabilityId: menu.capability,
-                  menuId: menu.id,
-                },
-                index: fileIndex,
-              })"
-            />
-          </template>
+          <IconSeparator class="t-icon-size-sm text-base-content/30" />
+          <TButton
+            :icon="IconImageEdit"
+            :disabled="fileIndex < 0 || isSlideShow || !canInteract || !isImageFile"
+            :tooltip="$t('menu.file.edit_image')"
+            :shortcut="shortcut('file.editImage')"
+            @click="$emit('item-action', { action: 'edit', index: fileIndex })"
+          />
           <!-- <TButton
             v-if="mode !== 2"
             :icon="IconFileInfo"
@@ -441,6 +430,7 @@ import {
   IconSplitOn,
   IconSplitOn4,
   IconPalette,
+  IconImageEdit,
 } from '@/common/icons';
 import ContextMenu from '@/components/ContextMenu.vue';
 import iconLogo from '@/assets/images/icon.png';
@@ -956,16 +946,6 @@ const isImageFile = computed(() => props.file?.file_type === 1 || props.file?.fi
 const pluginContextMenuItems = computed(() =>
   pluginStore.getMenuItems('image.selection.single', 'image.contextMenu')
 );
-const pluginToolbarItems = computed(() =>
-  pluginStore.getMenuItems('image.selection.single', 'image.toolbar')
-);
-const pluginIconMap: Record<string, any> = {
-  palette: IconPalette,
-};
-
-function getPluginIcon(icon?: string) {
-  return pluginIconMap[icon || ''] || IconPalette;
-}
 
 onMounted(() => {
   void pluginStore.loadPlugins();

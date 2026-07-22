@@ -1,7 +1,7 @@
 ---
 name: change-media-badges
 description: Configurable thumbnail media-info badges (format, ISO, shutter, aperture, focal, exposure).
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 ---
 
 # Change thumbnail media badges
@@ -27,10 +27,13 @@ last_updated: 2026-07-20
 4. Prefer `format_label`; fallback extension / RAW.
 5. Capture values use `formatCaptureSettingValue`.
 6. Status badges (favorite/rating/tags) stay top-left; LIVE stays top-right.
-7. Older persisted configs without `mediaBadges` are normalized on access.
+7. Older persisted configs without `mediaBadges` are normalized on access (read-only fallback in Settings UI; do not mutate pinia inside a computed getter).
+8. **`setGridMediaBadges` must no-op when the six flags are unchanged.** Settings deep-watches `mediaBadges` and emits; **both main and settings** load `main.js` and listen — replacing the object every time causes an infinite emit/apply loop (UI flicker / hang).
+
+See also `patterns/settings-cross-window-sync.md` (hydrate gate + object equal-noop).
 
 ## Verify
 ```bash
 pnpm --dir src-vite build
 ```
-Manual: Settings → View → enable Format + ISO → grid shows badges; disable → gone.
+Manual: Settings → View → enable Format + ISO → grid shows badges; disable → gone; toggle repeatedly without freeze/thrash.

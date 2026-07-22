@@ -211,7 +211,6 @@ pub struct CollectionState {
     pub selected_id: Option<i64>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SmartAlbumSelection {

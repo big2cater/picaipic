@@ -16,7 +16,7 @@ edges:
     condition: when installing or troubleshooting toolchains
   - target: context/plugin-runtime.md
     condition: when Python, PyTorch, or plugin runtime dependencies are involved
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 ---
 
 # Stack
@@ -35,9 +35,13 @@ last_updated: 2026-07-20
 
 - **Tauri plugins** — dialog, filesystem, OS, process, shell, updater, and window-state integrations; use these rather than ad-hoc frontend OS access.
 - **ONNX Runtime (`ort = 2.0.0-rc.10`) + ndarray/tokenizers** — bundled local CLIP and InsightFace inference.
+- **`instant-distance` 0.6.1** — pure-Rust HNSW for large-library face cluster Top-K graph (`t_cluster`); blocked exact fallback remains in-tree.
 - **LibRaw/libheif/libjpeg-turbo/jxl-oxide/Rust image** — native and Rust image decoding; do not replace casually because format coverage and release linking are sensitive.
+- **Host traditional color tools (`t_color_match.rs`)** — pure-Rust global Lab match + single-image style 33³ `.cube` export; no host OpenCV/palette crate for this path.
+- **Host photo style + LUT library (`t_lut.rs`)** — pure-Rust `.cube` parse/trilinear apply, user LUT library under app data, photo-style recipe pipeline (base→LUT→fade/vignette/grain); Photon-inspired, not GLES.
+- **Host photo frame / 相框 (`t_image.rs`)** — local EXIF summary (kamadak + little_exif + LibRaw) + host composite: classic solid bar, float/sink cover-blur + soft shadow, optional user logo path; preview/export JPEG/PNG save-as only. No cloud EXIF or remote render.
 - **FFmpeg/FFprobe sidecars** — video probing, compatibility conversion, thumbnails, and Apple Live Photo MOV `com.apple.quicktime.content.identifier` extraction.
-- **kamadak-exif + little_exif** — EXIF reading and writing; kamadak-exif `Tag(Context::Tiff, 0x0011)` reads Apple Live Photo ContentIdentifier from images; UserComment used for AI prompt import on JPEG.
+- **kamadak-exif + little_exif** — EXIF reading and writing; kamadak-exif `Tag(Context::Tiff, 0x0011)` reads Apple Live Photo ContentIdentifier from images; UserComment used for AI prompt import on JPEG; photo-frame field summary also uses these paths.
 - **quick-xml (`0.37`)** — XMP parsing for Google Motion Photo detection (`GCamera:MotionPhoto` / `Container:Directory`); no C dependencies, safe for Tauri.
 - **flate2** — inflate PNG `zTXt` (and related) for AI prompt import during scan (`t_ai_prompt.rs`).
 - **Leaflet + leaflet.heat** — map and GPS heatmap UI.
@@ -54,6 +58,9 @@ last_updated: 2026-07-20
 - No heavy frontend state framework beyond Pinia; preserve existing store/component organization.
 - No macOS release pipeline in current scope.
 - No unsigned plugins in release builds; `PICAIPIC_ALLOW_UNSIGNED_PLUGINS=1` is a developer-only bypass.
+- No host OpenCV dependency for traditional color match / style LUT / photo style; keep those paths pure Rust.
+- No Photon-style cloud vision API for built-in photo style / LUT apply (local only). Photon’s AI recolor analysis is a separate remote-API design.
+- No remote EXIF/logo services for built-in photo frame; logos are user-selected local files only.
 
 ## Version Constraints
 

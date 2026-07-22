@@ -59,7 +59,8 @@
     ],
     "resources": {
       "resources/models/*": "models",
-      "resources/ffmpeg/*": "ffmpeg"
+      "resources/ffmpeg/*": "ffmpeg",
+      "resources/branding/*": "branding"
     }
   },
   "plugins": {

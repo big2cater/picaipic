@@ -60,3 +60,8 @@ Classify failure as toolchain, native compile/link, missing resource, relative p
 ## Update Scaffold
 - [ ] Update setup/stack/current state when platform, resource, or signing behavior changes.
 - [ ] Record release blockers and key rotations with `mex log` without recording secrets.
+
+## App icons
+
+- Windows taskbar/exe icons come from `src-tauri/icons/icon.ico` (see `tauri.conf.json` `bundle.icon`).
+- Canonical brand mark: repo-root `favicon1.ico`. Run `scripts/regenerate_app_icons.ps1`, then **clean rebuild** installers. Do not use frame `logo-pic.png` for app chrome.

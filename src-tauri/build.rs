@@ -14,6 +14,21 @@ fn main() {
     // Allow conditional compilation based on whether libheif is available.
     println!("cargo::rustc-check-cfg=cfg(lap_has_libheif)");
 
+    // Icons are linked into the Windows/macOS binary at build time. Without
+    // rerun-if-changed, only editing PNG sidecars (or an ICO content-only
+    // change that Cargo does not see as an input) can leave the previous
+    // embedded icon in the exe. Force rebuild when any icon asset changes.
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-changed=icons/icon.png");
+    println!("cargo:rerun-if-changed=icons/icon.icns");
+    println!("cargo:rerun-if-changed=icons/32x32.png");
+    println!("cargo:rerun-if-changed=icons/128x128.png");
+    println!("cargo:rerun-if-changed=icons/128x128@2x.png");
+    println!("cargo:rerun-if-changed=icons/64x64.png");
+    // Canonical source used to regenerate the set (repo-root favicon1.ico copy).
+    println!("cargo:rerun-if-changed=app-icon.png");
+    println!("cargo:rerun-if-changed=resources/branding/app-icon-source.ico");
+
     write_build_info();
     build_libraw();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
