@@ -16,7 +16,7 @@ edges:
     condition: when touching AI plugins, manifests, runtimes, permissions, tasks, packaging, or sandboxing
   - target: patterns/INDEX.md
     condition: before any implementation or diagnosis task
-last_updated: 2026-07-22
+last_updated: 2026-07-23
 ---
 
 
@@ -73,7 +73,9 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **Batch capture-time watermark** (2026-07-21): text/image watermark optional EXIF time stamp — `batchProcess.ts`, `BatchProcessDialog.vue`, `t_image.rs`, `patterns/change-batch-process.md`.
 - **Photo frame / 相框 G-Frame-1+G2** (2026-07-22; **bug pack + presets same day**): classic white/black + float/sink blur+shadow; host `photo_frame_preview` / `export_photo_frame`; dialog + optional library import. Custom presets in `config.photoFrame.presets`; **frame** default logo = `resources/branding/default-frame-logo.png` (`logo-pic.png` wordmark). **App chrome icons** = neural-cat from **`favicon1.ico`** → `src-tauri/icons/*` (not frame logo). Package: `build-exe.bat` passes `-Clean`; `package_windows.ps1` regenerates icons then `cargo clean -p PicAiPic`. — `photoFrameTemplates.ts`, `PhotoFrameDialog.vue`, `t_image.rs`, `patterns/change-photo-frame.md`, `scripts/regenerate_app_icons.ps1`.
 - **Face cluster ANN pack (2026-07-22):** P0 logs + exact/blocked/ANN adaptive + `face.clusterMode`; `instant-distance` HNSW; P3 deferred — `docs/guide/face-cluster-ann-plan.md`, `patterns/change-face-index.md`.
-- **LIVE filter bit 8 + AI threshold honor + smart-tag 0.28 (2026-07-22):** toolbar LIVE; search floors 0.40/0.34/0.28/0.22; no force 0.25 on text search.
+- **LIVE filter bit 8 + AI threshold honor (2026-07-22):** toolbar LIVE; search floors recalibrated to CLIP text→image band **0.30/0.26/0.22/0.18** (was 0.40/0.34/0.28/0.22 — Medium+ emptied text search); no force 0.25 on text search.
+- **Smart tags nature/built set (2026-07-22):** CLIP categories `birds` / `plants` / `insects` / `architecture` + short English prompts; smart-tag floor **0.22** (was 0.28/0.3 — too strict, emptied most tags) via `getSmartTagThreshold`; zh/en labels — `smartTags.ts`, `patterns/change-smart-tags.md`.
+- **Image-search model tracks (2026-07-23):** **A stop-bleed shipped** (CLIP floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs). **B0 next (design approved, not coded):** default bundled **CLIP B/16 int8** replaces B/32; `app_meta` hard-cut rebuild; multilingual text-only rejected; design `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`. **Track B deferred:** multilingual SigLIP sideload (CN+EN). Pattern: `patterns/change-image-search-model.md`.
 - **Settings hydrate gate + mediaBadges equal-noop (2026-07-22):** `patterns/settings-cross-window-sync.md`; import/updateFileInfo rethrow.
 - **G13 system print UX** (2026-07-20): hint that printer/tray is system dialog only; no host `print_file`.
 - **Correctness fixes (2026-07-20):**
@@ -132,6 +134,8 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Regenerate Windows app icons from favicon1.ico | `scripts/regenerate_app_icons.ps1` then `build-exe.bat` / `package_windows.ps1 -Clean` |
 | Change image viewer background modes | `patterns/change-viewer-background.md` |
 | Change AI search filters or result grouping | `patterns/change-ai-search-filters.md` |
+| Add/tune CLIP smart tags (prompts, per-tag threshold) | `patterns/change-smart-tags.md` |
+| Image-search model (B0 CLIP B/16 default bump, later SigLIP sideload) | `patterns/change-image-search-model.md` + `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md` |
 | Change traditional color match / 追色 / host style `.cube` | `patterns/change-color-match.md` |
 | Plan or implement built-in crop presets, collage, batch, print layout, color match / style LUT, photo style, or photo frame / 相框 | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` / `patterns/change-color-match.md` / `patterns/change-photo-style.md` / `patterns/change-photo-frame.md` |
 | Change EXIF photo frame / 相框 (classic, float/sink blur, logo) | `patterns/change-photo-frame.md` + roadmap Phase G |
