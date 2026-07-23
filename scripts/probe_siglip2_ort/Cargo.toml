@@ -1,0 +1,18 @@
+[package]
+name = "probe_siglip2_ort"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Phase 0: load SigLIP2 int8 dual-tower with the same ort crate as PicAiPic"
+
+[dependencies]
+# Pin to PicAiPic host stack (src-tauri/Cargo.toml)
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+] }
+ndarray = "0.16"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+image = "0.25"

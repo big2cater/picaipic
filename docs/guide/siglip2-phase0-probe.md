@@ -118,32 +118,40 @@ Python ORT ≠ app ORT. Before Track B engine work:
 | Load OK, CN text garbage | Prefer multilingual SigLIP pack as primary; keep SigLIP2 as EN-strong alt |
 | Load OK, quality win | Promote to Track B Phase 1 engine `family=siglip` (or `siglip2`) |
 
-## Measured result (Python ORT, 2026-07-23)
+## Measured results (2026-07-23)
 
-Host run of `python scripts/probe_siglip2_onnx.py` with `HTTPS_PROXY=http://127.0.0.1:7897`:
+### Python ORT (`scripts/probe_siglip2_onnx.py`)
+| Variant | Load+encode | Notes |
+|---------|-------------|--------|
+| **int8** | **PASS** | dim 768; en/zh bird text cos **0.9375** |
+| **quantized** | **PASS** | same I/O; sizes match int8 band (~90+270 MB) |
+| **fp16** | **PASS** | larger (~186+565 MB) |
 
+### Rust `ort` (same crate as PicAiPic: `scripts/probe_siglip2_ort`)
+| Variant | Result |
+|---------|--------|
+| **int8** (`vision_model_int8` / `text_model_int8`) | **FAIL** — `Could not find an implementation for ConvInteger(10)` on patch embed |
+| **quantized** | **PASS** — load + encode; dim 768; en/zh bird text cos **0.9375** |
+| **fp16** | **PASS** — load + encode; dim 768; en/zh bird text cos **~0.89** |
+
+**Product implication:** Prefer **`*_quantized.onnx` dual-tower** (or fp16 if quality needs it). Do **not** ship the `*_int8.onnx` files from this pack for Rust ort without a newer EP / different export.
+
+### Shared I/O (quantized / fp16 / Python int8)
 | Item | Value |
 |------|--------|
-| Exit | **0 (PASS)** soft_issues=0 |
-| Variant | int8 dual-tower |
-| Vision | `vision_model_int8.onnx` **94,553,333** bytes |
-| Text | `text_model_int8.onnx` **283,438,275** bytes |
-| Tokenizer | `tokenizer.json` ~34 MB + `tokenizer.model` ~4 MB |
-| Vision in | `pixel_values` float, dynamic NCHW |
-| Vision out | prefer **`pooler_output`** `[batch, 768]`; also `last_hidden_state` |
-| Text in | **`input_ids` only** (no `attention_mask` on this export) |
-| Text out | prefer **`pooler_output`** `[batch, 768]` |
-| Embedding dim | **768** |
-| Raw L2 | image ~11.6, text ~24–27 → **not unit-norm in graph**; L2 before cosine required |
-| Token length | encode length **64** with pad id **0** at end |
-| en_bird vs zh_bird text cosine | **0.9375** (strong multilingual alignment smoke) |
-| Dummy image↔text cos | ~0.05 (dummy green blob, not a real retrieval test) |
+| Vision in | `pixel_values` float NCHW |
+| Vision out | **`pooler_output`** → 768-d |
+| Text in | **`input_ids` only** |
+| Text out | **`pooler_output`** → 768-d |
+| Image size / mean / std | 224 / 0.5 / 0.5 |
+| Text length | 64, pad id 0 |
+| Normalize | **must L2 in app** (raw L2 ≫ 1) |
 
-### Manifest draft (for future Track B)
+### Manifest draft (Track B candidate — quantized)
 
 ```json
 {
-  "id": "siglip2-base-patch16-224-int8",
+  "id": "siglip2-base-patch16-224-quantized",
   "family": "siglip2",
   "embeddingDim": 768,
   "imageSize": 224,
@@ -151,8 +159,8 @@ Host run of `python scripts/probe_siglip2_onnx.py` with `HTTPS_PROXY=http://127.
   "std": [0.5, 0.5, 0.5],
   "normalizeEmbeddings": true,
   "files": {
-    "vision": "vision_model_int8.onnx",
-    "text": "text_model_int8.onnx",
+    "vision": "vision_model_quantized.onnx",
+    "text": "text_model_quantized.onnx",
     "tokenizer": "tokenizer.json"
   },
   "textInputs": ["input_ids"],
@@ -169,9 +177,20 @@ Host run of `python scripts/probe_siglip2_onnx.py` with `HTTPS_PROXY=http://127.
 Threshold arrays intentionally **omitted** until measured on real library embeds.
 
 ### Still open
-- [ ] Rust `ort` load of the same three files
+- [x] Python ORT probe
+- [x] Rust `ort` probe (**quantized / fp16** pass; **int8** fail)
 - [ ] Real-album EN/CN subjective search vs CLIP B/32
-- [ ] Product sideload + rebuild (only after Rust pass)
+- [ ] Product sideload + rebuild (only after quality smoke)
+
+### Rust probe commands
+```bash
+# after python download into scripts/.probe-models/...
+cargo run --manifest-path scripts/probe_siglip2_ort/Cargo.toml --release -- \
+  --dir scripts/.probe-models/siglip2-base-patch16-224-quant --variant quantized
+
+cargo run --manifest-path scripts/probe_siglip2_ort/Cargo.toml --release -- \
+  --dir scripts/.probe-models/siglip2-base-patch16-224-fp16 --variant fp16
+```
 
 ## Relation to abandoned B0
 B0 (CLIP B/16 default) was abandoned after owner trial (≈ B/32).  

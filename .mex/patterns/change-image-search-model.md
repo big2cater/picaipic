@@ -17,7 +17,7 @@ last_updated: 2026-07-23
 |-------|--------|
 | **A. Stop-bleed** | **Shipped (2026-07-22)** on working tree: floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs in `search_similar_images` |
 | **B0. CLIP B/16 default** | **Abandoned (2026-07-23)** — owner trial: B/16 quant felt **≈ B/32** for library search; not worth reindex/slower encode. **Do not merge** `feat/clip-b16-default-bump`. Design/plan kept as historical: `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`, `docs/superpowers/plans/2026-07-23-clip-b16-default-bump.md` |
-| **B. Multi-model SigLIP/SigLIP2** | **Phase 0 probe tooling added (2026-07-23)** — pack under test: `onnx-community/siglip2-base-patch16-224-ONNX` dual-tower **int8**. Script: `scripts/probe_siglip2_onnx.py`. Checklist: `docs/guide/siglip2-phase0-probe.md`. Product UI still deferred until Python+Rust ort pass. Default remains CLIP B/32. |
+| **B. Multi-model SigLIP/SigLIP2** | **Phase 0 Python+Rust (2026-07-23):** `onnx-community/siglip2-base-patch16-224-ONNX` — Python ORT OK on int8/quant/fp16; **Rust ort FAIL on int8** (`ConvInteger`); **Rust ort PASS on `*_quantized` and fp16**. Prefer **quantized dual-tower** for product. Scripts: `probe_siglip2_onnx.py` + `probe_siglip2_ort/`. Guide: `docs/guide/siglip2-phase0-probe.md`. Default remains CLIP B/32; product UI still deferred until real-album smoke. |
 
 Empty smart-tag / text-search results were primarily **threshold vs score-scale** (Track A), not “need a bigger CLIP”.
 

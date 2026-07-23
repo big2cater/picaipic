@@ -41,6 +41,8 @@ release-downloads.sh
 
 # Phase 0 model probes (large ONNX; never commit)
 scripts/.probe-models/
+scripts/probe_siglip2_ort/target/
+scripts/probe_siglip2_ort/Cargo.lock
 
 # Temporary debugging artifacts
 tmp_*
