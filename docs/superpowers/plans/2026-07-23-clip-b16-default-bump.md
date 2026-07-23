@@ -1,8 +1,10 @@
 # CLIP B/16 Default Bump (Track B0) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status (2026-07-23): ABANDONED as product default.** Owner trial found B/16 quant ≈ B/32 subjectively. **Do not execute** this plan to change the shipping default. Branch `feat/clip-b16-default-bump` is experimental only and must not be merged for B/16 default. Prefer Track B (SigLIP) if quality work resumes. Plan kept for historical reference.
 
-**Goal:** Replace the bundled default image-search model (Xenova CLIP ViT-B/32 quant) with CLIP ViT-B/16 int8/quant, hard-cut per-library embeds via `app_meta`, and add a real whole-library embed rebuild path — without SigLIP or multi-model UI.
+> **For agentic workers:** Do **not** implement this plan unless the owner explicitly revives B0. If revived, use superpowers:subagent-driven-development or superpowers:executing-plans.
+
+**Goal (historical):** Replace the bundled default image-search model (Xenova CLIP ViT-B/32 quant) with CLIP ViT-B/16 int8/quant, hard-cut per-library embeds via `app_meta`, and add a real whole-library embed rebuild path — without SigLIP or multi-model UI.
 
 **Architecture:** Keep the same ONNX resource filenames and CLIP preprocess (224 + CLIP mean/std, 512-d). Logical id `clip-b16` is the active engine space. Each library DB stores `app_meta.embedding_model_id`. On mismatch, clear all `afiles.embeds`, write `clip-b16`, and require `rebuild_image_embeddings` (new IPC) before ranked AI search. Multilingual text-only (`model=1`) is rejected in Rust and hidden in Settings. Track A thresholds stay as-is.
 

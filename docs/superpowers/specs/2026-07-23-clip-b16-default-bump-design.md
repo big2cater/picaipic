@@ -7,12 +7,12 @@ last_updated: 2026-07-23
 # Design: Default image-search model bump (CLIP B/32 → B/16 int8)
 
 ## Status
-**Approved direction (owner 2026-07-23):** Plan B — replace bundled default with **Xenova `clip-vit-base-patch16` quantized/int8** full stack; hard-cut old embeds; **do not implement SigLIP / multi-model download UI in this track.**
+**Abandoned as product default (owner 2026-07-23):** B/16 quant was prototyped on `feat/clip-b16-default-bump` and **subjectively ≈ B/32** for library search. **Do not merge** that branch as the app default. Keep bundled **CLIP B/32**. Historical design below may still inform a future optional pack or Track B scaffolding (`app_meta`, hard-cut, rebuild IPC) if needed — not a default model swap.
 
 Track naming relative to `.mex/patterns/change-image-search-model.md`:
-- **Track A** (thresholds + score histogram) — **already shipped** on this branch; B does not rework floors.
-- **Track B0** (this design) — default bundled CLIP B/16 int8 + `app_meta` hard-cut.
-- **Track B** (multilingual SigLIP sideload) — deferred; machinery leftovers from B0 (`app_meta`, fail-closed) are intentional prep.
+- **Track A** (thresholds + score histogram) — **shipped**.
+- **Track B0** (this design) — **abandoned** for product default after owner trial.
+- **Track B** (multilingual SigLIP sideload) — deferred; the real quality path if pursued.
 
 ## Goals / non-goals
 
