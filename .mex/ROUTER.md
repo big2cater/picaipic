@@ -75,7 +75,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 - **Face cluster ANN pack (2026-07-22):** P0 logs + exact/blocked/ANN adaptive + `face.clusterMode`; `instant-distance` HNSW; P3 deferred — `docs/guide/face-cluster-ann-plan.md`, `patterns/change-face-index.md`.
 - **LIVE filter bit 8 + AI threshold honor (2026-07-22):** toolbar LIVE; search floors recalibrated to CLIP text→image band **0.30/0.26/0.22/0.18** (was 0.40/0.34/0.28/0.22 — Medium+ emptied text search); no force 0.25 on text search.
 - **Smart tags nature/built set (2026-07-22):** CLIP categories `birds` / `plants` / `insects` / `architecture` + short English prompts; smart-tag floor **0.22** (was 0.28/0.3 — too strict, emptied most tags) via `getSmartTagThreshold`; zh/en labels — `smartTags.ts`, `patterns/change-smart-tags.md`.
-- **Image-search model tracks (2026-07-23):** **A stop-bleed shipped** (CLIP floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs). **B0 abandoned (owner trial):** CLIP B/16 quant vs B/32 felt **subjectively similar** — not worth reindex/slower encode as product default. **Do not merge** `feat/clip-b16-default-bump`. Default remains bundled **CLIP B/32**. Real quality path = **Track B** multilingual SigLIP (still deferred). Pattern: `patterns/change-image-search-model.md`; design/plan kept as historical only.
+- **Image-search model tracks (2026-07-23):** **A stop-bleed shipped** (CLIP floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs). **B0 abandoned (owner trial):** B/16 ≈ B/32 — do not merge as default. Default = bundled **CLIP B/32**. **Track B Phase 0:** probe `onnx-community/siglip2-base-patch16-224-ONNX` dual-tower int8 via `scripts/probe_siglip2_onnx.py` + `docs/guide/siglip2-phase0-probe.md` (no product UI until Python+Rust ort pass). Pattern: `patterns/change-image-search-model.md`.
 - **Settings hydrate gate + mediaBadges equal-noop (2026-07-22):** `patterns/settings-cross-window-sync.md`; import/updateFileInfo rethrow.
 - **G13 system print UX** (2026-07-20): hint that printer/tray is system dialog only; no host `print_file`.
 - **Correctness fixes (2026-07-20):**
@@ -135,7 +135,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Change image viewer background modes | `patterns/change-viewer-background.md` |
 | Change AI search filters or result grouping | `patterns/change-ai-search-filters.md` |
 | Add/tune CLIP smart tags (prompts, per-tag threshold) | `patterns/change-smart-tags.md` |
-| Image-search model (B0 CLIP B/16 default bump, later SigLIP sideload) | `patterns/change-image-search-model.md` + `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md` |
+| Image-search model (CLIP default; Track B SigLIP2 Phase 0 probe) | `patterns/change-image-search-model.md` + `docs/guide/siglip2-phase0-probe.md` + `scripts/probe_siglip2_onnx.py` |
 | Change traditional color match / 追色 / host style `.cube` | `patterns/change-color-match.md` |
 | Plan or implement built-in crop presets, collage, batch, print layout, color match / style LUT, photo style, or photo frame / 相框 | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` / `patterns/change-color-match.md` / `patterns/change-photo-style.md` / `patterns/change-photo-frame.md` |
 | Change EXIF photo frame / 相框 (classic, float/sink blur, logo) | `patterns/change-photo-frame.md` + roadmap Phase G |

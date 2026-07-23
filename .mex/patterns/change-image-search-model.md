@@ -17,7 +17,7 @@ last_updated: 2026-07-23
 |-------|--------|
 | **A. Stop-bleed** | **Shipped (2026-07-22)** on working tree: floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs in `search_similar_images` |
 | **B0. CLIP B/16 default** | **Abandoned (2026-07-23)** — owner trial: B/16 quant felt **≈ B/32** for library search; not worth reindex/slower encode. **Do not merge** `feat/clip-b16-default-bump`. Design/plan kept as historical: `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`, `docs/superpowers/plans/2026-07-23-clip-b16-default-bump.md` |
-| **B. Multi-model SigLIP** | **Spec only. Deferred** — next real quality path if pursued |
+| **B. Multi-model SigLIP/SigLIP2** | **Phase 0 probe tooling added (2026-07-23)** — pack under test: `onnx-community/siglip2-base-patch16-224-ONNX` dual-tower **int8**. Script: `scripts/probe_siglip2_onnx.py`. Checklist: `docs/guide/siglip2-phase0-probe.md`. Product UI still deferred until Python+Rust ort pass. Default remains CLIP B/32. |
 
 Empty smart-tag / text-search results were primarily **threshold vs score-scale** (Track A), not “need a bigger CLIP”.
 
@@ -29,10 +29,10 @@ Empty smart-tag / text-search results were primarily **threshold vs score-scale*
 |-------|------|----------------------|------------------------------|------|
 | **A. Stop-bleed** | Lower CLIP floors into the real text→image score band; short smart-tag prompts; score histogram logs | **Yes** (when floors sat above max scores) | Only slightly | No download, no reindex — **done** |
 | **B0. B/16 (abandoned)** | Bundled CLIP B/16 int8 | No | Owner: little subjective gain | Reindex; slower encode — **not shipping** |
-| **B. Long-term** | Optional **full-stack** sideload — **primary: multilingual SigLIP ONNX** | Only after Phase 0–3 | **Main goal** (esp. CN free-text) | Download + full reindex + multi-day eng |
+| **B. Long-term** | Optional **full-stack** sideload — **SigLIP2 int8** (onnx-community) and/or multilingual SigLIP | Only after Phase 0–3 | **Main goal** (quality + ideally CN) | Download + full reindex + multi-day eng |
 
 **Do not implement B0 as default.**  
-**Track B Phase 0** (verify SigLIP pack on Rust `ort` + self-host + sha256) blocks Sideload UI.  
+**Track B Phase 0** starts with `python scripts/probe_siglip2_onnx.py` + Rust ort confirmation — see `docs/guide/siglip2-phase0-probe.md`.  
 **Track A is done.** Keep histogram logs when calibrating any future floors.
 
 ### Threshold truth table (easy to get wrong)

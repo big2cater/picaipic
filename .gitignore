@@ -39,6 +39,9 @@ set_version.py
 publish_release.sh
 release-downloads.sh
 
+# Phase 0 model probes (large ONNX; never commit)
+scripts/.probe-models/
+
 # Temporary debugging artifacts
 tmp_*
 tmp_*/
