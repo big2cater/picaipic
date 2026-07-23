@@ -17,7 +17,7 @@ last_updated: 2026-07-23
 | Track | Status |
 |-------|--------|
 | **A. Stop-bleed** | **Shipped (2026-07-22)** on working tree: floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs in `search_similar_images` |
-| **B0. Default bump** | **Design approved (2026-07-23)** — `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`. Not implemented yet. Replace bundled B/32 with Xenova **clip-vit-base-patch16** quantized/int8; `app_meta` hard-cut; **no SigLIP UI** |
+| **B0. Default bump** | **Design approved (2026-07-23)** — `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`. Not implemented yet. Replace bundled B/32 with Xenova **clip-vit-base-patch16** quantized/int8; `app_meta` hard-cut; **required** IPC `rebuild_image_embeddings` + status (no whole-library rebuild exists today); seed meta on new library; **no SigLIP UI** |
 | **B. Multi-model SigLIP** | **Spec only. Deferred** until B0 lands |
 
 Empty smart-tag / text-search results were primarily **threshold vs score-scale** (Track A), not “need SigLIP first”.

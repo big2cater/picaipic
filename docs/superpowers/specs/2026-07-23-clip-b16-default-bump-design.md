@@ -116,6 +116,11 @@ Keys:
 
 Helpers (Rust): `get_app_meta` / `set_app_meta`, `library_embedding_model_id()` defaulting missing → `clip-b32`.
 
+### Seed meta on library create (required)
+- Migration **v9** only creates the `app_meta` **table**.
+- **New libraries** must insert `embedding_model_id=clip-b16` (and ver `1`) when the library DB is first created/opened after schema init — fallthrough on `add_library` / first `open_conn` for a brand-new DB is fine as long as it runs before any search.
+- Do **not** rely on “missing key → clip-b32 → clear+rebuild” for **fresh** libraries (wastes a no-op clear). Missing key remains the **legacy** signal only.
+
 ## Hard-cut algorithm (`ensure_embedding_space_ok`)
 
 Active engine id for B0: always **`clip-b16`**.
@@ -167,15 +172,26 @@ return Err(INDEX_STALE) or Ok(NeedsRebuild) for UI
 - Settings one-liner: default model CLIP ViT-B/16 (quantized). No model dropdown in B0.
 - i18n: en + zh.
 
-## IPC
-Prefer minimal surface:
-| Command / reuse | Role |
-|-----------------|------|
-| Existing embed generation queue | force rebuild all images missing embeds |
-| Optional `get_image_embedding_status` | `{ modelId, libraryId, needsRebuild, rebuildProgress }` |
-| Optional `rebuild_image_embeddings` | clear already done by ensure; kick workers |
+## IPC (required — not optional)
 
-Wire through `main.rs` + `api.js` only if new commands are required.
+**Code truth (pre-B0):** `main.rs` only registers **single-file** `generate_embedding`. There is **no** whole-library embedding rebuild command. Index/scan workers in `t_utils.rs` may generate embeds opportunistically during scan, but that is **not** a user-triggerable “rebuild AI index” path and must not be the only recovery after a hard-cut clear.
+
+| Command | Role | Required? |
+|---------|------|-----------|
+| `get_image_embedding_status` | `{ activeModelId, libraryModelId, needsRebuild, rebuildRunning, rebuildProgress?, embeddedCount?, totalImageCount? }` for banner / CTA | **Yes** |
+| `rebuild_image_embeddings` | Kick embed-only full (or NULL-only) rebuild after ensure has cleared; progress events; cancellable | **Yes** |
+| `cancel_rebuild_image_embeddings` | Set cancel flag; leave partial NULLs; status stays needs-work until complete | **Yes** (or fold cancel into rebuild with a separate cancel cmd if that matches other long jobs) |
+| Existing `generate_embedding` | Single file; used by rebuild loop and scan | Keep |
+
+### `rebuild_image_embeddings` contract
+1. Ensure models loadable; if library id still stale, run ensure path first (clear → write `clip-b16`).
+2. `SELECT id FROM afiles WHERE file_type IN (1, 3)` (same image/HEIC set as single-file generate). Prefer **NULL embeds first**, or all ids if force full re-encode.
+3. For each id: call `AFile::generate_embedding` (after clear, skip-guard does not short-circuit; if any non-NULL left mid-job, force path must rewrite or only select NULL).
+4. Progress: emit events (same style as multilingual download / index progress) — `current`, `total`, optional errors.
+5. Cancel: `AtomicBool` checked each iteration; on cancel leave remaining NULL; search stays fail-closed / not fully healthy until resumed and finished.
+6. **Do not** require a full filesystem rescan solely to regenerate embeds (embed-only loop is the B0 path). Optional later: reuse index-worker semaphore patterns from `t_utils` for concurrency/budget — not a full re-index.
+
+Wire through `main.rs` + `src-vite/src/common/api.js` per `patterns/add-tauri-command.md`.
 
 ## Files to touch (implementation map)
 
@@ -195,12 +211,13 @@ Wire through `main.rs` + `api.js` only if new commands are required.
 ## Implementation order
 1. Verify HF quantized paths + sizes for patch16; update download scripts.
 2. Local `ort` dummy encode_text + encode_image; note norms.
-3. Migration v9 `app_meta`.
-4. Meta get/set + `ensure_embedding_space_ok` (loadable guard → clear → id → force rebuild).
-5. Gate search / generate_embedding (skip guard + force path).
-6. Rust + UI block multilingual text-only.
-7. Banner + i18n.
-8. `cargo check`, `pnpm --dir src-vite build`, manual old-library open + new-library smoke.
+3. Migration v9 `app_meta` + seed `clip-b16` on **new** library create; legacy missing → `clip-b32`.
+4. Meta get/set + `ensure_embedding_space_ok` (loadable guard → clear → id; **does not** invent a fake in-process queue alone).
+5. **Required IPC:** `get_image_embedding_status` + `rebuild_image_embeddings` (+ cancel) with progress events.
+6. Gate search / generate_embedding (skip guard + force/NULL-fill path).
+7. Rust + UI block multilingual text-only.
+8. Banner CTA → rebuild command + i18n.
+9. `cargo check`, `pnpm --dir src-vite build`, manual old-library open + new-library smoke.
 
 ## Risks
 
@@ -208,7 +225,8 @@ Wire through `main.rs` + `api.js` only if new commands are required.
 |------|------------|
 | Wrong HF path 404 | Probe real tree before script change |
 | Clear embeds then missing ONNX | Loadable check before clear |
-| Partial rebuild + “already exists” | Force rebuild path |
+| Partial rebuild + “already exists” | Clear first; rebuild selects NULL / force rewrite |
+| No whole-library rebuild API | **Required** `rebuild_image_embeddings` — do not rely on rescan-only |
 | Multilingual IPC bypass | Rust Err, not only UI hide |
 | Score scale surprise | Cosine path already L2; keep histogram logs |
 | Encode slower | Progress UI; thumb-first encode |
@@ -217,12 +235,13 @@ Wire through `main.rs` + `api.js` only if new commands are required.
 ## Acceptance
 1. Fresh library: AI text search, smart tags, similar-image work on B/16.
 2. Legacy library with B/32 embeds: **no** silent plausible ranking; user sees rebuild requirement; after clear, no B/32 blobs remain under id `clip-b16`.
-3. Cancel mid-rebuild then resume: remaining NULLs fill; skip-guard does not strand them.
-4. `set_image_search_model(1)` fails closed; Settings cannot enable it as “upgrade”.
-5. `resources/models` content is patch16 quant (local); download scripts point at patch16.
-6. Track A floors/histogram still present; empty-result calibration remains log-driven.
-7. `cargo check --manifest-path src-tauri/Cargo.toml` and `pnpm --dir src-vite build` pass when code lands.
-8. Subjective spot-check (birds/insects/architecture) ≥ previous B/32 on a small album after rebuild.
+3. Cancel mid-rebuild then resume via `rebuild_image_embeddings`: remaining NULLs fill; skip-guard does not strand them.
+4. New library never spuriously `INDEX_STALE` solely due to missing meta (seeded `clip-b16` at create).
+5. `set_image_search_model(1)` fails closed; Settings cannot enable it as “upgrade”.
+6. `resources/models` content is patch16 quant (local); download scripts point at patch16.
+7. Track A floors/histogram still present; empty-result calibration remains log-driven.
+8. `cargo check --manifest-path src-tauri/Cargo.toml` and `pnpm --dir src-vite build` pass when code lands.
+9. Subjective spot-check (birds/insects/architecture) ≥ previous B/32 on a small album after rebuild.
 
 ## Relation to SigLIP plan
 - Do **not** implement Track B phases 0–5 in this work.
@@ -231,9 +250,11 @@ Wire through `main.rs` + `api.js` only if new commands are required.
 
 ## Open items resolved in review
 1. Clear only after models loadable — **yes**.
-2. Force rebuild bypasses empty-skip — **yes**.
+2. Force rebuild / NULL-fill bypasses empty-skip — **yes**.
 3. Multilingual: Rust reject + UI hide — **yes**.
 4. L2: search cosine already normalizes; optional store-time normalize; verify norms in trial — **yes**.
 5. Commit order clear → write id → rebuild — **yes**.
 6. Verify real quantized HF paths before scripting — **yes**.
 7. No ONNX git commit — **yes**.
+8. Whole-library rebuild is **not** optional IPC — **required** `rebuild_image_embeddings` + status (+ cancel); scan pipeline alone is insufficient — **yes** (owner review 2026-07-23).
+9. Seed `clip-b16` on new library create so fresh DBs are not legacy-stale — **yes**.
