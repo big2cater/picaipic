@@ -1,4 +1,4 @@
-use crate::t_sqlite::{AFile, QueryParams};
+use crate::t_sqlite::{AFile, AThumb, QueryParams};
 use crate::t_utils;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
+
+/// Max Hamming distance for dHash pairs to share a similar-duplicate group.
+const DHASH_HAMMING_THRESHOLD: u32 = 8;
 
 // ----------------------------------------------------------------------------
 // Types and Structs
@@ -66,6 +69,7 @@ pub fn start_scan(
     app_handle: tauri::AppHandle,
     dedup_state: tauri::State<'_, DedupState>,
     query_params: Option<QueryParams>,
+    mode: Option<String>,
 ) -> Result<(), String> {
     if dedup_state
         .is_scanning
@@ -79,6 +83,10 @@ pub fn start_scan(
     let status_clone = dedup_state.status.clone();
     let is_scanning_clone = dedup_state.is_scanning.clone();
     let cancel_flag_clone = dedup_state.cancel_flag.clone();
+    let similar = matches!(
+        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("similar")
+    );
 
     // Reset status
     {
@@ -91,8 +99,11 @@ pub fn start_scan(
     }
 
     std::thread::spawn(move || {
-        let result =
-            scan_and_hash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params);
+        let result = if similar {
+            scan_and_phash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params)
+        } else {
+            scan_and_hash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params)
+        };
 
         let mut final_status = status_clone.lock().unwrap();
         match result {
@@ -417,6 +428,365 @@ fn check_if_needs_hash(conn: &Connection, file: &AFile) -> Result<bool, String> 
     }
 }
 
+/// Difference hash (dHash) 64-bit from grayscale 9x8 → horizontal gradients.
+fn compute_dhash_u64_from_gray(gray: &image::GrayImage) -> u64 {
+    // Expect at least 9x8; resize caller guarantees.
+    let mut hash: u64 = 0;
+    let mut bit: u64 = 1;
+    for y in 0..8 {
+        for x in 0..8 {
+            let left = gray.get_pixel(x, y)[0];
+            let right = gray.get_pixel(x + 1, y)[0];
+            if left > right {
+                hash |= bit;
+            }
+            bit <<= 1;
+        }
+    }
+    hash
+}
+
+fn hamming64(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
+fn compute_dhash_for_file(file: &AFile) -> Option<u64> {
+    let file_id = file.id?;
+    // Prefer stored thumbnail (fast, consistent).
+    if let Ok(Some(thumb)) = AThumb::fetch(file_id) {
+        if let Some(bytes) = thumb.thumb_data {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let gray = img
+                    .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+                    .to_luma8();
+                return Some(compute_dhash_u64_from_gray(&gray));
+            }
+        }
+    }
+    // Fallback: open original (images only).
+    let path = file.file_path.as_ref()?;
+    let ft = file.file_type.unwrap_or(0);
+    if ft != 1 && ft != 3 {
+        return None;
+    }
+    let img = image::open(path).ok()?;
+    let gray = img
+        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    Some(compute_dhash_u64_from_gray(&gray))
+}
+
+fn check_if_needs_phash(conn: &Connection, file: &AFile) -> Result<bool, String> {
+    let Some(file_id) = file.id else {
+        return Ok(false);
+    };
+    let mtime = file.modified_at.unwrap_or(0);
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT hash, mtime FROM file_phashes WHERE file_id = ?1",
+            params![file_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match row {
+        None => Ok(true),
+        Some((_h, stored_mtime)) => Ok(stored_mtime != mtime),
+    }
+}
+
+fn scan_and_phash_files(
+    app_handle: &tauri::AppHandle,
+    status_mutex: &Arc<Mutex<DedupScanStatus>>,
+    cancel_flag: &Arc<AtomicBool>,
+    query_params: Option<QueryParams>,
+) -> Result<(), String> {
+    let mut conn = get_db_conn()?;
+    let _ = crate::t_migration::ensure_similar_dedup_tables(&conn);
+
+    let files_to_check = if let Some(params) = query_params.as_ref() {
+        get_files_by_query(params)?
+    } else {
+        // Whole library: images + RAW only (type 1/3).
+        let mut stmt = conn
+            .prepare("SELECT a.id FROM afiles a WHERE a.file_type IN (1, 3)")
+            .map_err(|e| e.to_string())?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        if ids.is_empty() {
+            rebuild_similar_groups(&mut conn, None)?;
+            return Ok(());
+        }
+        let mut out = Vec::new();
+        for chunk in ids.chunks(500) {
+            let map = AFile::get_files_by_ids(chunk).map_err(|e| e.to_string())?;
+            for id in chunk {
+                if let Some(f) = map.get(id) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        out
+    };
+
+    let files_to_check: Vec<AFile> = files_to_check
+        .into_iter()
+        .filter(|f| {
+            let t = f.file_type.unwrap_or(0);
+            t == 1 || t == 3
+        })
+        .collect();
+
+    let scoped_file_ids = if query_params.is_some() {
+        Some(
+            files_to_check
+                .iter()
+                .filter_map(|f| f.id)
+                .collect::<Vec<i64>>(),
+        )
+    } else {
+        None
+    };
+
+    if files_to_check.is_empty() {
+        rebuild_similar_groups(&mut conn, scoped_file_ids.as_deref())?;
+        return Ok(());
+    }
+
+    let total_files = files_to_check.len() as u64;
+    {
+        let mut status = status_mutex.lock().unwrap();
+        status.total = total_files;
+        status.processed = 0;
+    }
+    let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+
+    let mut processed = 0u64;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    for file in &files_to_check {
+        if cancel_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        let needs = check_if_needs_phash(&tx, file)?;
+        if needs {
+            if let (Some(file_id), Some(hash)) = (file.id, compute_dhash_for_file(file)) {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let mtime = file.modified_at.unwrap_or(0);
+                tx.execute(
+                    "INSERT OR REPLACE INTO file_phashes (file_id, hash, mtime, computed_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![file_id, hash as i64, mtime, now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        processed += 1;
+        if processed % 10 == 0 {
+            {
+                let mut status = status_mutex.lock().unwrap();
+                status.processed = processed;
+            }
+            let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    if !cancel_flag.load(Ordering::SeqCst) {
+        rebuild_similar_groups(&mut conn, scoped_file_ids.as_deref())?;
+        let groups_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM similar_duplicate_groups",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        {
+            let mut status = status_mutex.lock().unwrap();
+            status.processed = processed;
+            status.groups = groups_count as u64;
+        }
+        let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+    }
+    Ok(())
+}
+
+/// Union-Find for similar groups by Hamming distance on dHash.
+fn rebuild_similar_groups(
+    conn: &mut Connection,
+    scope_file_ids: Option<&[i64]>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Scoped rebuild: only remove groups that touch the scope (keep global results outside).
+    // Full rebuild: clear all similar groups.
+    if let Some(scope_ids) = scope_file_ids {
+        tx.execute("DROP TABLE IF EXISTS temp_scope_ids", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "CREATE TEMP TABLE temp_scope_ids (file_id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        if scope_ids.is_empty() {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        {
+            let mut ins = tx
+                .prepare("INSERT OR IGNORE INTO temp_scope_ids (file_id) VALUES (?1)")
+                .map_err(|e| e.to_string())?;
+            for id in scope_ids {
+                ins.execute(params![id]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM similar_duplicate_group_items
+             WHERE group_id IN (
+               SELECT DISTINCT group_id FROM similar_duplicate_group_items
+               WHERE file_id IN (SELECT file_id FROM temp_scope_ids)
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM similar_duplicate_groups
+             WHERE id NOT IN (SELECT DISTINCT group_id FROM similar_duplicate_group_items)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM similar_duplicate_group_items", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM similar_duplicate_groups", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let rows: Vec<(i64, u64, i64, i64, i64)> = {
+        let sql = if scope_file_ids.is_some() {
+            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
+             FROM file_phashes fp
+             JOIN afiles a ON a.id = fp.file_id
+             JOIN temp_scope_ids ts ON ts.file_id = fp.file_id"
+        } else {
+            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
+             FROM file_phashes fp
+             JOIN afiles a ON a.id = fp.file_id"
+        };
+        let mut stmt = tx.prepare(sql).map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2).unwrap_or(0),
+                    row.get::<_, i64>(3).unwrap_or(0),
+                    row.get::<_, i64>(4).unwrap_or(0),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        iter.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+
+    if rows.len() < 2 {
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let n = rows.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    fn union(p: &mut [usize], a: usize, b: usize) {
+        let ra = find(p, a);
+        let rb = find(p, b);
+        if ra != rb {
+            p[rb] = ra;
+        }
+    }
+
+    // O(n²) Hamming — OK for scoped/medium libraries; whole-library large N may be slow
+    // but still acceptable for offline dedup scan (cancelable outer loop already ran).
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if hamming64(rows[i].1, rows[j].1) <= DHASH_HAMMING_THRESHOLD {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        clusters.entry(r).or_default().push(i);
+    }
+
+    for (_root, members) in clusters {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut candidates: Vec<KeepCandidate> = members
+            .iter()
+            .map(|&i| KeepCandidate {
+                id: rows[i].0,
+                taken_date: rows[i].3,
+                created_at: rows[i].4,
+            })
+            .collect();
+        candidates.sort_by(compare_best_quality);
+
+        // Representative hash string + max size for reclaimable estimate
+        let rep_hash = format!("{:016x}", rows[members[0]].1);
+        let max_size = members
+            .iter()
+            .map(|&i| rows[i].2)
+            .max()
+            .unwrap_or(0);
+        let count = members.len() as i64;
+        let total_size = members.iter().map(|&i| rows[i].2).sum::<i64>();
+
+        tx.execute(
+            "INSERT INTO similar_duplicate_groups (hash, file_size, file_count, total_size, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![rep_hash, max_size, count, total_size, now],
+        )
+        .map_err(|e| e.to_string())?;
+        let gid = tx.last_insert_rowid();
+        let total_c = candidates.len() as f64;
+        for (i, c) in candidates.iter().enumerate() {
+            let is_keep = if i == 0 { 1 } else { 0 };
+            let score = total_c - i as f64;
+            tx.execute(
+                "INSERT INTO similar_duplicate_group_items (group_id, file_id, is_keep, is_selected, score)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![gid, c.id, is_keep, 0, score],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn compute_blake3_hash(path: &str) -> Result<String, io::Error> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
@@ -440,17 +810,8 @@ fn rebuild_duplicate_groups(
 ) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // Remove existing items and groups to rebuild clean
-    tx.execute("DELETE FROM duplicate_group_items", [])
-        .map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM duplicate_groups", [])
-        .map_err(|e| e.to_string())?;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
+    // Scoped rebuild: only drop groups that touch the scope (preserve out-of-scope exact groups).
+    // Full rebuild: clear all exact groups.
     if let Some(scope_ids) = scope_file_ids {
         tx.execute("DROP TABLE IF EXISTS temp_scope_ids", [])
             .map_err(|e| e.to_string())?;
@@ -465,16 +826,55 @@ fn rebuild_duplicate_groups(
             return Ok(());
         }
 
-        let mut insert_stmt = tx
-            .prepare("INSERT OR IGNORE INTO temp_scope_ids (file_id) VALUES (?1)")
-            .map_err(|e| e.to_string())?;
-        for file_id in scope_ids {
-            insert_stmt
-                .execute(params![file_id])
+        {
+            let mut insert_stmt = tx
+                .prepare("INSERT OR IGNORE INTO temp_scope_ids (file_id) VALUES (?1)")
                 .map_err(|e| e.to_string())?;
+            for file_id in scope_ids {
+                insert_stmt
+                    .execute(params![file_id])
+                    .map_err(|e| e.to_string())?;
+            }
         }
-        drop(insert_stmt);
+
+        // Exact groups are keyed by (hash, size). Drop any group whose hash+size still appears
+        // among scoped files (those buckets will be rebuilt from scope). Also drop groups that
+        // contain any scoped member so stale membership cannot linger.
+        tx.execute(
+            "DELETE FROM duplicate_group_items
+             WHERE group_id IN (
+               SELECT DISTINCT dgi.group_id
+               FROM duplicate_group_items dgi
+               WHERE dgi.file_id IN (SELECT file_id FROM temp_scope_ids)
+             )
+             OR group_id IN (
+               SELECT dg.id FROM duplicate_groups dg
+               WHERE EXISTS (
+                 SELECT 1 FROM file_hashes fh
+                 JOIN temp_scope_ids ts ON ts.file_id = fh.file_id
+                 WHERE fh.hash = dg.hash AND fh.file_size = dg.file_size
+               )
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM duplicate_groups
+             WHERE id NOT IN (SELECT DISTINCT group_id FROM duplicate_group_items)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM duplicate_group_items", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM duplicate_groups", [])
+            .map_err(|e| e.to_string())?;
     }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
 
     // Find dups
     let group_query = if scope_file_ids.is_some() {
@@ -616,24 +1016,33 @@ pub struct DedupOverview {
 }
 
 pub fn get_overview() -> Result<DedupOverview, String> {
+    get_overview_for_tables("duplicate_groups", "duplicate_group_items")
+}
+
+pub fn get_similar_overview() -> Result<DedupOverview, String> {
     let conn = get_db_conn()?;
+    let _ = crate::t_migration::ensure_similar_dedup_tables(&conn);
+    get_overview_for_tables("similar_duplicate_groups", "similar_duplicate_group_items")
+}
+
+fn get_overview_for_tables(groups: &str, items: &str) -> Result<DedupOverview, String> {
+    let conn = get_db_conn()?;
+    let sql = format!(
+        "SELECT 
+            COALESCE(COUNT(*), 0),
+            COALESCE(SUM(current_file_count - 1), 0),
+            COALESCE(SUM((current_file_count - 1) * file_size), 0)
+         FROM (
+            SELECT file_size,
+                   (SELECT COUNT(*)
+                    FROM {items}
+                    WHERE group_id = {groups}.id) AS current_file_count
+            FROM {groups}
+         )
+         WHERE current_file_count > 1"
+    );
     let (total_groups, total_files, total_reclaimable_bytes) = conn
-        .query_row(
-            "SELECT 
-                COALESCE(COUNT(*), 0),
-                COALESCE(SUM(current_file_count - 1), 0),
-                COALESCE(SUM((current_file_count - 1) * file_size), 0)
-             FROM (
-                SELECT file_size,
-                       (SELECT COUNT(*)
-                        FROM duplicate_group_items
-                        WHERE group_id = duplicate_groups.id) AS current_file_count
-                FROM duplicate_groups
-             )
-             WHERE current_file_count > 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
+        .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| e.to_string())?;
 
     Ok(DedupOverview {
@@ -649,6 +1058,45 @@ pub fn list_groups(
     sort_by: &str,
     filter: &str,
 ) -> Result<Vec<DedupGroup>, String> {
+    list_groups_from(
+        "duplicate_groups",
+        "duplicate_group_items",
+        page,
+        page_size,
+        sort_by,
+        filter,
+        false,
+    )
+}
+
+pub fn list_similar_groups(
+    page: u32,
+    page_size: u32,
+    sort_by: &str,
+    filter: &str,
+) -> Result<Vec<DedupGroup>, String> {
+    let conn = get_db_conn()?;
+    let _ = crate::t_migration::ensure_similar_dedup_tables(&conn);
+    list_groups_from(
+        "similar_duplicate_groups",
+        "similar_duplicate_group_items",
+        page,
+        page_size,
+        sort_by,
+        filter,
+        true,
+    )
+}
+
+fn list_groups_from(
+    groups_table: &str,
+    items_table: &str,
+    page: u32,
+    page_size: u32,
+    sort_by: &str,
+    filter: &str,
+    similar: bool,
+) -> Result<Vec<DedupGroup>, String> {
     let conn = get_db_conn()?;
     let offset = (page.saturating_sub(1)) * page_size;
 
@@ -661,29 +1109,42 @@ pub fn list_groups(
     };
 
     let filter_clause = match filter {
-        "unreviewed" => {
-            "WHERE reviewed = 0 AND (SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = duplicate_groups.id) > 1"
-        }
-        "reviewed" => {
-            "WHERE reviewed = 1 AND (SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = duplicate_groups.id) > 1"
-        }
-        _ => {
-            "WHERE (SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = duplicate_groups.id) > 1"
-        }
+        "unreviewed" => format!(
+            "WHERE reviewed = 0 AND (SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) > 1"
+        ),
+        "reviewed" => format!(
+            "WHERE reviewed = 1 AND (SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) > 1"
+        ),
+        _ => format!(
+            "WHERE (SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) > 1"
+        ),
+    };
+
+    // Exact groups use file_size * count for reclaimable; similar stores true total_size sum.
+    let size_expr = if similar {
+        format!(
+            "(SELECT COALESCE(SUM(a.size), 0) FROM {items_table} gi JOIN afiles a ON a.id = gi.file_id WHERE gi.group_id = {groups_table}.id)"
+        )
+    } else {
+        format!(
+            "((SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) * file_size)"
+        )
     };
 
     let query = format!(
         "SELECT id, hash, file_size, 
-                (SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = duplicate_groups.id) as cur_count,
-                ((SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = duplicate_groups.id) * file_size) as cur_size,
+                (SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) as cur_count,
+                {size_expr} as cur_size,
                 reviewed, updated_at
-         FROM duplicate_groups
-         {}
-         ORDER BY {}
+         FROM {groups_table}
+         {filter_clause}
+         ORDER BY {order_clause}
          {}",
-        filter_clause,
-        order_clause,
-        if page_size == 0 { "" } else { "LIMIT ?1 OFFSET ?2" }
+        if page_size == 0 {
+            ""
+        } else {
+            "LIMIT ?1 OFFSET ?2"
+        }
     );
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
@@ -710,8 +1171,7 @@ pub fn list_groups(
     let mut groups = Vec::new();
     for g in groups_iter {
         if let Ok(mut group) = g {
-            // Fetch items
-            group.items = get_group_items(&conn, group.id)?;
+            group.items = get_group_items_from(&conn, items_table, group.id)?;
             groups.push(group);
         }
     }
@@ -719,15 +1179,18 @@ pub fn list_groups(
     Ok(groups)
 }
 
-fn get_group_items(conn: &Connection, group_id: i64) -> Result<Vec<DedupGroupItem>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT group_id, file_id, is_keep, is_selected, score
-         FROM duplicate_group_items
+fn get_group_items_from(
+    conn: &Connection,
+    items_table: &str,
+    group_id: i64,
+) -> Result<Vec<DedupGroupItem>, String> {
+    let sql = format!(
+        "SELECT group_id, file_id, is_keep, is_selected, score
+         FROM {items_table}
          WHERE group_id = ?1
-         ORDER BY is_keep DESC, score DESC",
-        )
-        .map_err(|e| e.to_string())?;
+         ORDER BY is_keep DESC, score DESC"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
     let iter = stmt
         .query_map(params![group_id], |row| {
@@ -737,7 +1200,7 @@ fn get_group_items(conn: &Connection, group_id: i64) -> Result<Vec<DedupGroupIte
                 is_keep: row.get(2)?,
                 is_selected: row.get(3)?,
                 score: row.get(4)?,
-                file: None, // Will populate shortly
+                file: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -756,20 +1219,43 @@ fn get_group_items(conn: &Connection, group_id: i64) -> Result<Vec<DedupGroupIte
 }
 
 pub fn set_keep(group_id: i64, file_id: i64) -> Result<(), String> {
+    set_keep_in(
+        group_id,
+        file_id,
+        "duplicate_groups",
+        "duplicate_group_items",
+    )
+}
+
+pub fn set_similar_keep(group_id: i64, file_id: i64) -> Result<(), String> {
+    set_keep_in(
+        group_id,
+        file_id,
+        "similar_duplicate_groups",
+        "similar_duplicate_group_items",
+    )
+}
+
+fn set_keep_in(
+    group_id: i64,
+    file_id: i64,
+    groups_table: &str,
+    items_table: &str,
+) -> Result<(), String> {
     let mut conn = get_db_conn()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // Clear is_keep for everyone in the group
     tx.execute(
-        "UPDATE duplicate_group_items SET is_keep = 0 WHERE group_id = ?1",
+        &format!("UPDATE {items_table} SET is_keep = 0 WHERE group_id = ?1"),
         params![group_id],
     )
     .map_err(|e| e.to_string())?;
 
-    // Set the target
     let changed = tx
         .execute(
-            "UPDATE duplicate_group_items SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2",
+            &format!(
+                "UPDATE {items_table} SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2"
+            ),
             params![group_id, file_id],
         )
         .map_err(|e| e.to_string())?;
@@ -778,9 +1264,8 @@ pub fn set_keep(group_id: i64, file_id: i64) -> Result<(), String> {
         return Err("Item not found in group".into());
     }
 
-    // Mark group as reviewed
     tx.execute(
-        "UPDATE duplicate_groups SET reviewed = 1 WHERE id = ?1",
+        &format!("UPDATE {groups_table} SET reviewed = 1 WHERE id = ?1"),
         params![group_id],
     )
     .map_err(|e| e.to_string())?;
@@ -792,75 +1277,123 @@ pub fn set_keep(group_id: i64, file_id: i64) -> Result<(), String> {
 pub fn delete_selected(
     group_ids: Option<Vec<i64>>,
     file_ids: Option<Vec<i64>>,
+    mode: Option<String>,
 ) -> Result<DedupDeleteResult, String> {
+    let similar = matches!(
+        mode.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("similar")
+    );
+    let items_table = if similar {
+        "similar_duplicate_group_items"
+    } else {
+        "duplicate_group_items"
+    };
+    let groups_table = if similar {
+        "similar_duplicate_groups"
+    } else {
+        "duplicate_groups"
+    };
+
     let mut conn = get_db_conn()?;
+    if similar {
+        let _ = crate::t_migration::ensure_similar_dedup_tables(&conn);
+    }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
     let mut files_to_delete: Vec<(i64, String)> = Vec::new();
 
+    // Prefer resolving path via AFile (correct separators / library roots) after collecting ids.
+    let mut candidate_ids: Vec<i64> = Vec::new();
+
     if let Some(ids) = file_ids {
-        let mut stmt = tx
-            .prepare(
-                "SELECT a.id, f.path || '/' || a.name
-                 FROM duplicate_group_items dgi
-                 JOIN afiles a ON dgi.file_id = a.id
-                 JOIN afolders f ON a.folder_id = f.id
-                 WHERE dgi.file_id = ?1 AND dgi.is_keep = 0",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT dgi.file_id
+             FROM {items_table} dgi
+             WHERE dgi.file_id = ?1 AND dgi.is_keep = 0"
+        );
+        let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
         for id in ids {
             let mut iter = stmt
-                .query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_map(params![id], |row| row.get::<_, i64>(0))
                 .map_err(|e| e.to_string())?;
             for row in &mut iter {
-                files_to_delete.push(row.map_err(|e| e.to_string())?);
+                candidate_ids.push(row.map_err(|e| e.to_string())?);
             }
         }
     } else if let Some(gids) = group_ids {
+        let sql = format!(
+            "SELECT dgi.file_id
+             FROM {items_table} dgi
+             WHERE dgi.group_id = ?1 AND dgi.is_keep = 0 AND dgi.is_selected = 1"
+        );
         for gid in gids {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT a.id, f.path || '/' || a.name
-                    FROM duplicate_group_items dgi
-                    JOIN afiles a ON dgi.file_id = a.id
-                    JOIN afolders f ON a.folder_id = f.id
-                    WHERE dgi.group_id = ?1 AND dgi.is_keep = 0 AND dgi.is_selected = 1",
-                )
-                .map_err(|e| e.to_string())?;
-
+            let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
             let mut iter = stmt
-                .query_map(params![gid], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_map(params![gid], |row| row.get::<_, i64>(0))
                 .map_err(|e| e.to_string())?;
             for row in &mut iter {
-                files_to_delete.push(row.map_err(|e| e.to_string())?);
+                candidate_ids.push(row.map_err(|e| e.to_string())?);
             }
         }
     } else {
-        let mut stmt = tx
-            .prepare(
-                "SELECT a.id, f.path || '/' || a.name
-                 FROM duplicate_group_items dgi
-                 JOIN afiles a ON dgi.file_id = a.id
-                 JOIN afolders f ON a.folder_id = f.id
-                 WHERE dgi.is_keep = 0 AND dgi.is_selected = 1",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT dgi.file_id
+             FROM {items_table} dgi
+             WHERE dgi.is_keep = 0 AND dgi.is_selected = 1"
+        );
+        let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
         let mut iter = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([], |row| row.get::<_, i64>(0))
             .map_err(|e| e.to_string())?;
         for row in &mut iter {
-            files_to_delete.push(row.map_err(|e| e.to_string())?);
+            candidate_ids.push(row.map_err(|e| e.to_string())?);
         }
+    }
+
+    // Dedup ids while preserving order.
+    {
+        let mut seen = std::collections::HashSet::new();
+        candidate_ids.retain(|id| seen.insert(*id));
     }
 
     tx.commit().map_err(|e| e.to_string())?;
 
+    for file_id in candidate_ids {
+        match AFile::get_file_info(file_id) {
+            Ok(Some(file)) => {
+                if let Some(path) = file.file_path {
+                    files_to_delete.push((file_id, path));
+                } else {
+                    // Still allow DB cleanup if path missing
+                    files_to_delete.push((file_id, String::new()));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // collect later as failure after loop setup
+                files_to_delete.push((file_id, format!("__err__:{e}")));
+            }
+        }
+    }
+
     let mut failures: Vec<String> = Vec::new();
     let mut deleted_file_ids: Vec<i64> = Vec::new();
     for (file_id, file_path) in files_to_delete {
-        if let Err(e) = t_utils::trash_path(&file_path) {
-            failures.push(format!("Failed to move to trash: {} ({})", file_path, e));
+        if file_path.starts_with("__err__:") {
+            failures.push(format!(
+                "Failed to resolve file id={}: {}",
+                file_id,
+                file_path.trim_start_matches("__err__:")
+            ));
             continue;
+        }
+        if !file_path.is_empty() {
+            if let Err(e) = t_utils::trash_path(&file_path) {
+                failures.push(format!("Failed to move to trash: {} ({})", file_path, e));
+                continue;
+            }
         }
         match AFile::delete(file_id) {
             Ok(0) => failures.push(format!("File not removed from DB: id={}", file_id)),
@@ -869,15 +1402,49 @@ pub fn delete_selected(
         }
     }
 
-    // Clean up empty groups. Report cleanup errors without hiding earlier partial deletes.
+    // Clean up empty groups + orphan membership for this mode's tables.
     match get_db_conn() {
         Ok(conn) => {
+            // Drop items whose file row is already gone (FK may have cascade; be explicit).
+            let _ = conn.execute(
+                &format!(
+                    "DELETE FROM {items_table}
+                     WHERE file_id NOT IN (SELECT id FROM afiles)"
+                ),
+                [],
+            );
             if let Err(e) = conn.execute(
-                "DELETE FROM duplicate_groups 
-                 WHERE id NOT IN (SELECT DISTINCT group_id FROM duplicate_group_items)",
+                &format!(
+                    "DELETE FROM {groups_table}
+                     WHERE id NOT IN (SELECT DISTINCT group_id FROM {items_table})"
+                ),
                 [],
             ) {
-                failures.push(format!("Failed to clean up empty duplicate groups: {}", e));
+                failures.push(format!(
+                    "Failed to clean up empty {groups_table}: {}",
+                    e
+                ));
+            }
+            // Also drop groups that no longer have 2+ members.
+            let _ = conn.execute(
+                &format!(
+                    "DELETE FROM {groups_table}
+                     WHERE (SELECT COUNT(*) FROM {items_table} WHERE group_id = {groups_table}.id) < 2"
+                ),
+                [],
+            );
+            // Exact also used size-based reclaim; similar stores sum sizes — no further action.
+            if similar {
+                // Remove phash rows for deleted files (cascade should handle; belt-and-suspenders).
+                let _ = conn.execute(
+                    "DELETE FROM file_phashes WHERE file_id NOT IN (SELECT id FROM afiles)",
+                    [],
+                );
+            } else {
+                let _ = conn.execute(
+                    "DELETE FROM file_hashes WHERE file_id NOT IN (SELECT id FROM afiles)",
+                    [],
+                );
             }
         }
         Err(e) => failures.push(format!(
@@ -891,4 +1458,36 @@ pub fn delete_selected(
         failed_count: failures.len(),
         errors: failures,
     })
+}
+
+#[cfg(test)]
+mod dhash_tests {
+    use super::{compute_dhash_u64_from_gray, hamming64};
+
+    #[test]
+    fn identical_images_have_zero_hamming() {
+        let mut img = image::GrayImage::new(9, 8);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Luma([((x + y) * 10) as u8]);
+        }
+        let a = compute_dhash_u64_from_gray(&img);
+        let b = compute_dhash_u64_from_gray(&img);
+        assert_eq!(hamming64(a, b), 0);
+    }
+
+    #[test]
+    fn checkerboard_vs_flat_are_far() {
+        let mut a_img = image::GrayImage::new(9, 8);
+        let mut b_img = image::GrayImage::new(9, 8);
+        for (x, y, p) in a_img.enumerate_pixels_mut() {
+            *p = image::Luma([if (x + y) % 2 == 0 { 255 } else { 0 }]);
+        }
+        for (_x, _y, p) in b_img.enumerate_pixels_mut() {
+            *p = image::Luma([128]);
+        }
+        let a = compute_dhash_u64_from_gray(&a_img);
+        let b = compute_dhash_u64_from_gray(&b_img);
+        // Flat image → all gradients 0; checkerboard → many 1 bits.
+        assert!(hamming64(a, b) > super::DHASH_HAMMING_THRESHOLD, "dist={}", hamming64(a, b));
+    }
 }

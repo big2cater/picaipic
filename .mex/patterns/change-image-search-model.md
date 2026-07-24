@@ -1,62 +1,76 @@
 ---
 name: change-image-search-model
-description: Optional multilingual SigLIP sideload (Track B); bundled default stays CLIP B/32. B0 B/16 default bump abandoned after owner trial.
-last_updated: 2026-07-23
+description: Bundled CLIP B/32 vision + bilingual int8 text (Track C product C). SigLIP Track B probe only; B0 abandoned.
+last_updated: 2026-07-24
 ---
 
-# Change image-search model (bundled CLIP B/32 + optional multilingual SigLIP)
+# Change image-search model (CLIP B/32 vision + bilingual text default)
 
 ## When to use
-- Switch the local text↔image embedding model used by AI search, similar-image, and smart tags
-- Wire settings UI for downloadable BETA models (primary: **multilingual SigLIP** ONNX pack) — Track B
-- Bind per-library embeddings to a `modelId` and rebuild when the active model changes
-- Generalize the existing multilingual text-model download path into multi-file model packs (Track B)
+- Change the local text↔image embedding stack used by AI search, similar-image, and smart tags
+- Wire or remove Settings download / model switch for text or full dual-tower packs
+- Bind per-library embeddings to a `modelId` and rebuild when the **vision** model changes
+- Revisit Track B full-stack sideload or observation-period cloud redownload
 
 ## Status
 | Track | Status |
 |-------|--------|
-| **A. Stop-bleed** | **Shipped (2026-07-22)** on working tree: floors `0.30/0.26/0.22/0.18`, smart-tag `0.22`, histogram logs in `search_similar_images` |
-| **B0. CLIP B/16 default** | **Abandoned (2026-07-23)** — owner trial: B/16 quant felt **≈ B/32** for library search; not worth reindex/slower encode. **Do not merge** `feat/clip-b16-default-bump`. Design/plan kept as historical: `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md`, `docs/superpowers/plans/2026-07-23-clip-b16-default-bump.md` |
-| **B. Multi-model SigLIP/SigLIP2** | **Phase 0 Python+Rust (2026-07-23):** `onnx-community/siglip2-base-patch16-224-ONNX` — Python ORT OK on int8/quant/fp16; **Rust ort FAIL on int8** (`ConvInteger`); **Rust ort PASS on `*_quantized` and fp16**. Prefer **quantized dual-tower** for product. Scripts: `probe_siglip2_onnx.py` + `probe_siglip2_ort/`. Guide: `docs/guide/siglip2-phase0-probe.md`. Default remains CLIP B/32; product UI still deferred until real-album smoke. |
+| **A. Stop-bleed + quality/scan/search** | **Shipped (2026-07-22→24)** — text abs primary + thr_cap; image-image separate floors; free-text template; embed ladder; UI thr `[0.28,0.24,0.20,0.16]`; smart tags follow slider. Ops: `change-ai-search-filters.md`, `change-smart-tags.md` |
+| **A2. Legacy sentence multilingual** | **Still space-incompatible** — do not re-enable old sentence-embedding packs. Superseded by Track C aligned pack. |
+| **A3. Embed matrix cache** | **Shipped (2026-07-24)** — process-local row-major f32 + norms; optional HNSW; invalidate on write/clear/`clear_conn_pool`. File-type filter still SQL path. Ops: `change-library-perf.md`. |
+| **C. CLIP-aligned bilingual text (no reindex)** | **Product default shipped (option C, 2026-07-24)** — installer ships bilingual int8 as `resources/models/text_model.onnx` + tokenizer; EN CLIP text removed from bundle; **no Settings model switch**; optional cloud re-download observation. Guide: `docs/guide/altclip-phase0-probe.md`. `encode_text` prefers `sentence_embedding` 512-d. |
+| **B0. CLIP B/16 default** | **Abandoned (2026-07-23)** — owner trial: B/16 quant felt **≈ B/32**; not worth reindex. Design/plan historical only. |
+| **B. Multi-model SigLIP/SigLIP2** | **Phase 0 done (2026-07-23); product UI blocked.** Python+Rust OK on **quantized** (int8 Rust fail). **Owner:** no clear quality win. Guide: `docs/guide/siglip2-phase0-probe.md`. |
 
-Empty smart-tag / text-search results were primarily **threshold vs score-scale** (Track A), not “need a bigger CLIP”.
+Empty smart-tag / text-search results were primarily **threshold vs score-scale** (Track A), not “need a bigger CLIP”. Residual quality limits (insects/plants, small subjects) need a better **vision** model **or** better embed sources — embed ladder shipped; vision swap still gated.
 
-**Default production path:** bundled **CLIP ViT-B/32** quantized (Xenova `clip-vit-base-patch32`; `vision_model.onnx` / `text_model.onnx` / `tokenizer.json`).
+**Default production path:**
+- **Vision:** bundled CLIP ViT-B/32 quantized (`vision_model.onnx`).
+- **Text:** bundled **CLIP-aligned bilingual int8** (`text_model.onnx` + `tokenizer.json`; not EN-only Xenova text).
 
 ## Stop-bleed vs long-term (do not conflate)
 
 | Track | What | Fixes empty results? | Fixes “not accurate enough”? | Cost |
 |-------|------|----------------------|------------------------------|------|
-| **A. Stop-bleed** | Lower CLIP floors into the real text→image score band; short smart-tag prompts; score histogram logs | **Yes** (when floors sat above max scores) | Only slightly | No download, no reindex — **done** |
+| **A. Stop-bleed + P0** | Floors in real score band; short prompts; free-text template; original/mid-edge embeds; histogram logs | **Yes** (when floors sat above max scores) | **Partial** (RW2/thumb gap closed; CLIP class limits remain) | No download; re-scan/rebuild embeds for full benefit — **done** |
 | **B0. B/16 (abandoned)** | Bundled CLIP B/16 int8 | No | Owner: little subjective gain | Reindex; slower encode — **not shipping** |
-| **B. Long-term** | Optional **full-stack** sideload — **SigLIP2 int8** (onnx-community) and/or multilingual SigLIP | Only after Phase 0–3 | **Main goal** (quality + ideally CN) | Download + full reindex + multi-day eng |
+| **B. Long-term** | Optional **full-stack** sideload — better multilingual/fine-grained pack (not this SigLIP2 pack alone) | Only after Phase 0–3 + quality gate | **Main goal** (quality + ideally CN) | Download + full reindex + multi-day eng |
 
 **Do not implement B0 as default.**  
-**Track B Phase 0** starts with `python scripts/probe_siglip2_onnx.py` + Rust ort confirmation — see `docs/guide/siglip2-phase0-probe.md`.  
-**Track A is done.** Keep histogram logs when calibrating any future floors.
+**Track B Phase 0** for SigLIP2 pack is **complete as probe**; product promotion **blocked** until a pack beats CLIP on 植物/昆虫/小主体 or owner accepts optional BETA with honest limits — see `docs/guide/siglip2-phase0-probe.md`.  
+**Track A is done.** Keep histogram logs; re-run `scripts/calibrate_search_thresholds.py` after model/library shifts.
+
+### Track B Phase 0 — Status
+| Item | Status |
+|------|--------|
+| Python ORT probe | Done |
+| Rust `ort` probe (prefer quantized) | Done (int8 fail / quant+fp16 pass) |
+| Real-album EN/CN vs CLIP B/32 | **Ran ~96.** CLIP: 昆虫/植物弱。SigLIP2: **small bird → insect**. No clear win |
+| Product sideload + rebuild UI | **Blocked for this pack** until better pack or accepted optional BETA with known 小主体 limits |
 
 ### Threshold truth table (easy to get wrong)
 | Layer | Values | Notes |
 |-------|--------|--------|
-| `main` / last published intent | `[0.40, 0.34, 0.28, 0.22]`, smart-tag `0.28` | Too high for many text/smart-tag queries → empty UI |
-| Working tree stop-bleed (2026-07-22) | `[0.30, 0.26, 0.22, 0.18]`, smart-tag `0.22` | **Provisional** until histogram logs prove the band |
-| BGE/SigLIP manifest placeholders | e.g. illustrative threshold arrays in sample manifests | **Guess — do not ship** without calibration on real albums |
-| “Typical 0.18–0.30” prose | Heuristic for CLIP-scale cosine | **Hypothesis**, not measured in CI |
+| **UI ladder (text + similar share index)** | **`[0.28, 0.24, 0.20, 0.16]`** VH→Low | Smart tags = same index (text host path) |
+| **Text host** | abs `max(0.16, thr*0.85)`; thr_cap 30/40/50/200 | Rel empty-fallback only |
+| **Image-image host (Find similar)** | floors **0.88/0.82/0.74/0.62**; thr_cap **12/24/40/100** | Exclude query self; do **not** reuse text floors |
+| Historical stop-bleed (2026-07-22) | `[0.30, 0.26, 0.22, 0.18]`, smart-tag `0.22` | Superseded; VH 0.30 emptied almost everything |
+| Pre-stop-bleed / last published intent | `[0.40, 0.34, 0.28, 0.22]`, smart-tag `0.28` | Too high for many text/smart-tag queries → empty UI |
+| BGE/SigLIP manifest placeholders | e.g. illustrative threshold arrays in sample manifests | **Guess — do not ship** without calibration on real albums after rebuild |
+| “Typical 0.18–0.30” prose | Heuristic for CLIP **text→image** cosine | Image→image is much higher (~0.55–0.95) |
 
-Rule: **any number in a shipped threshold table must come from measured distributions** (see diagnostics in `search_similar_images`), not from this doc’s examples.
+Rule: **any number in a shipped threshold table must come from measured distributions** (see diagnostics in `search_similar_images` + `scripts/calibrate_search_thresholds.py`), not from this doc’s examples.
 
 ## Goals / non-goals
 
-### Goals (B0 — implement next)
-1. Replace bundled default with **CLIP B/16 int8/quant** (same resource filenames; download scripts + packaging).
-2. Per-library `app_meta.embedding_model_id`; legacy → treat as `clip-b32`; active → `clip-b16`; mismatch → clear embeds + rebuild (fail closed).
-3. Reject multilingual text-only (`model=1`) while vision is B/16 (Rust + UI).
-4. Smart tags, free-text search, and find-similar share one active engine.
+### Goals (B0 — abandoned; do not implement)
+~~1. Replace bundled default with CLIP B/16…~~ **Abandoned 2026-07-23.** Keep historical design docs only.
 
-### Goals (Track B — deferred)
-1. Settings: choose **bundled CLIP** vs BETA sideload — **primary: multilingual SigLIP**.
+### Goals (Track B — deferred; quality gate first)
+1. Settings: choose **bundled CLIP** vs BETA sideload — primary remains **multilingual / better fine-grained** full-stack pack (SigLIP2 base-224 quant **not** cleared for UI alone).
 2. Download → checksum → trial load → activate; on failure keep previous model.
 3. Rebuild embeds on model change; never mix spaces.
+4. Re-measure thresholds after any new embed space (CLIP ladder is **not** portable).
 
 ### Non-goals
 - **B0:** do **not** build SigLIP UI/download; do **not** keep dual B/32+B/16 ranking.
@@ -70,15 +84,16 @@ Rule: **any number in a shipped threshold table must come from measured distribu
 ## Current baseline (code truth)
 | Piece | Location / behavior |
 |-------|---------------------|
-| Bundled files (pre-B0) | `src-tauri/resources/models/{vision_model,text_model}.onnx`, `tokenizer.json` — was B/32 quant; **B0 → B/16 quant**, same filenames |
-| B0 design | `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md` |
-| Constants | `t_common::AI_VISION_MODEL` / `AI_TEXT_MODEL` / `AI_TOKENIZER` |
-| Engine | `t_ai.rs` `AiEngine` — ONNX Runtime, CLIP preprocess **224** + CLIP mean/std |
-| Optional download today | Multilingual **text + tokenizer only** → `{app_data}/models/multilingual/` |
-| Settings | `imageSearch.model` `0` default / `1` multilingual text; download UX in `Settings.vue` |
-| Search | `AFile::search_similar_images` + `ImageSearchParams.threshold` |
-| Thresholds | See **Threshold truth table** above; do not assume main tip already matches stop-bleed |
-| Diagnostics | `search_similar_images` logs one line per query: `thr`, `candidates`, `hit`, `max`, counts `>0.18/>0.22/>0.28/>0.34/>0.40`, top-3 scores — use to calibrate floors |
+| Bundled files | `src-tauri/resources/models/{vision_model,text_model}.onnx`, `tokenizer.json` — **CLIP B/32 quant** (B0 abandoned; stay B/32) |
+| B0 design (historical only) | `docs/superpowers/specs/2026-07-23-clip-b16-default-bump-design.md` |
+| Constants | `t_common::AI_VISION_MODEL` / `AI_TEXT_MODEL` / `AI_TOKENIZER` / `EMBED_SOURCE_MAX_EDGE` |
+| Engine | `t_ai.rs` `AiEngine` — ONNX Runtime, CLIP preprocess **224** + CLIP mean/std; text trunc **77**; free-text template |
+| Optional download today | Multilingual **text + tokenizer only** → `{app_data}/models/multilingual/` (not a vision upgrade; **activation disabled 2026-07-24**) |
+| Settings | `imageSearch.model` forced `0` (Default CLIP); legacy `1` coerced away; thresholds + limit in `configStore.js` |
+| Search | `AFile::search_similar_images` — matrix cache when possible; abs primary cut + thr_cap Top-K; user limit hard cap (see `change-ai-search-filters.md`, `change-library-perf.md`) |
+| Thresholds | **Shipped** `[0.28,0.24,0.20,0.16]`; smart tags share slider — see truth table |
+| Diagnostics | `search_similar_images` histogram line; re-cal with `scripts/calibrate_search_thresholds.py` |
+| Embed prepare | `t_image::load_image_for_clip_embed` (jpeg_scaled / raw_preview / original_capped) outside lock |
 
 ## Architecture
 
@@ -162,10 +177,10 @@ Migrate from magic int toward stable id:
 
 ```js
 imageSearch: {
-  modelId: 'clip-b32',  // primary
+  modelId: 'clip-b32',  // primary (bundled)
   // legacy: model 0 → clip-b32, 1 → clip-multilingual-text (if kept)
-  thresholdIndex: 3,
-  limit: 1000,
+  thresholdIndex: 3,    // Low → 0.16 with current ladder
+  limit: 50,            // thr_cap: VH30/H40/M50/L200 (Low ignores UI 50)
 }
 ```
 

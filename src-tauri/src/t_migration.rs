@@ -83,6 +83,45 @@ fn get_migrations() -> Vec<Migration> {
             description: "Deduplicate afiles and enforce UNIQUE(folder_id, name)",
             sql: "",
         },
+        Migration {
+            version: 9,
+            description: "dHash similar-duplicate tables (file_phashes + similar groups)",
+            sql: "
+                CREATE TABLE IF NOT EXISTS file_phashes (
+                    file_id INTEGER PRIMARY KEY,
+                    hash INTEGER NOT NULL,
+                    mtime INTEGER NOT NULL,
+                    computed_at INTEGER NOT NULL,
+                    FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_phashes_hash ON file_phashes(hash);
+                CREATE INDEX IF NOT EXISTS idx_file_phashes_mtime ON file_phashes(mtime);
+
+                CREATE TABLE IF NOT EXISTS similar_duplicate_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hash TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    total_size INTEGER NOT NULL,
+                    reviewed INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sim_dup_groups_size ON similar_duplicate_groups(file_size);
+
+                CREATE TABLE IF NOT EXISTS similar_duplicate_group_items (
+                    group_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL,
+                    is_keep INTEGER NOT NULL DEFAULT 0,
+                    is_selected INTEGER NOT NULL DEFAULT 0,
+                    score REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (group_id, file_id),
+                    FOREIGN KEY (group_id) REFERENCES similar_duplicate_groups(id) ON DELETE CASCADE,
+                    FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_sim_dup_items_group ON similar_duplicate_group_items(group_id);
+                CREATE INDEX IF NOT EXISTS idx_sim_dup_items_file ON similar_duplicate_group_items(file_id);
+            ",
+        },
     ]
 }
 
@@ -296,6 +335,10 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
             } else if migration.version == 8 {
                 migrate_unique_album_files(conn)
                     .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
+            } else if migration.version == 9 {
+                // SQL batch in migration.sql creates similar-dedup tables.
+                conn.execute_batch(migration.sql)
+                    .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
             } else if !migration.sql.trim().is_empty() {
                 conn.execute_batch(migration.sql)
                     .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
@@ -325,7 +368,51 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
     // Concurrent scan safety: unique (folder_id, name) even if user_version
     // advanced without completing the rewrite (or DB created before v8).
     migrate_unique_album_files(conn)?;
+    ensure_similar_dedup_tables(conn)?;
 
+    Ok(())
+}
+
+/// Repair path: create dHash similar-dedup tables if missing (multi-library / interrupted upgrade).
+pub fn ensure_similar_dedup_tables(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS file_phashes (
+            file_id INTEGER PRIMARY KEY,
+            hash INTEGER NOT NULL,
+            mtime INTEGER NOT NULL,
+            computed_at INTEGER NOT NULL,
+            FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_phashes_hash ON file_phashes(hash);
+        CREATE INDEX IF NOT EXISTS idx_file_phashes_mtime ON file_phashes(mtime);
+
+        CREATE TABLE IF NOT EXISTS similar_duplicate_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_count INTEGER NOT NULL,
+            total_size INTEGER NOT NULL,
+            reviewed INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sim_dup_groups_size ON similar_duplicate_groups(file_size);
+
+        CREATE TABLE IF NOT EXISTS similar_duplicate_group_items (
+            group_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            is_keep INTEGER NOT NULL DEFAULT 0,
+            is_selected INTEGER NOT NULL DEFAULT 0,
+            score REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (group_id, file_id),
+            FOREIGN KEY (group_id) REFERENCES similar_duplicate_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sim_dup_items_group ON similar_duplicate_group_items(group_id);
+        CREATE INDEX IF NOT EXISTS idx_sim_dup_items_file ON similar_duplicate_group_items(file_id);
+        ",
+    )
+    .map_err(|e| format!("ensure_similar_dedup_tables failed: {}", e))?;
     Ok(())
 }
 

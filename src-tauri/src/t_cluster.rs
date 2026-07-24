@@ -575,27 +575,24 @@ impl GraphParityReport {
     }
 }
 
-/// Calculate cosine distance between two PRE-PARSED embeddings
-/// Distance = 1.0 - Cosine Similarity
-/// NOTE: Assumes input vectors are already normalized!
-fn cosine_distance(emb1: &[f32], emb2: &[f32]) -> f32 {
-    debug_assert_eq!(
-        emb1.len(),
-        emb2.len(),
-        "embedding length mismatch: {} vs {}",
-        emb1.len(),
-        emb2.len()
-    );
-    // Dot product of normalized vectors = cosine similarity
-    let n = emb1.len().min(emb2.len());
+/// Distance = 1.0 - cosine for L2-normalized vectors. Returns None on dim mismatch.
+fn cosine_distance_checked(emb1: &[f32], emb2: &[f32]) -> Option<f32> {
+    if emb1.len() != emb2.len() || emb1.is_empty() {
+        return None;
+    }
     let mut dot_product = 0.0f32;
-    for i in 0..n {
+    for i in 0..emb1.len() {
         dot_product += emb1[i] * emb2[i];
     }
-
-    // Clamp similarity to [-1.0, 1.0] to handle floating point errors
     let similarity = dot_product.clamp(-1.0, 1.0);
-    1.0 - similarity
+    Some(1.0 - similarity)
+}
+
+/// Calculate cosine distance between two PRE-PARSED embeddings.
+/// Distance = 1.0 - Cosine Similarity. Assumes unit vectors when dims match.
+/// Dim mismatch fails closed (returns 2.0 > any valid unit-vector distance in [0, 2]).
+fn cosine_distance(emb1: &[f32], emb2: &[f32]) -> f32 {
+    cosine_distance_checked(emb1, emb2).unwrap_or(2.0)
 }
 
 /// Helper: Parse raw byte embedding to normalized f32 vector
@@ -1122,6 +1119,14 @@ mod tests {
         l2_normalize(&mut a);
         let d = cosine_distance(&a, &a);
         assert!(d.abs() < 1e-5, "dist={d}");
+    }
+
+    #[test]
+    fn cosine_distance_rejects_length_mismatch() {
+        let a = vec![1.0f32, 0.0, 0.0];
+        let b = vec![1.0f32, 0.0];
+        assert!(cosine_distance_checked(&a, &b).is_none());
+        assert!((cosine_distance(&a, &b) - 2.0).abs() < 1e-6);
     }
 
     /// Normalize neighbor lists for set-equality (order can differ between strategies).

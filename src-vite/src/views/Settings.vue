@@ -462,21 +462,11 @@
                   {{ imageSearchModelHint }}
                 </div>
               </div>
-              <select
-                class="select select-bordered select-sm min-w-36 shrink-0"
-                :value="config.settings.imageSearch.model"
-                :disabled="isDownloadingMultilingualModel"
-                @change="onImageSearchModelChange"
-              >
-                <option
-                  v-for="option in imageSearchModelOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
+              <div class="text-xs text-base-content/50 shrink-0 max-w-[10rem] text-right leading-5">
+                {{ $t('settings.image_search.bundled_bilingual_label') }}
+              </div>
             </div>
+            <!-- Observation: optional re-download of cloud bilingual int8 (same family). No EN/CN model switch. -->
             <div v-if="isDownloadingMultilingualModel" class="px-1 pt-1 space-y-1">
               <div class="flex items-center justify-between text-xs text-base-content/30">
                 <span>{{ $t('settings.image_search.downloading_multilingual_model') }}</span>
@@ -494,9 +484,18 @@
                   :aria-label="$t('msgbox.cancel')"
                   @click="cancelMultilingualModelDownload"
                 >
-                  <IconClose class="w-3.5 h-3.5" />
+                  ×
                 </button>
               </div>
+            </div>
+            <div v-else class="px-1 flex items-center gap-2">
+              <button
+                class="btn btn-outline btn-xs"
+                @click="promptDownloadMultilingualModel"
+              >
+                {{ $t('settings.image_search.redownload_cloud_pack') }}
+              </button>
+              <span class="text-[10px] text-base-content/30">{{ $t('settings.image_search.redownload_cloud_hint') }}</span>
             </div>
           </div>
 
@@ -1723,7 +1722,7 @@ import { formatFileSize, isLinux, isMac, setTheme, SCALE_VALUES } from '@/common
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
 import { usePluginStore } from '@/stores/pluginStore';
-import { IconAdd, IconClose, IconCopy, IconDownload, IconFolder, IconPause, IconPlay, IconRefresh, IconTrash, IconRestore, IconInformation, IconFileInfo, IconRight } from '@/common/icons';
+import { IconAdd, IconCopy, IconDownload, IconFolder, IconPause, IconPlay, IconRefresh, IconTrash, IconRestore, IconInformation, IconFileInfo, IconRight } from '@/common/icons';
 
 import TitleBar from '@/components/TitleBar.vue';
 import SettingsAbout from '@/components/SettingsAbout.vue';
@@ -1778,13 +1777,6 @@ const showChangeDbStorageDialog = ref(false);
 const showResetDbStorageDialog = ref(false);
 const showBackupDialog = ref(false);
 const showRestoreDialog = ref(false);
-const isDownloadingMultilingualModel = ref(false);
-const isCancelingMultilingualModelDownload = ref(false);
-const multilingualModelDownloadProgress = ref(0);
-const multilingualModelDownloadedBytes = ref(0);
-const multilingualModelTotalBytes = ref(0);
-const isMultilingualModelAvailable = ref(false);
-let unlistenImageSearchModelDownloadProgress: (() => void) | null = null;
 const aiPluginRegistryPaths = ref<string[]>([]);
 const aiPluginTrustedPublishers = ref<Array<{
   publisher: string;
@@ -2387,20 +2379,22 @@ const filmStripViewPreviewPositionOptions = computed(() => {
 const similarityOptions = computed(() => {
   const options = localeMsg.value.settings.image_search.similarity_options;
   // Use getter to retrieve thresholds
-  const values = config.imageSearchThresholds ?? [0.40, 0.34, 0.28, 0.22]; 
+  const values = config.imageSearchThresholds ?? [0.28, 0.24, 0.20, 0.16]; 
   // Map index dummy as the value since v-model is thresholdIndex
   return values.map((val, i) => ({ label: options[i], value: i }));
 });
 
-const imageSearchModelOptions = computed(() => {
-  const options = localeMsg.value.settings.image_search.search_model_options || ['Default', 'Multilingual model'];
-  return options.map((label: string, i: number) => ({ label, value: i }));
-});
+const isDownloadingMultilingualModel = ref(false);
+const isCancelingMultilingualModelDownload = ref(false);
+const multilingualModelDownloadProgress = ref(0);
+const multilingualModelDownloadedBytes = ref(0);
+const multilingualModelTotalBytes = ref(0);
+const isMultilingualModelAvailable = ref(false);
+let unlistenImageSearchModelDownloadProgress: (() => void) | null = null;
 
 const imageSearchModelHint = computed(() => {
-  return Number(config.settings.imageSearch.model || 0) === 1
-    ? localeMsg.value.settings.image_search.multilingual_model_hint
-    : localeMsg.value.settings.image_search.default_model_hint;
+  return localeMsg.value.settings.image_search.multilingual_model_hint
+    || localeMsg.value.settings.image_search.default_model_hint;
 });
 
 const multilingualModelDownloadSizeText = computed(() => {
@@ -2413,23 +2407,75 @@ const multilingualModelDownloadSizeText = computed(() => {
 });
 
 const syncImageSearchModelStatus = async () => {
+  // No model switch: bundled resources are bilingual. Optional cloud re-download only.
+  config.settings.imageSearch.model = 0;
   const status = await getImageSearchModelStatus();
-  if (!status) return;
-
-  isMultilingualModelAvailable.value = Boolean(status.multilingualAvailable);
-  if (Number(config.settings.imageSearch.model || 0) === 1 && !isMultilingualModelAvailable.value) {
-    config.settings.imageSearch.model = 0;
-    await setImageSearchModel(0);
-    return;
+  if (status) {
+    isMultilingualModelAvailable.value = Boolean(status.multilingualAvailable);
   }
-
   try {
-    await setImageSearchModel(config.settings.imageSearch.model || 0);
-  } catch (error) {
-    console.error('Failed to activate image search model:', error);
-    config.settings.imageSearch.model = 0;
+    // Default = bundled bilingual int8 in resources/models.
     await setImageSearchModel(0);
+  } catch (error) {
+    console.error('Failed to activate bundled bilingual text model:', error);
+    toast.error(
+      (error as any)?.message
+        || localeMsg.value.settings.image_search.multilingual_model_disabled_toast
+        || String(error),
+    );
   }
+};
+
+const promptDownloadMultilingualModel = async () => {
+  const shouldDownload = await ask(
+    localeMsg.value.settings.image_search.multilingual_model_download_message,
+    {
+      title: localeMsg.value.settings.image_search.multilingual_model_download_title,
+      kind: 'info',
+      okLabel: localeMsg.value.settings.image_search.download,
+      cancelLabel: localeMsg.value.msgbox?.cancel || 'Cancel',
+    },
+  );
+  if (!shouldDownload) return;
+  await startMultilingualModelDownload();
+};
+
+const startMultilingualModelDownload = async () => {
+  if (isDownloadingMultilingualModel.value) return;
+  isDownloadingMultilingualModel.value = true;
+  isCancelingMultilingualModelDownload.value = false;
+  multilingualModelDownloadProgress.value = 0;
+  multilingualModelDownloadedBytes.value = 0;
+  multilingualModelTotalBytes.value = 0;
+  try {
+    await downloadMultilingualImageSearchModel();
+    isDownloadingMultilingualModel.value = false;
+    isMultilingualModelAvailable.value = true;
+    // Cloud pack installs under app-data; keep UI on bundled default (model 0).
+    // Host may pick app-data Multilingual on next load_models if present.
+    config.settings.imageSearch.model = 0;
+    try {
+      await setImageSearchModel(0);
+    } catch {
+      /* ignore — bundled already active */
+    }
+    multilingualModelDownloadProgress.value = 100;
+    toast.success(localeMsg.value.settings.image_search.multilingual_model_download_success);
+  } catch (error: any) {
+    isDownloadingMultilingualModel.value = false;
+    if (isCancelingMultilingualModelDownload.value || String(error).includes('Download canceled')) {
+      isCancelingMultilingualModelDownload.value = false;
+      return;
+    }
+    toast.error(error?.message || localeMsg.value.settings.image_search.multilingual_model_download_failed);
+  }
+};
+
+const cancelMultilingualModelDownload = async () => {
+  if (!isDownloadingMultilingualModel.value) return;
+  isCancelingMultilingualModelDownload.value = true;
+  isDownloadingMultilingualModel.value = false;
+  await cancelMultilingualImageSearchModelDownload();
 };
 
 // Define the face cluster threshold options
@@ -5352,105 +5398,13 @@ function splitMacShortcutLabel(label: string): string[] {
   return keys;
 }
 
-const onImageSearchModelChange = async (event: Event) => {
-  const select = event.target as HTMLSelectElement;
-  const nextModel = Number(select.value || 0);
-  const previousModel = Number(config.settings.imageSearch.model || 0);
-
-  if (nextModel !== 1) {
-    try {
-      await setImageSearchModel(nextModel);
-      config.settings.imageSearch.model = nextModel;
-    } catch (error) {
-      select.value = String(previousModel);
-      toast.error(error?.message || String(error));
-    }
-    return;
-  }
-
-  if (isMultilingualModelAvailable.value) {
-    try {
-      await setImageSearchModel(nextModel);
-      config.settings.imageSearch.model = nextModel;
-    } catch (error) {
-      select.value = String(previousModel);
-      toast.error(error?.message || String(error));
-    }
-    return;
-  }
-
-  select.value = String(previousModel);
-  const shouldDownload = await ask(
-    localeMsg.value.settings.image_search.multilingual_model_download_message,
-    {
-      title: localeMsg.value.settings.image_search.multilingual_model_download_title,
-      kind: 'info',
-      okLabel: localeMsg.value.settings.image_search.download,
-      cancelLabel: localeMsg.value.msgbox?.cancel || 'Cancel',
-    },
-  );
-
-  if (!shouldDownload) {
-    return;
-  }
-
-  await startMultilingualModelDownload(previousModel);
-};
-
-const startMultilingualModelDownload = async (previousModel: number) => {
-  if (isDownloadingMultilingualModel.value) return;
-
-  isDownloadingMultilingualModel.value = true;
-  isCancelingMultilingualModelDownload.value = false;
-  multilingualModelDownloadProgress.value = 0;
-  multilingualModelDownloadedBytes.value = 0;
-  multilingualModelTotalBytes.value = 0;
-
-  try {
-    await downloadMultilingualImageSearchModel();
-    isDownloadingMultilingualModel.value = false;
-    isMultilingualModelAvailable.value = true;
-    await setImageSearchModel(1);
-    config.settings.imageSearch.model = 1;
-    multilingualModelDownloadProgress.value = 100;
-    if (multilingualModelTotalBytes.value > 0) {
-      multilingualModelDownloadedBytes.value = multilingualModelTotalBytes.value;
-    }
-    toast.success(localeMsg.value.settings.image_search.multilingual_model_download_success);
-  } catch (error) {
-    if (isCancelingMultilingualModelDownload.value || String(error).includes('Download canceled')) {
-      isCancelingMultilingualModelDownload.value = false;
-      isDownloadingMultilingualModel.value = false;
-      config.settings.imageSearch.model = previousModel;
-      multilingualModelDownloadProgress.value = 0;
-      multilingualModelDownloadedBytes.value = 0;
-      multilingualModelTotalBytes.value = 0;
-      return;
-    }
-    isDownloadingMultilingualModel.value = false;
-    config.settings.imageSearch.model = previousModel;
-    toast.error(error?.message || localeMsg.value.settings.image_search.multilingual_model_download_failed);
-  }
-};
-
-const cancelMultilingualModelDownload = async () => {
-  if (!isDownloadingMultilingualModel.value) return;
-
-  isCancelingMultilingualModelDownload.value = true;
-  isDownloadingMultilingualModel.value = false;
-  multilingualModelDownloadProgress.value = 0;
-  multilingualModelDownloadedBytes.value = 0;
-  multilingualModelTotalBytes.value = 0;
-  await cancelMultilingualImageSearchModelDownload();
-};
-
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
   if (typeof config.settings.tabIndex !== 'number' || config.settings.tabIndex < 0 || config.settings.tabIndex >= settingsTabs.length) {
     config.settings.tabIndex = 0;
   }
   if (typeof config.settings.imageSearch.model !== 'number') {
-    config.settings.imageSearch.model = 0;
+    config.settings.imageSearch.model = 1; // prefer bilingual when available
   }
   unlistenImageSearchModelDownloadProgress = await listenImageSearchModelDownloadProgress((event: any) => {
     const progress = Number(event?.payload?.progress ?? 0);

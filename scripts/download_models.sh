@@ -6,9 +6,12 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_DIR="$ROOT_DIR/src-tauri/resources/models"
 mkdir -p "$TARGET_DIR"
 
+# Product default text: CLIP-aligned bilingual int8. Legacy EN-only CLIP text URLs kept for observation:
+#   https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx
+#   https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/tokenizer.json
 MODELS=(
-  "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/tokenizer.json|tokenizer.json"
-  "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx|text_model.onnx"
+  "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-tokenizer.json|tokenizer.json"
+  "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-int8.onnx|text_model.onnx"
   "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx|vision_model.onnx"
   "https://huggingface.co/deepghs/insightface/resolve/main/buffalo_s/det_500m.onnx?download=true|det_500m.onnx"
   "https://huggingface.co/deepghs/insightface/resolve/main/buffalo_s/w600k_mbf.onnx?download=true|w600k_mbf.onnx"

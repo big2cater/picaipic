@@ -1,8 +1,8 @@
 # PicAiPic Progress
 
-Updated: 2026-07-22
+Updated: 2026-07-24
 
-## Status board (2026-07-22)
+## Status board (2026-07-24)
 
 | Track | Status |
 |-------|--------|
@@ -26,11 +26,123 @@ Updated: 2026-07-22
 | Publish v1.1.0 draft | Owner decision |
 | Large-library face cluster ANN / blocked KNN | **P0–P2 + HNSW shipped**; P3 deferred — `docs/guide/face-cluster-ann-plan.md` |
 | Toolbar LIVE file-type filter (bit 8) | **Shipped** (2026-07-22) |
-| AI search threshold honor + CLIP-scale floors | **Shipped** (2026-07-22) |
+| AI search: honor thr + stop-bleed + **histogram-calibrated floors** | **Shipped** (2026-07-22→23) — floors **[0.28, 0.24, 0.20, 0.16]** |
+| CLIP embed quality + scan decouple + free-text template | **Shipped** (2026-07-23) |
+| Search ranking: **abs primary + thr_cap Top-K; smart tags follow slider** | **Shipped** (2026-07-24) — `change-ai-search-filters.md` |
+| Similar-from-file: **image→image floors/caps + exclude self** | **Shipped** (2026-07-24) — Low ≠ VH on Find similar |
+| Track C bilingual int8 **product default (option C)** | **Shipped** (2026-07-24) — bundled EN+CN text; no model switch |
+| Embed matrix + rayon + optional HNSW ANN | **Shipped** (2026-07-24) — `change-library-perf.md` |
+| Dedup Similar (dHash) + exact blake3 | **Shipped** (2026-07-24) — schema v9; mode-aware |
+| Image-search model Track A stop-bleed | **Shipped** |
+| Image-search model Track B0 CLIP B/16 default | **Abandoned** (2026-07-23) |
+| Image-search model Track B SigLIP2 Phase 0 | **Probe done**; real-album **no clear quality win** → **no product UI on this pack** — `siglip2-phase0-probe.md` |
 | Settings cross-window hydrate gate + mediaBadges loop fix | **Shipped** (2026-07-22) |
 | App icon from `favicon1.ico` (neural-cat) + package -Clean | **Shipped** (2026-07-22) |
+	| Smart Albums UX pack (size ops, pickers, sort, local-day dates, empty load) | **Shipped** (2026-07-24) — `change-smart-albums.md` |
+	| Smart tags 6-bucket + default High thr + thr re-run | **Shipped** (2026-07-24) — people/pets prompts owner-tuned — `change-smart-tags.md` |
+	
+	Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+	
+	## 2026-07-24 Smart Albums UX + smart tags product set
+	
+	### Smart Albums (规则智能相册)
+	- **Size operators:** backend supports `is_not` / `empty` / `not_empty` (was unsupported → query Err → silent empty list). Size values always treated as **MB** (fractional OK; no ≥100000-as-bytes trap).
+	- **Pickers:** person / camera / lens dropdowns (`getPersons` / `getCameraInfo` / `getLensInfo`); camera/lens value `Make||Model`. Empty libraries show guidance text.
+	- **Errors:** `getSmartFileList` toasts `album.smart_edit.query_error` instead of showing 0 files.
+	- **Sort:** SmartAlbumEdit exposes sort type/order (same indices as toolbar); persisted per album.
+	- **Dates:** `before` / `after` / `between` use SQLite local calendar-day compare; frontend local midnight + local Y-M-D (not UTC `toISOString`). Default date op `in_last`.
+	- **Empty SIDEBAR.SMART:** no album selected → `showEmptyContent` (no infinite loading spinner). Stale smartAlbum id cleared.
+	- Pattern: `patterns/change-smart-albums.md`.
+	
+	### Smart tags (CLIP 智能标签)
+	- **Product set (6):** people / pets / landscape / architecture / plants / birds. Dropped family/portraits/kids/land_animals/food/sports/night/insects (use free-text).
+	- **Prompts (owner-tuned on ~103-image export):**
+	  - people → `a photo of people` (short plural; recovers mall queues / rear-view groups; multi-`or` and pure portrait prompts failed owner checks)
+	  - pets → `a photo of a dog or cat or rabbit or hamster or bird pet`
+	  - landscape / architecture / plants / birds → short single-subject CLIP phrases
+	- **Labels:** zh 人物 / 宠物 / 风景 / 建筑 / 植物 / 鸟类.
+	- **Default thr:** `configStore` `imageSearch.thresholdIndex = 1` (High / 0.24) for new installs; saved user settings not auto-migrated.
+	- **Thr re-run:** Settings thr/limit change re-queries smart tags via `getImageSearchFileList` directly; numeric coerce on index/limit; clear stuck smart/collection `activePane` when needed.
+	- **Not a detector:** named people → face index. Log host stdout `search_similar mode=text …` under `cargo tauri dev`.
+	- Owner VH evidence: pets can be tight (e.g. 5 hits); people score band is wide on personal albums — High may still return many “people-ish” images; VH tighter.
+	- Pattern: `patterns/change-smart-tags.md`.
+	
+	## 2026-07-24 Track C product C + similar-image ranking + search perf
 
-Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+### Product default (Track C option C)
+- **Vision:** still bundled **CLIP ViT-B/32** (`vision_model.onnx`) — library embeds **not** rebuilt.
+- **Text:** installer ships **CLIP-aligned bilingual int8** as `resources/models/text_model.onnx` + matching `tokenizer.json` (sha256 text `50357311…`). EN-only CLIP text **removed from bundle** (backup: `scripts/.probe-models/bundled-clip-en-text-backup/`).
+- **Settings:** no model dropdown; label **中英内置** / bundled bilingual; optional **重下云端包** (observation). Cloud self-host: `big2cater/picaipic-binaries` tag `models`. EN CLIP download URLs kept **commented** in `download_models.*` for observation.
+- **Runtime:** `encode_text` prefers `sentence_embedding` (512-d); smoke EN+ZH; max_len 128 for bilingual. Optional app-data Multilingual re-download may override via settings during observation.
+- **No** SigLIP2 / multi-model vision UI on the current pack.
+- Guide: `docs/guide/altclip-phase0-probe.md`. Pattern: `change-image-search-model.md`. Package: `build-exe.bat` → `package_windows.ps1 -Clean` (bundles `resources/models/*`).
+
+### Search ranking (text + image-image)
+**Text bug fixed (earlier 2026-07-24):** always `max(abs, top1*0.85)` hid Low/Med/High on strong text queries.
+
+**Similar-from-file bug fixed (same day):** image→image cosine is ~0.55–0.95, so text floors (0.14–0.24) never differentiated Low vs Very High; default `limit=50` + self-hit≈1.0 made results look identical.
+
+**Current contract** (`AFile::search_similar_images`):
+1. Collect candidates with junk floor `score >= 0.16`.
+2. Sort cosine desc.
+3. **Mode split:**
+   - **Text / smart tags:** `absolute_floor = max(0.16, settings_thr * 0.85)`; thr_cap VH30/H40/M50/L200; rel `top1*0.85` empty-fallback only.
+   - **Similar-from-file (`file_id`, empty text):** floors VH **0.88** / H **0.82** / M **0.74** / L **0.62**; thr_cap **12 / 24 / 40 / 100**; exclude query id; rel `top1*0.92` empty-fallback.
+4. User `limit` is a **hard cap** for all tiers: `top_k = min(limit_or_thr_cap, thr_cap, 200)`. Soft max 200.
+5. Never force `0.25` when `search_text` is set.
+6. Changing Settings `thresholdIndex` / `limit` re-runs active similar temp view, search sidebar, and smart tags (`Content.vue` watch).
+7. Log: `mode=text|image settings_thr floor= rel_floor= floor_mode= thr_cap= top_k= above_floor= returned=`.
+
+### Thresholds (histogram-calibrated UI ladder)
+| Layer | Values |
+|-------|--------|
+| Settings VH/H/M/L (UI index) | **0.28 / 0.24 / 0.20 / 0.16** |
+| Text / smart-tag host floors | `max(0.16, thr*0.85)` → ~0.14–0.24 band |
+| Similar-from-file host floors | **0.88 / 0.82 / 0.74 / 0.62** (same UI index) |
+| Smart tags | **Same `thresholdIndex`** (text path; no hard-coded thr) |
+| Historical stop-bleed | was 0.30/0.26/0.22/0.18 — superseded |
+| Pre-stop-bleed | 0.40/0.34/0.28/0.22 — too high for CLIP text band |
+
+Evidence (text, owner logs): strong bird/landscape max ≈ 0.25–0.28; `>0.28` rare; family with people max ≈ 0.255.  
+Re-calibrate text: `scripts/calibrate_search_thresholds.py`. Image floors may need owner retune from `mode=image` log lines.
+
+### Free-text + smart tags
+	- Short bare EN labels → `a photo of a/an {label}` in `AiEngine::normalize_clip_text_query`.
+	- Smart-tag product set (2026-07-24): **people / pets / landscape / architecture / plants / birds** — see section above + `change-smart-tags.md`.
+	- Smart tags call `getImageSearchFileList` **without** `thresholdOverride` (follow settings slider; default High for new installs).
+	- Log pitfall: `preview=` is 40-char **display** only — use `text_chars` / `templated` / `enc_preview` / `floor_mode` / `thr_cap` / `mode=`.
+
+### Embed source ladder (quality + scan)
+1. Thumb permit released **before** CLIP embed; folder-sync embed fire-and-forget.
+2. Decode **outside** AiEngine mutex (`load_image_for_clip_embed` → `encode_image_from_dynamic`).
+3. JPEG: libjpeg-turbo **scaled** to `EMBED_SOURCE_MAX_EDGE` (1024).
+4. RAW (type 3): LibRaw preview @ 1024 (`used=raw_preview`).
+5. Other: open + longest-edge cap; UI thumbnail last resort.
+6. Embed semaphore **1** (honest single ONNX session).
+
+### Large-library search perf + dedup (same day)
+- Process-local **embed matrix** (exact cosine); SQL BLOB fallback; invalidate on write/clear/library switch.
+- Rayon scoring for large N; optional background **HNSW** (`instant-distance`) with exact rerank (N≥8000).
+- Dedup: exact blake3 + **Similar dHash** (schema v9); scoped rebuild; mode-aware keep/delete.
+
+### Key paths
+- `t_sqlite.rs` ranking (`image_image_absolute_floor` / `image_image_top_k`) + matrix/ANN + `generate_embedding`
+- `t_ai.rs` bilingual default text, `sentence_embedding`, free-text template, download self-host
+- `t_image.rs` / `t_utils.rs` embed ladder
+- `t_dedup.rs` / `t_migration.rs` Similar dHash
+- `Content.vue` smart-tag + threshold re-run watch
+- `Settings.vue` / `configStore.js` / `smartTags.ts` / `download_models.*`
+
+### Track B0 / B / C (summary)
+| Track | Outcome |
+|-------|---------|
+| B0 CLIP B/16 default | **Abandoned** after owner trial ≈ B/32 |
+| B SigLIP2 Phase 0 | Python+Rust OK on **quantized**; int8 Rust fail; offline compare ran; owner: CLIP weak insects/plants; SigLIP2 small-bird→insect — **no ship UI** |
+| **C bilingual text (no reindex)** | **Product default shipped (option C)** — canavar CLIP-B/32 multilingual int8 bundled; no Settings switch |
+
+Scripts: `compare_clip_vs_siglip2.py`, `probe_siglip2_onnx.py`, `probe_siglip2_ort`, `compare_clip_en_vs_altclip_cn.py`, `calibrate_search_thresholds.py`, `download_models.ps1`/`.sh`.  
+Patterns: `change-ai-search-filters.md`, `change-smart-tags.md`, `change-image-search-model.md`, `change-library-perf.md`.  
+Guides: `docs/guide/siglip2-phase0-probe.md`, `docs/guide/altclip-phase0-probe.md`.
 
 
 

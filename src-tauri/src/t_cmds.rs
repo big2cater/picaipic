@@ -104,7 +104,7 @@ pub fn change_db_storage_dir(
     ensure_db_storage_change_allowed(&status_state)?;
     let path = t_storage::change_db_storage_dir(new_dir)?;
     // Drop pooled connections still holding handles to the old DB paths.
-    t_sqlite::clear_conn_pool();
+    t_sqlite::clear_conn_pool(); // also clears embed matrix cache
     Ok(path)
 }
 
@@ -115,7 +115,7 @@ pub fn reset_db_storage_dir(
     ensure_db_storage_change_allowed(&status_state)?;
     let path = t_storage::reset_db_storage_dir()?;
     // Drop pooled connections still holding handles to the old DB paths.
-    t_sqlite::clear_conn_pool();
+    t_sqlite::clear_conn_pool(); // also clears embed matrix cache
     Ok(path)
 }
 
@@ -2087,8 +2087,9 @@ pub fn dedup_start_scan(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::t_dedup::DedupState>,
     params: Option<crate::t_sqlite::QueryParams>,
+    mode: Option<String>,
 ) -> Result<(), String> {
-    crate::t_dedup::start_scan(app_handle, state, params)
+    crate::t_dedup::start_scan(app_handle, state, params, mode)
 }
 
 #[tauri::command]
@@ -2116,26 +2117,53 @@ pub fn dedup_list_groups(
     page_size: u32,
     sort_by: String, // E.g., "size_desc", "count_desc"
     filter: String,  // E.g., "all", "unreviewed"
+    mode: Option<String>,
 ) -> Result<Vec<crate::t_dedup::DedupGroup>, String> {
-    crate::t_dedup::list_groups(page, page_size, &sort_by, &filter)
+    if matches!(
+        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("similar")
+    ) {
+        crate::t_dedup::list_similar_groups(page, page_size, &sort_by, &filter)
+    } else {
+        crate::t_dedup::list_groups(page, page_size, &sort_by, &filter)
+    }
 }
 
 #[tauri::command]
-pub fn dedup_get_overview() -> Result<crate::t_dedup::DedupOverview, String> {
-    crate::t_dedup::get_overview()
+pub fn dedup_get_overview(mode: Option<String>) -> Result<crate::t_dedup::DedupOverview, String> {
+    if matches!(
+        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("similar")
+    ) {
+        crate::t_dedup::get_similar_overview()
+    } else {
+        crate::t_dedup::get_overview()
+    }
 }
 
 #[tauri::command]
-pub fn dedup_set_keep(group_id: i64, file_id: i64) -> Result<(), String> {
-    crate::t_dedup::set_keep(group_id, file_id)
+pub fn dedup_set_keep(
+    group_id: i64,
+    file_id: i64,
+    mode: Option<String>,
+) -> Result<(), String> {
+    if matches!(
+        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("similar")
+    ) {
+        crate::t_dedup::set_similar_keep(group_id, file_id)
+    } else {
+        crate::t_dedup::set_keep(group_id, file_id)
+    }
 }
 
 #[tauri::command]
 pub fn dedup_delete_selected(
     group_ids: Option<Vec<i64>>,
     file_ids: Option<Vec<i64>>,
+    mode: Option<String>,
 ) -> Result<crate::t_dedup::DedupDeleteResult, String> {
-    crate::t_dedup::delete_selected(group_ids, file_ids)
+    crate::t_dedup::delete_selected(group_ids, file_ids, mode)
 }
 
 // ----------------------------------------------------------------------------

@@ -4,11 +4,10 @@ export interface SmartTagDef {
   prompt: string;
 }
 
-// Smart-tag cosine-similarity floor (higher = stricter). Backend must honor
-// `ImageSearchParams.threshold` for text queries — do not force 0.25 in Rust.
-// Slightly above the settings Medium (0.28) keeps concept search usable while
-// cutting off-topic noise vs the old forced 0.25.
-export const SMART_TAG_SEARCH_THRESHOLD = 0.28;
+// Smart tags use the same settings.imageSearch.thresholdIndex as free-text search
+// (Content.vue → getImageSearchFileList without thresholdOverride). Do not hard-code thr here.
+// Host text path: abs floor max(0.16, thr*0.85); rel top1*0.85 only on empty fallback;
+// thr_cap Top-K: VH 30 / H 40 / M 50 / L 200. Similar-from-file uses a separate image ladder.
 
 export interface SmartTagCategoryDef {
   id: string;
@@ -16,27 +15,25 @@ export interface SmartTagCategoryDef {
 }
 
 /**
- * Concept-style English prompts for local CLIP image search.
- * Prefer concrete visual cues over abstract category names.
+ * Short CLIP-style English prompts (closer to "a photo of a {label}" training).
+ * Long multi-clause descriptions dilute B/32 text→image scores.
+ * Product set: 6 coarse subject buckets (people / pets / landscape / architecture / plants / birds).
+ *
+ * People/pets (owner logs 2026-07-24, ~103 embeds):
+ * - bare "human" flooded personal libraries (99/103 ≥0.204 @ High).
+ * - "pet dog or cat" had sharp top scores but only top~2 of VH-5 were true pets.
+ * Prefer face/portrait/group for people; list common pet species for pets.
  */
 export const SMART_TAG_CATEGORIES: SmartTagCategoryDef[] = [
   {
-    id: 'family',
+    id: 'people',
     items: [
       {
-        id: 'family',
-        prompt:
-          'a multi-generation family group photo with adults and children together, people posing for a family portrait or holiday gathering',
-      },
-    ],
-  },
-  {
-    id: 'kids',
-    items: [
-      {
-        id: 'kids',
-        prompt:
-          'a photo of a young child or toddler or baby, kids playing outdoors or at home, childhood portrait',
+        id: 'people',
+        // Short plural "people" matches groups/queues/backs better than "portrait"
+        // (owner: mall queue full of people missed by portrait prompt).
+        // Avoid multi-"or" clauses (dilute max). Face naming still uses face index.
+        prompt: 'a photo of people',
       },
     ],
   },
@@ -45,60 +42,26 @@ export const SMART_TAG_CATEGORIES: SmartTagCategoryDef[] = [
     items: [
       {
         id: 'pets',
-        prompt:
-          'a photo of a pet dog or cat as the main subject, domestic animal portrait, furry companion',
-      },
-    ],
-  },
-  {
-    id: 'portraits',
-    items: [
-      {
-        id: 'portraits',
-        prompt:
-          'a close portrait of one person looking at the camera, face filling much of the frame, head-and-shoulders photo',
-      },
-    ],
-  },
-  {
-    id: 'food',
-    items: [
-      {
-        id: 'food',
-        prompt:
-          'food photography of a plated meal or dish on a table, restaurant plate or home cooking, edible food as main subject',
-      },
-    ],
-  },
-  {
-    id: 'sports',
-    items: [
-      {
-        id: 'sports',
-        prompt:
-          'people playing sports or outdoor athletic activity, running cycling soccer basketball hiking with motion and action',
+        // Common household pets (concrete species beat abstract "pet").
+        prompt: 'a photo of a dog or cat or rabbit or hamster or bird pet',
       },
     ],
   },
   {
     id: 'landscape',
-    items: [
-      {
-        id: 'landscape',
-        prompt:
-          'a wide scenic landscape of mountains ocean forest lake or countryside under open sky, nature vista without people as main subject',
-      },
-    ],
+    items: [{ id: 'landscape', prompt: 'a photo of a natural landscape' }],
   },
   {
-    id: 'night',
-    items: [
-      {
-        id: 'night',
-        prompt:
-          'a night photo with dark sky city lights neon street lamps or stars, low-light outdoor evening scene',
-      },
-    ],
+    id: 'architecture',
+    items: [{ id: 'architecture', prompt: 'a photo of a building' }],
+  },
+  {
+    id: 'plants',
+    items: [{ id: 'plants', prompt: 'a photo of a plant' }],
+  },
+  {
+    id: 'birds',
+    items: [{ id: 'birds', prompt: 'a photo of a bird' }],
   },
 ];
 

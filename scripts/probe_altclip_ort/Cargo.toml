@@ -1,0 +1,17 @@
+[package]
+name = "probe_altclip_ort"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Phase 0: CLIP vision (resources) + candidate bilingual text tower via same ort as PicAiPic"
+
+[dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+] }
+ndarray = "0.16"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+image = "0.25"

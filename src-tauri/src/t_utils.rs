@@ -2329,15 +2329,17 @@ fn schedule_synced_file_processing(app_handle: tauri::AppHandle, task: SyncedFil
             return;
         }
 
+        // Same shape as album worker: preview already done; embed is independent.
+        // Do not await — decode runs outside AiEngine lock and can overlap other files.
         let app_handle_for_embedding = app_handle.clone();
         let file_path = task.file_path.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
+        let file_id = task.file_id;
+        tauri::async_runtime::spawn_blocking(move || {
             let ai_state: tauri::State<crate::t_ai::AiState> = app_handle_for_embedding.state();
-            if let Err(e) = AFile::generate_embedding(&ai_state, task.file_id) {
+            if let Err(e) = AFile::generate_embedding(&ai_state, file_id) {
                 eprintln!("Failed to generate embedding for {}: {}", file_path, e);
             }
-        })
-        .await;
+        });
     });
 }
 
@@ -2771,6 +2773,9 @@ impl ProcessingBudget {
         let total_budget = ((logical_cores as f64) * 0.7).floor().max(1.0) as usize;
         let heavy_budget = if logical_cores <= 8 { 1 } else { 2 }.min(total_budget);
         let normal_budget = total_budget.saturating_sub(heavy_budget).max(1);
+        // Single AiEngine mutex serializes ONNX; budget=2 only queued more waiters.
+        // Keep 1 until multi-engine sessions exist. Decode/I/O is outside the lock.
+        let _ = logical_cores;
         Self {
             normal_thumb: Arc::new(Semaphore::new(normal_budget)),
             heavy_thumb: Arc::new(Semaphore::new(heavy_budget)),
@@ -3019,43 +3024,45 @@ async fn process_thumbnail_task(
     budget: ProcessingBudget,
     tracker: Arc<Mutex<ProgressTracker>>,
 ) -> Result<bool, String> {
-    let thumb_semaphore = if task.is_heavy {
-        budget.heavy_thumb.clone()
-    } else {
-        budget.normal_thumb.clone()
-    };
+    // --- Preview phase: hold thumb permit only while generating UI thumbnails ---
+    let thumb_ok = {
+        let thumb_semaphore = if task.is_heavy {
+            budget.heavy_thumb.clone()
+        } else {
+            budget.normal_thumb.clone()
+        };
+        let _thumb_permit = thumb_semaphore
+            .acquire()
+            .await
+            .map_err(|e| format!("Failed to acquire thumbnail permit: {}", e))?;
 
-    let _thumb_permit = thumb_semaphore
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire thumbnail permit: {}", e))?;
-
-    let task_for_thumb = task.clone();
-    let thumb_ok = tauri::async_runtime::spawn_blocking(move || {
-        match crate::t_sqlite::AThumb::get_or_create_thumb(
-            task_for_thumb.file_id,
-            &task_for_thumb.file_path,
-            task_for_thumb.file_type,
-            task_for_thumb.orientation,
-            task_for_thumb.thumbnail_size,
-            false,
-            task_for_thumb.duration,
-            None,
-        ) {
-            Ok(Some(thumb)) if thumb.error_code == 0 => true,
-            Ok(Some(_)) => false,
-            Ok(None) => false,
-            Err(e) => {
-                eprintln!(
-                    "Failed to generate thumb for {}: {}",
-                    task_for_thumb.file_path, e
-                );
-                false
+        let task_for_thumb = task.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            match crate::t_sqlite::AThumb::get_or_create_thumb(
+                task_for_thumb.file_id,
+                &task_for_thumb.file_path,
+                task_for_thumb.file_type,
+                task_for_thumb.orientation,
+                task_for_thumb.thumbnail_size,
+                false,
+                task_for_thumb.duration,
+                None,
+            ) {
+                Ok(Some(thumb)) if thumb.error_code == 0 => true,
+                Ok(Some(_)) => false,
+                Ok(None) => false,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to generate thumb for {}: {}",
+                        task_for_thumb.file_path, e
+                    );
+                    false
+                }
             }
-        }
-    })
-    .await
-    .map_err(|e| format!("Thumbnail task failed: {}", e))?;
+        })
+        .await
+        .map_err(|e| format!("Thumbnail task failed: {}", e))?
+    }; // thumb permit released here so other previews keep flowing during embed
 
     if !thumb_ok {
         with_progress_tracker(&tracker, |tracker| {
@@ -3088,6 +3095,7 @@ async fn process_thumbnail_task(
         return Ok(true);
     }
 
+    // --- Search-index phase: separate permit; does not block thumbnail workers ---
     let _embedding_permit = budget
         .embedding
         .acquire()

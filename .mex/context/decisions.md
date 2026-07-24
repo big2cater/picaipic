@@ -16,7 +16,7 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-22
+last_updated: 2026-07-24
 ---
 
 
@@ -24,6 +24,71 @@ last_updated: 2026-07-22
 # Decisions
 
 ## Decision Log
+
+### Ship bilingual int8 as only bundled text tower (Track C option C)
+**Date:** 2026-07-24  
+**Status:** Active (shipped)  
+**Decision:** Installer **ships** CLIP-B/32-aligned **bilingual int8** as `resources/models/text_model.onnx` + tokenizer. Remove EN-only CLIP text from the bundle. **No Settings model switch.** Optional “re-download cloud pack” kept for observation. Self-host downloads on `big2cater/picaipic-binaries` tag `models` with SHA-256 verify. Vision remains bundled CLIP B/32 — **no library reindex**. Legacy EN CLIP URLs stay **commented** in `download_models.*` during observation; EN backup under `scripts/.probe-models/bundled-clip-en-text-backup/`.  
+**Reasoning:** Phase 0 pack (`canavar` multilingual-v1 ONNX, `sentence_embedding` 512) passed EN/CN rank alignment and int8≈fp32 retrieval. Owner chose product C over dual-model UI: one text tower for CN+EN offline.  
+**Consequences:** Installer text model larger than EN quant (~130MB vs ~64MB). `encode_text` must prefer `sentence_embedding`. Package with `build-exe.bat` / `package_windows.ps1 -Clean`. Guide: `docs/guide/altclip-phase0-probe.md`. Pattern: `change-image-search-model.md`.  
+
+### Similar-from-file uses image→image floors, not text floors
+**Date:** 2026-07-24  
+**Status:** Active (shipped)  
+**Decision:** When `search_text` is empty and `file_id > 0`, apply **image-image** absolute floors **0.88 / 0.82 / 0.74 / 0.62** and thr_caps **12 / 24 / 40 / 100** (same UI `thresholdIndex` 0–3 as text). Exclude the query file id. Relative empty-fallback uses `top1*0.92`. Text / smart tags keep histogram text floors. Changing Settings thr/limit re-runs active similar/search/smart-tag views.  
+**Reasoning:** CLIP image-image cosine sits ~0.55–0.95; text floors (~0.14–0.24) pass almost everything, so Low≈Very High with default limit=50 and self-hit≈1.0.  
+**Consequences:** “图片相似度” primarily differentiates **Find similar**; log `mode=image`. Retune floors from owner `mode=image` histograms if needed. Pattern: `change-ai-search-filters.md`.  
+
+### In-memory embed matrix; limit hard cap; (amended) aligned Multilingual pack allowed
+**Date:** 2026-07-24  
+**Status:** Active (shipped; Multilingual path amended same day for Track C)  
+**Decision:** (1) Score AI search from a process-local embedding matrix (exact cosine) with SQL BLOB fallback; invalidate on embed write/clear/`clear_conn_pool`; optional background HNSW for large N. (2) User `imageSearch.limit` is a **hard cap** for all tiers (`top_k = min(limit_or_thr_cap, thr_cap, 200)`). (3) Face `cosine_distance` fails closed on dim mismatch. (4) **Legacy sentence-space** multilingual remains rejected; **CLIP-aligned** bilingual pack (product C / optional app-data re-download) is allowed and is the bundled default text tower.  
+**Reasoning:** Full-table BLOB re-read is the large-library bottleneck. Hard-cap is clearer than Low bypassing limit. Space-incompatible sentence towers empty CN search; aligned `sentence_embedding` does not.  
+**Consequences:** Second AI search on same library should log `matrix=1` (or ANN). Plan: `docs/superpowers/plans/2026-07-24-ai-search-stopbleed-and-embed-cache.md`.  
+
+### Keep CLIP B/32 vision default; do not ship SigLIP2 base-224 pack as product model alone
+**Date:** 2026-07-23  
+**Status:** Active  
+**Decision:** Production **vision** stays **bundled CLIP ViT-B/32**. Track B0 (CLIP B/16 default) is **abandoned**. Track B Phase 0 for `onnx-community/siglip2-base-patch16-224` (prefer quantized for Rust ort) is **probe-complete** but **not** promoted to Settings sideload UI on this pack alone. Offline compare script may remain for future packs. **Text** default is bilingual int8 (Track C option C) — not a vision swap.  
+**Reasoning:** Owner subjective: CLIP weak on insects/plants but OK elsewhere; SigLIP2 confuses small birds as insects — no clear quality win. Rust int8 fails (ConvInteger); quant/fp16 load OK but quality gate fails. B/16 felt ≈ B/32, not worth reindex.  
+**Consequences:** Improve CLIP path (floors, Top-K, embed ladder, free-text template, calibrated thr, bilingual text) instead of swapping vision default. Future multi-model needs a pack that beats 植物/昆虫/小主体 or an explicit optional BETA with documented limits. Scripts: `compare_clip_vs_siglip2.py`, probes; guide: `docs/guide/siglip2-phase0-probe.md`.  
+
+### CLIP text search floors are histogram-calibrated; slider owns primary cut
+**Date:** 2026-07-23 (floors); **amended 2026-07-24** (ranking ownership + image-image split)  
+**Status:** Active (shipped)  
+**Decision:** Settings UI ladder **[0.28, 0.24, 0.20, 0.16]**. **Text primary cut** = `absolute_floor = max(0.16, thr*0.85)`. Relative `top1*0.85` is **empty-fallback only** (not `max(abs, rel)` default). **Text thr_cap Top-K:** VH 30 / H 40 / M 50 / L 200, then **`top_k = min(user_limit_or_thr_cap, thr_cap, 200)`**. **Smart tags follow `thresholdIndex`** (text path). **Similar-from-file** uses the image-image decision above (same UI index). Never force 0.25 for non-empty `search_text`. Re-calibrate text with `scripts/calibrate_search_thresholds.py` after model or library distribution shifts.  
+**Reasoning:** Owner logs: strong bird/landscape max ≈ 0.25–0.28; VH 0.30 emptied results; family with people max ≈ 0.255. Pre-stop-bleed 0.40 and provisional 0.30 stop-bleed were too strict. **2026-07-24:** always applying `max(abs, top1*0.85)` made Low/Med/High identical on strong **text** queries; image-image needed a separate score band.  
+**Consequences:** Slider changes cutoff and result count; smart tags respect similarity setting; log `mode` / `floor_mode` / `thr_cap`. Empty family with no people photos is content, not thr. Pattern: `change-ai-search-filters.md`, `change-smart-tags.md`.  
+
+### Smart tags share free-text similarity slider
+**Date:** 2026-07-24  
+**Status:** Active (shipped)  
+**Decision:** Smart-tag search does **not** pass a hard-coded `thresholdOverride`. It uses the same `imageSearch.thresholdIndex` / ladder as free-text search.  
+**Reasoning:** Fixed thr (old 0.28→0.22→0.20) made “similarity settings” appear broken when users tested via smart tags.  
+**Consequences:** Changing VH/H/M/L changes smart-tag result strictness; prompts remain short CLIP-style English.  
+
+### Smart tags product set is six coarse CLIP buckets; people prompt is short plural
+**Date:** 2026-07-24  
+**Status:** Active (shipped)  
+**Decision:** Ship **six** smart tags only: people / pets / landscape / architecture / plants / birds. Drop family/portraits/kids/land_animals/food/sports/night/insects (free-text instead). People prompt = **`a photo of people`**; pets = common species list (`dog or cat or rabbit or hamster or bird pet`). Default `imageSearch.thresholdIndex = 1` (High) for **new installs**; do not auto-migrate saved settings. Settings thr/limit re-runs smart-tag search via direct `getImageSearchFileList` + numeric coerce.  
+**Reasoning:** Owner ~103-image logs: abstract `human` over-fires; multi-`or` people prompts dilute max and scramble top3; `a portrait of a person` misses rear-view mall queues; pets need concrete species. CLIP text scores sit in a narrow band — smart tags are coarse retrieval chips, not detectors; named people remain face-index.  
+**Alternatives considered:** Multi-or face/portrait/group (failed); land_animals abstract bucket (failed); per-tag thr override (rejected — keep one slider).  
+**Consequences:** UI labels 人物/宠物/…; pattern `change-smart-tags.md`; host log `search_similar mode=text` for diagnosis.  
+
+### Smart Albums rule engine UX: supported size ops, pickers, local-day dates, no silent empty
+**Date:** 2026-07-24  
+**Status:** Active (shipped)  
+**Decision:** Size ops include `is_not`/`empty`/`not_empty`; size always MB→bytes. Person/camera/lens pickers; toast on query error; per-album sort UI; date before/after/between use local calendar-day SQL; SIDEBAR.SMART with no selection shows empty guidance (never infinite loading).  
+**Reasoning:** Unsupported size ops returned Err and Content swallowed it as 0 files; empty SMART sidebar never set `contentReady`; free-text Make||Model and UTC date display caused empty/wrong results.  
+**Consequences:** Pattern `change-smart-albums.md`; stale smartAlbum id clears selection.  
+
+
+### Prefer mid-edge original/RAW preview embeds over UI thumbs for CLIP
+**Date:** 2026-07-23  
+**Status:** Active (shipped)  
+**Decision:** Embed decode ladder: JPEG turbo scaled @1024 → RAW LibRaw preview @1024 → open+cap → UI thumb last. Decode outside AiEngine mutex; release thumb permit before embed; embed semaphore 1.  
+**Reasoning:** Thumb-only embeds (especially RW2 when `image::open` fails) hurt retrieval vs offline full-image scripts; full-res decode blocked scan previews. Mid-edge closes quality gap without full-res cost.  
+**Consequences:** Libraries need re-embed/rescan for full benefit on old rows. Pattern: `change-ai-search-filters.md`.  
 
 ### Large-library face clustering will leave all-pairs for an adaptive ANN/blocked path
 **Date:** 2026-07-22  

@@ -17,6 +17,22 @@
     </div>
 
     <div class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden flex flex-col">
+      <div class="px-1 pb-2 flex items-center gap-1">
+        <button
+          class="btn btn-xs"
+          :class="dedupMode === 'exact' ? 'btn-primary' : 'btn-ghost'"
+          @click="switchDedupMode('exact')"
+        >
+          {{ $t('info_panel.dedup.tabs.exact') }}
+        </button>
+        <button
+          class="btn btn-xs"
+          :class="dedupMode === 'similar' ? 'btn-primary' : 'btn-ghost'"
+          @click="switchDedupMode('similar')"
+        >
+          {{ $t('info_panel.dedup.tabs.similar') }}
+        </button>
+      </div>
       <div v-if="isDedupLoading" class="p-4 flex-1 flex items-center justify-center">
         <div class="text-center text-base-content/30 space-y-3 max-w-[260px]">
           <span class="loading loading-spinner text-primary w-8 h-8 mx-auto"></span>
@@ -42,8 +58,12 @@
       <div v-else-if="duplicateGroups.length === 0" class="p-4 flex-1 flex items-center justify-center">
         <div class="text-center text-base-content/30 space-y-3 max-w-[260px]">
           <IconSimilar class="w-8 h-8 mx-auto text-base-content/30" />
-          <p class="text-xs font-medium">{{ $t('info_panel.dedup.empty_title') }}</p>
-          <p class="text-xs text-base-content/30">{{ $t('info_panel.dedup.empty_desc') }}</p>
+          <p class="text-xs font-medium">
+            {{ dedupMode === 'similar' ? $t('info_panel.dedup.similar_title') : $t('info_panel.dedup.empty_title') }}
+          </p>
+          <p class="text-xs text-base-content/30">
+            {{ dedupMode === 'similar' ? $t('info_panel.dedup.similar_desc') : $t('info_panel.dedup.empty_desc') }}
+          </p>
         </div>
       </div>
 
@@ -225,7 +245,8 @@ import { dedupStartScan, dedupCancelScan, dedupGetScanStatus, dedupGetOverview, 
 import { config } from '@/common/config';
 
 const dedupPaneGlobalState = ((globalThis as any).__lapDedupPaneState ||= {
-  lastScanKey: '',
+  // Per-mode scan keys so Exact/Similar don't force each other to rescan on tab switch.
+  lastScanKeyByMode: { exact: '', similar: '' } as Record<string, string>,
 });
 const DEDUP_THUMBNAIL_LIMIT = 19;
 const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
@@ -249,10 +270,12 @@ const emit = defineEmits<{
   close: [];
   'select-file': [fileId: number];
   'preview-file': [fileId: number];
-  'trash-selected-duplicates': [groupId: string, fileIds: number[], reclaimableBytes: number];
+  'trash-selected-duplicates': [groupId: string, fileIds: number[], reclaimableBytes: number, mode: string];
 }>();
 
 const selectedDupIdsByGroup = ref<Map<number, Set<number>>>(new Map());
+/** 'exact' (blake3) | 'similar' (dHash) */
+const dedupMode = ref<'exact' | 'similar'>('exact');
 const isDedupLoading = ref(false);
 const dedupScanError = ref(false);
 const unlistenDedupProgress = ref<null | (() => void)>(null);
@@ -338,7 +361,7 @@ function handleDuplicateSelection(fileId: number, preview = false) {
 }
 
 async function setKeep(groupId: number, fileId: number) {
-  await dedupSetKeep(groupId, fileId);
+  await dedupSetKeep(groupId, fileId, dedupMode.value);
   const groupIndex = rawGroups.value.findIndex((group: any) => Number(group.id) === groupId);
   if (groupIndex < 0) return;
 
@@ -383,7 +406,7 @@ function isAllGroupDuplicatesSelected(groupId: number) {
 function trashSelectedDuplicates(groupId: number, reclaimableBytes: number) {
   const ids = Array.from(getDupSelectedSet(groupId).values());
   if (ids.length === 0) return;
-  emit('trash-selected-duplicates', String(groupId), ids, reclaimableBytes);
+  emit('trash-selected-duplicates', String(groupId), ids, reclaimableBytes, dedupMode.value);
 }
 
 function applyDeletedFiles(groupId: number, deletedFileIds: number[]) {
@@ -516,7 +539,7 @@ async function hydrateGroupThumbnails(groups: any[], activeGroupId: number | nul
 
 async function refreshOverview() {
   try {
-    const overview = await dedupGetOverview();
+    const overview = await dedupGetOverview(dedupMode.value);
     if (!overview) return;
     totalGroupCount.value = Number(overview.total_groups || 0);
     totalDuplicateFileCount.value = Number(overview.total_files || 0);
@@ -528,7 +551,7 @@ async function refreshOverview() {
 
 async function fetchGroups(preferredGroupId: number | null = null) {
   try {
-    const groups = await dedupListGroups(1, 0, 'count_desc', 'all');
+    const groups = await dedupListGroups(1, 0, 'count_desc', 'all', dedupMode.value);
     const normalized = Array.isArray(groups) ? groups : [];
     const availableGroupIds = new Set(normalized.map((group: any) => Number(group.id)));
     const nextSelectedGroupId =
@@ -584,7 +607,10 @@ function stopDedupStatusPolling() {
 
 function showDedupScanError() {
   stopDedupStatusPolling();
-  dedupPaneGlobalState.lastScanKey = '';
+  if (!dedupPaneGlobalState.lastScanKeyByMode) {
+    dedupPaneGlobalState.lastScanKeyByMode = { exact: '', similar: '' };
+  }
+  dedupPaneGlobalState.lastScanKeyByMode[dedupMode.value] = '';
   rawGroups.value = [];
   selectedGroupId.value = null;
   totalGroupCount.value = 0;
@@ -624,6 +650,16 @@ async function handleDedupScanSettled(allowWhileStarting = false) {
   // Only clear the loading flag after results are ready, so the
   // template never shows "no duplicates" before the scan finishes.
   isDedupLoading.value = false;
+}
+
+function switchDedupMode(mode: 'exact' | 'similar') {
+  if (dedupMode.value === mode) return;
+  dedupMode.value = mode;
+  selectedDupIdsByGroup.value = new Map();
+  selectedGroupId.value = null;
+  rawGroups.value = [];
+  // Reuse cached scan for this mode when scan key unchanged (no force).
+  triggerBackendDedup(false);
 }
 
 function ensureDedupStatusPolling() {
@@ -668,14 +704,20 @@ async function triggerBackendDedup(force = false) {
       await dedupCancelScan();
       ensureDedupStatusPolling();
       return;
-    } else if (!force && dedupPaneGlobalState.lastScanKey === props.dedupScanKey) {
+    } else if (
+      !force
+      && dedupPaneGlobalState.lastScanKeyByMode?.[dedupMode.value] === props.dedupScanKey
+    ) {
       await fetchGroups();
       isDedupLoading.value = false;
       return;
     }
 
-    await dedupStartScan(props.dedupQueryParams || null);
-    dedupPaneGlobalState.lastScanKey = props.dedupScanKey;
+    await dedupStartScan(props.dedupQueryParams || null, dedupMode.value);
+    if (!dedupPaneGlobalState.lastScanKeyByMode) {
+      dedupPaneGlobalState.lastScanKeyByMode = { exact: '', similar: '' };
+    }
+    dedupPaneGlobalState.lastScanKeyByMode[dedupMode.value] = props.dedupScanKey;
 
     const latest = await dedupGetScanStatus();
     totalGroupCount.value = Math.max(Number(latest?.groups || 0), rawGroups.value.length);

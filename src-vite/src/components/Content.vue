@@ -706,7 +706,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          startAiPlugin, invokeAiPluginCapability, getAiPluginTask, getAiPluginDiagnostics, getAiPluginLogs, getAiPluginHostEnvironment, grantAiPluginPermissions } from '@/common/api';
 import { config, libConfig } from '@/common/config';
 import { getShortcutLabel, matchesShortcut, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
-import { getSmartTagById, SMART_TAG_SEARCH_THRESHOLD } from '@/common/smartTags';
+import { getSmartTagById } from '@/common/smartTags';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { isWin, isMac, isLinux, setTheme, separator,
          formatFileSize, formatDate, getCalendarDateRange, formatFolderBreadcrumb, getThumbnailDataUrl, getAssetSrc, getPreviewUrl,
@@ -1316,6 +1316,8 @@ const deletePermanently = ref(false);
 const dedupReclaimBytes = ref(0);
 const dedupTrashGroupKey = ref('');
 const dedupDeleteFileIds = ref<number[]>([]);
+/** Which dedup tab initiated trash: 'exact' | 'similar' */
+const dedupTrashMode = ref('exact');
 const dedupPaneRef = ref<InstanceType<typeof DedupPane> | null>(null);
 const showCommentMsgbox = ref(false);
 const commentInputText = computed(() => {
@@ -1468,6 +1470,9 @@ const checkUnsavedChanges = (action: () => void) => {
 };
 
 const openTrashMsgbox = (reclaimBytes = 0, groupKey = '', fileIds: number[] = []) => {
+  if (!groupKey) {
+    dedupTrashMode.value = 'exact';
+  }
   dedupReclaimBytes.value = Math.max(0, reclaimBytes);
   dedupTrashGroupKey.value = groupKey || '';
   dedupDeleteFileIds.value = Array.isArray(fileIds) ? [...new Set(fileIds)] : [];
@@ -2322,6 +2327,7 @@ const currentTitleIcon = computed(() => {
               case 1: return IconFolderFavorite;
               default: return IconFolderFavorite;
             }
+          case SIDEBAR.SMART: return IconTag;
           case SIDEBAR.SEARCH: return IconPhotoSearch;
           case SIDEBAR.CALENDAR: return config.calendar.isMonthly ? IconCalendarMonth : IconCalendarDay;
           case SIDEBAR.TAG: return (libConfig.tag as any).tab === 'smart' ? IconSmartTag : IconTag;
@@ -4392,6 +4398,72 @@ watch(
   }
 );
 
+/// Settings similarity / limit: re-run active similar or AI search (Settings window emits → main).
+watch(
+  () => [
+    Number(config.settings.imageSearch.thresholdIndex),
+    Number(config.settings.imageSearch.limit),
+  ],
+  () => {
+    scheduleContentRefresh(() => {
+      // Coerce in case a stale string index slipped through persistence / select.
+      const thrIdx = Number(config.settings.imageSearch.thresholdIndex);
+      if (Number.isFinite(thrIdx) && thrIdx !== config.settings.imageSearch.thresholdIndex) {
+        config.settings.imageSearch.thresholdIndex = thrIdx;
+      }
+
+      if (tempViewMode.value === 'similar') {
+        const similarId = Number(
+          libConfig.search.similarImageHistory?.[libConfig.search.similarImageHistoryIndex] || 0,
+        );
+        if (similarId > 0) {
+          const requestId = ++currentContentRequestId;
+          showLoadingContent(requestId);
+          getImageSearchFileList('', similarId, requestId);
+        }
+        return;
+      }
+
+      // Leaving collection/smart panes stuck would make updateContent ignore TAG/SEARCH re-runs.
+      if (libConfig.activePane === 'smart' || libConfig.activePane === 'collection') {
+        if (
+          config.main.sidebarIndex === SIDEBAR.SEARCH ||
+          config.main.sidebarIndex === SIDEBAR.TAG
+        ) {
+          libConfig.activePane = 'main';
+          if (libConfig.smartAlbum) libConfig.smartAlbum = { type: null, id: null };
+        }
+      }
+
+      if (
+        config.main.sidebarIndex === SIDEBAR.SEARCH &&
+        (libConfig.search.searchType === 0 || libConfig.search.searchType === 1)
+      ) {
+        refreshContentFromSelectionChange();
+        return;
+      }
+
+      // Smart tags: re-run CLIP path directly so we always pass the new thr (no updateContent hijack).
+      if (
+        config.main.sidebarIndex === SIDEBAR.TAG &&
+        (libConfig.tag as any).tab === 'smart' &&
+        libConfig.tag.smartId
+      ) {
+        const smartTag = getSmartTagById(libConfig.tag.smartId);
+        if (!smartTag) {
+          libConfig.tag.smartId = null;
+          return;
+        }
+        const requestId = ++currentContentRequestId;
+        const smartTagLabel = localeMsg.value.tag.smart_items?.[smartTag.id] || smartTag.id;
+        contentTitle.value = `${localeMsg.value.tag.smart_group} > ${smartTagLabel}`;
+        showLoadingContent(requestId);
+        getImageSearchFileList(smartTag.prompt, 0, requestId, false);
+      }
+    });
+  },
+);
+
 /// watch for file list changes
 watch(
   () => [
@@ -4862,6 +4934,12 @@ async function getSmartFileList(smartAlbum: any, requestId: number) {
       fileList.value = [];
       totalFileCount.value = 0;
       totalFileSize.value = 0;
+      const detail = (err as any)?.message || String(err || '');
+      toast.error(
+        t('album.smart_edit.query_error', {
+          error: detail || t('album.smart_edit.rules_required'),
+        }),
+      );
     }
   } finally {
     if (requestId === currentContentRequestId) {
@@ -5082,8 +5160,13 @@ async function getImageSearchFileList(
   currentImageSearchParams.value = {
     searchText,
     fileId,
-    threshold: thresholdOverride ?? config.imageSearchThresholds[config.settings.imageSearch.thresholdIndex],
-    limit: config.settings.imageSearch.limit,
+    threshold: thresholdOverride ?? (() => {
+      const thrList = config.imageSearchThresholds ?? [0.28, 0.24, 0.20, 0.16];
+      const idx = Number(config.settings.imageSearch.thresholdIndex);
+      const safeIdx = Number.isFinite(idx) ? Math.min(Math.max(Math.trunc(idx), 0), thrList.length - 1) : 1;
+      return thrList[safeIdx] ?? 0.24;
+    })(),
+    limit: Number(config.settings.imageSearch.limit) > 0 ? Number(config.settings.imageSearch.limit) : 50,
     searchFileType: normalizeFileTypeMask(Number(config.search.fileType || 0)),
   };
 
@@ -5167,7 +5250,7 @@ async function getImageSearchFileList(
 }
 
 async function updateContent(force = false) {
-  // Smart album view
+  // Smart album view (selected custom album)
   if (libConfig.activePane === 'smart' && libConfig.smartAlbum?.type === 'custom' && libConfig.smartAlbum?.id) {
     const album = (libConfig.smartAlbums || []).find((a: any) => a.id === libConfig.smartAlbum.id);
     if (album) {
@@ -5188,6 +5271,9 @@ async function updateContent(force = false) {
       await getSmartFileList(album, requestId);
       return;
     }
+    // Stale selection (deleted album / library switch) — clear so we don't spin forever.
+    libConfig.smartAlbum = { type: null, id: null };
+    libConfig.activePane = 'main';
   }
 
   // Collection view (virtual set) — takes priority over sidebar filters
@@ -5436,13 +5522,16 @@ async function updateContent(force = false) {
       } else {
         const smartTag = getSmartTagById(smartId);
         if (!smartTag) {
+          // Stale id after category list shrink/rename — clear so UI does not stick.
+          libConfig.tag.smartId = null;
           contentTitle.value = "";
           showEmptyContent(requestId);
           return;
         }
         const smartTagLabel = localeMsg.value.tag.smart_items?.[smartTag.id] || smartTag.id;
         contentTitle.value = `${localeMsg.value.tag.smart_group} > ${smartTagLabel}`;
-        getImageSearchFileList(smartTag.prompt, 0, requestId, false, SMART_TAG_SEARCH_THRESHOLD);
+        // Follow settings similarity slider (same thr as free-text search).
+        getImageSearchFileList(smartTag.prompt, 0, requestId, false);
       }
     } else {
       if (libConfig.tag.id === null) {
@@ -5511,7 +5600,16 @@ async function updateContent(force = false) {
         getFileList({ make: libConfig.camera.make }, requestId);
       } 
     }
-  } 
+  }
+  else if (newIndex === SIDEBAR.SMART) {
+    // No album selected yet (list empty or only browsing the smart-album panel).
+    // Must clear loading + set contentReady — otherwise GridView spins forever.
+    contentTitle.value =
+      (localeMsg.value as any).album?.smart_album_list
+      || localeMsg.value.sidebar?.smart_albums
+      || 'Smart Albums';
+    showEmptyContent(requestId);
+  }
 
   if(fileList.value.length === 0) {
     isLoading.value = false;
@@ -6648,7 +6746,7 @@ const onTrashFile = async () => {
         deletedItems.forEach(item => affectedAlbumIds.add(Number(item.album_id || 0)));
         deletedFileIds.push(...deletedItems.map(item => item.id));
       } else {
-        const result = await dedupDeleteSelected(null, ids);
+        const result = await dedupDeleteSelected(null, ids, dedupTrashMode.value || 'exact');
         if (result !== undefined) {
           const resultDeletedIds = Array.isArray(result?.deletedFileIds)
             ? result.deletedFileIds.map((id: any) => Number(id)).filter((id: number) => id > 0)
@@ -7287,6 +7385,17 @@ function normalizeFileTypeMask(mask: number): number {
 }
 
 const emptyFilesMessage = computed(() => {
+  // Smart Albums panel with no selection / empty list — guide instead of generic "no files".
+  if (
+    config.main.sidebarIndex === SIDEBAR.SMART
+    && !(libConfig.activePane === 'smart' && libConfig.smartAlbum?.type === 'custom' && libConfig.smartAlbum?.id)
+  ) {
+    return (
+      (localeMsg.value as any).album?.no_smart_albums
+      || localeMsg.value.tooltip?.not_found?.files
+      || ''
+    );
+  }
   const notFound = localeMsg.value.tooltip.not_found;
   const mask = normalizeFileTypeMask(Number(config.search.fileType || 0));
   const messageKey = {
@@ -7398,8 +7507,14 @@ const handleDedupPreviewFile = (fileId: number) => {
   });
 };
 
-const handleDedupTrashSelectedDuplicates = (groupKey: string, fileIds: number[], reclaimableBytes: number) => {
+const handleDedupTrashSelectedDuplicates = (
+  groupKey: string,
+  fileIds: number[],
+  reclaimableBytes: number,
+  mode: string = 'exact',
+) => {
   if (!groupKey || !fileIds || fileIds.length === 0) return;
+  dedupTrashMode.value = mode === 'similar' ? 'similar' : 'exact';
   openTrashMsgbox(reclaimableBytes, groupKey, fileIds);
 };
 

@@ -5,6 +5,7 @@
  * date:    2024-08-08
  */
 use crate::t_ai;
+use crate::t_common;
 use crate::t_config;
 use crate::t_image;
 use crate::t_lens;
@@ -12,6 +13,7 @@ use crate::t_libraw;
 use crate::t_storage;
 use crate::t_utils;
 use crate::t_video;
+use instant_distance::{Builder as HnswBuilder, HnswMap, Search as HnswSearch};
 use base64::{Engine, engine::general_purpose};
 use exif::{In, Tag, Value};
 use image::{GenericImageView, ImageFormat};
@@ -24,8 +26,9 @@ use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use rayon::prelude::*;
 use tauri::{Emitter, State};
 
 static THUMB_GENERATION_LOCKS: OnceLock<ThumbGenerationLocks> = OnceLock::new();
@@ -1775,10 +1778,16 @@ impl AFile {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM athumbs WHERE file_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        // Best-effort hash hygiene (tables may not exist on ancient DBs).
+        let _ = tx.execute("DELETE FROM file_hashes WHERE file_id = ?1", params![id]);
+        let _ = tx.execute("DELETE FROM file_phashes WHERE file_id = ?1", params![id]);
         let result = tx
             .execute("DELETE FROM afiles WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        if result > 0 {
+            invalidate_embed_matrix_for_current_db();
+        }
         Ok(result)
     }
 
@@ -1797,12 +1806,27 @@ impl AFile {
             let mut file_stmt = tx
                 .prepare_cached("DELETE FROM afiles WHERE id = ?1")
                 .map_err(|e| e.to_string())?;
+            let mut hash_stmt = tx
+                .prepare_cached("DELETE FROM file_hashes WHERE file_id = ?1")
+                .ok();
+            let mut phash_stmt = tx
+                .prepare_cached("DELETE FROM file_phashes WHERE file_id = ?1")
+                .ok();
             for id in ids {
                 thumb_stmt.execute(params![id]).map_err(|e| e.to_string())?;
+                if let Some(ref mut s) = hash_stmt {
+                    let _ = s.execute(params![id]);
+                }
+                if let Some(ref mut s) = phash_stmt {
+                    let _ = s.execute(params![id]);
+                }
                 deleted += file_stmt.execute(params![id]).map_err(|e| e.to_string())?;
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        if deleted > 0 {
+            invalidate_embed_matrix_for_current_db();
+        }
         Ok(deleted)
     }
 
@@ -2132,6 +2156,7 @@ impl AFile {
                                     "UPDATE afiles SET embeds = NULL WHERE id = ?1",
                                     params![file_id],
                                 );
+                                invalidate_embed_matrix_for_current_db();
                                 updated_file.has_embedding = Some(false);
                             }
                         }
@@ -2946,6 +2971,7 @@ impl AFile {
         params: &ImageSearchParams,
     ) -> Result<Option<Vec<f32>>, String> {
         if !params.search_text.is_empty() {
+            // encode_text applies short-label CLIP template (a photo of a …).
             let mut engine = state.0.lock().unwrap();
             Ok(Some(engine.encode_text(&params.search_text)?))
         } else if let Some(file_id) = params.file_id.filter(|&id| id > 0) {
@@ -2971,12 +2997,15 @@ impl AFile {
         let file = file_opt.ok_or("File not found")?;
 
         // 2. Check if it's an image
-        // file_type: 1 is image, 3 is HEIC
-        if file.file_type != Some(1) && file.file_type != Some(3) {
+        // file_type: 1 = normal image (JPEG/PNG/…), 3 = RAW (RW2/CR2/…)
+        // (HEIC is also type 1 with special decode paths elsewhere.)
+        let file_type = file.file_type.unwrap_or(0);
+        if file_type != 1 && file_type != 3 {
             return Err("File is not an image".to_string());
         }
 
         let file_path = file.file_path.ok_or("File path not resolved")?;
+        let orientation = file.e_orientation.unwrap_or(1) as i32;
 
         // 3. Check if embedding exists
         if let Ok(embeds) = Self::get_embedding_by_id(file_id) {
@@ -2985,49 +3014,114 @@ impl AFile {
             }
         }
 
-        // 4. Generate embedding
-        let mut engine = state.0.lock().unwrap();
+        // 4. Decode/I/O **outside** AiEngine mutex so concurrent embed tasks can
+        // read/decode in parallel; only ONNX forward holds the lock.
+        // Quality ladder:
+        //   RAW  → LibRaw preview @ EMBED_SOURCE_MAX_EDGE
+        //   JPEG → libjpeg-turbo scaled decode
+        //   else → open + longest-edge cap
+        //   last → stored UI thumbnail
+        let edge = crate::t_common::EMBED_SOURCE_MAX_EDGE;
+        let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
+            t_image::load_image_for_clip_embed(&file_path, file_type, orientation)
+        })) {
+            Ok(Ok(pair)) => Some(pair),
+            Ok(Err(e)) => {
+                eprintln!("embed prepare failed file_id={file_id}: {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("embed prepare panicked file_id={file_id}");
+                None
+            }
+        };
 
-        // Optimized: Use thumbnail if available (much faster than loading original)
-        // Fallback to original file if thumbnail is missing or fails to process
-        let embedding = match AThumb::fetch(file_id) {
-            Ok(Some(thumb)) if thumb.thumb_data.is_some() => {
-                let thumb_bytes = thumb.thumb_data.as_ref().unwrap();
-                match panic::catch_unwind(AssertUnwindSafe(|| {
-                    engine.encode_image_from_bytes(thumb_bytes)
-                })) {
-                    Ok(res) => res.or_else(|_| {
-                        // If thumbnail processing fails (e.g. corrupted), try original
-                        match panic::catch_unwind(AssertUnwindSafe(|| {
-                            engine.encode_image(&file_path)
+        let ui_thumb_bytes: Option<Vec<u8>> = if prepared.is_none() {
+            AThumb::fetch(file_id)
+                .ok()
+                .flatten()
+                .and_then(|t| t.thumb_data)
+        } else {
+            None
+        };
+
+        let mut engine = state.0.lock().unwrap();
+        let (embedding, source) = if let Some((img, src)) = prepared {
+            match panic::catch_unwind(AssertUnwindSafe(|| {
+                engine.encode_image_from_dynamic(img)
+            })) {
+                Ok(Ok(emb)) => (emb, src),
+                Ok(Err(enc_err)) => {
+                    let bytes = ui_thumb_bytes.or_else(|| {
+                        AThumb::fetch(file_id)
+                            .ok()
+                            .flatten()
+                            .and_then(|t| t.thumb_data)
+                    });
+                    match bytes {
+                        Some(b) => match panic::catch_unwind(AssertUnwindSafe(|| {
+                            engine.encode_image_from_bytes(&b)
                         })) {
-                            Ok(res2) => res2,
-                            Err(_) => Err(format!(
-                                "Embedding panic while encoding original image: {}",
-                                file_path
-                            )),
-                        }
-                    }),
-                    // If thumbnail path panics, still try original once.
-                    Err(_) => match panic::catch_unwind(AssertUnwindSafe(|| {
-                        engine.encode_image(&file_path)
-                    })) {
-                        Ok(res2) => res2,
-                        Err(_) => Err(format!(
-                            "Embedding panic while encoding original image: {}",
-                            file_path
-                        )),
-                    },
+                            Ok(Ok(emb)) => {
+                                println!(
+                                    "embed file_id={file_id} used=thumbnail (encode failed: {enc_err})"
+                                );
+                                (emb, "thumbnail")
+                            }
+                            Ok(Err(t_err)) => {
+                                return Err(format!(
+                                    "encode failed ({enc_err}); thumbnail failed: {t_err}"
+                                ));
+                            }
+                            Err(_) => {
+                                return Err(format!(
+                                    "encode failed ({enc_err}); thumbnail encode panicked"
+                                ));
+                            }
+                        },
+                        None => return Err(enc_err),
+                    }
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "encode_image_from_dynamic panicked for file_id={file_id}"
+                    ));
                 }
             }
-            _ => match panic::catch_unwind(AssertUnwindSafe(|| engine.encode_image(&file_path))) {
-                Ok(res) => res,
-                Err(_) => Err(format!(
-                    "Embedding panic while encoding original image: {}",
-                    file_path
-                )),
-            },
-        }?;
+        } else {
+            let bytes = ui_thumb_bytes.or_else(|| {
+                AThumb::fetch(file_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.thumb_data)
+            });
+            match bytes {
+                Some(b) => match panic::catch_unwind(AssertUnwindSafe(|| {
+                    engine.encode_image_from_bytes(&b)
+                })) {
+                    Ok(Ok(emb)) => {
+                        println!(
+                            "embed file_id={file_id} used=thumbnail (prepare failed; edge={edge})"
+                        );
+                        (emb, "thumbnail")
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        return Err(format!(
+                            "thumbnail encode panicked for file_id={file_id}"
+                        ));
+                    }
+                },
+                None => {
+                    return Err(format!(
+                        "embed prepare failed and no UI thumbnail for file_id={file_id}"
+                    ));
+                }
+            }
+        };
+        drop(engine);
+
+        println!("embed file_id={file_id} used={source} edge={edge}");
 
         // 5. Save to DB
         let _ =
@@ -3051,6 +3145,9 @@ impl AFile {
                 params![bytes, file_id],
             )
             .map_err(|e| e.to_string())?;
+        if result > 0 {
+            invalidate_embed_matrix_for_current_db();
+        }
         Ok(result)
     }
 
@@ -3091,69 +3188,213 @@ impl AFile {
         }
         let query_norm = query_norm_sq.sqrt();
 
-        // 2. Perform Vector Search — only id + embeds blob (no full row hydrate yet)
+        // 2. Vector search — prefer in-memory embed matrix; SQL blob stream as fallback.
         let conn = open_conn()?;
 
-        let mut query = "SELECT a.id, a.embeds 
+        // Similarity slider (settings_thr) owns the primary cut.
+        // Text→image CLIP band ~0.18–0.30; image→image is much higher (~0.55–0.95).
+        //   1) absolute floor: text uses max(0.16, thr*0.85); similar-from-file uses image ladder
+        //   2) rank by cosine desc
+        //   3) top-K: user limit hard cap ∩ thr_cap (soft max 200)
+        //   4) relative floor (top1*0.85) only if absolute cut emptied a non-empty candidate set
+        //   5) exclude query file itself on similar-from-file (score≈1.0 otherwise masks the slider)
+        let settings_thr = if params.threshold > 0.0 {
+            params.threshold
+        } else {
+            0.20 // align with calibrated Medium when caller omits thr
+        };
+        let is_image_query =
+            params.search_text.is_empty() && params.file_id.filter(|&id| id > 0).is_some();
+        let exclude_id = if is_image_query {
+            params.file_id.filter(|&id| id > 0)
+        } else {
+            None
+        };
+        let absolute_floor = if is_image_query {
+            image_image_absolute_floor(settings_thr)
+        } else {
+            (settings_thr * 0.85).max(0.16)
+        };
+
+        let mut scores: Vec<(i64, f32)> = Vec::new();
+        let mut candidates: u32 = 0;
+        let mut max_score = f32::NEG_INFINITY;
+        let mut band_gt = [0u32; 5]; // >0.18, >0.22, >0.28, >0.34, >0.40
+        // 0=sql blob, 1=exact matrix, 2=ann+exact rerank
+        let mut matrix_flag: u8 = 0;
+
+        // MVP cache: all embeds + search exclusions. File-type filter → SQL blob path.
+        let matrix_opt = if params.search_file_type == 0 {
+            get_or_load_embed_matrix(&conn)
+                .ok()
+                .flatten()
+                .filter(|m| m.dim == embedding.len() && m.dim > 0)
+        } else {
+            None
+        };
+
+        if let Some(matrix) = matrix_opt {
+            candidates = matrix.ids.len() as u32;
+            let ann = get_or_build_embed_ann(&matrix);
+            let (scored, max_s, bands, used_ann) =
+                score_embed_matrix_auto(matrix.as_ref(), ann.as_deref(), &embedding, query_norm);
+            matrix_flag = if used_ann { 2 } else { 1 };
+            scores = scored;
+            max_score = max_s;
+            band_gt = bands;
+        } else {
+            let mut query = "SELECT a.id, a.embeds 
             FROM afiles a
             LEFT JOIN afolders b ON a.folder_id = b.id
             WHERE a.embeds IS NOT NULL"
-            .to_string();
+                .to_string();
 
-        query.push_str(" AND ");
-        query.push_str(&Self::search_exclusion_condition("b"));
+            query.push_str(" AND ");
+            query.push_str(&Self::search_exclusion_condition("b"));
 
-        // Optional Image / RAW / Video filter (same mask as library queries).
-        if let Some(file_type_condition) = Self::build_file_type_condition(params.search_file_type)
-        {
-            query.push_str(" AND (");
-            query.push_str(&file_type_condition);
-            query.push(')');
+            if let Some(file_type_condition) =
+                Self::build_file_type_condition(params.search_file_type)
+            {
+                query.push_str(" AND (");
+                query.push_str(&file_type_condition);
+                query.push(')');
+            }
+
+            let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let id: i64 = row.get(0)?;
+                    let embeds_blob: Vec<u8> = row.get(1)?;
+                    Ok((id, embeds_blob))
+                })
+                .map_err(|e| e.to_string())?;
+
+            // Stream cosine over LE f32 blobs without allocating a Vec per candidate.
+            for row in rows {
+                let (id, embeds_blob) = row.map_err(|e| e.to_string())?;
+                let score = Self::cosine_similarity_blob(&embedding, query_norm, &embeds_blob);
+                candidates += 1;
+                if score > max_score {
+                    max_score = score;
+                }
+                if score > 0.18 {
+                    band_gt[0] += 1;
+                }
+                if score > 0.22 {
+                    band_gt[1] += 1;
+                }
+                if score > 0.28 {
+                    band_gt[2] += 1;
+                }
+                if score > 0.34 {
+                    band_gt[3] += 1;
+                }
+                if score > 0.40 {
+                    band_gt[4] += 1;
+                }
+                if score >= 0.16 {
+                    scores.push((id, score));
+                }
+            }
         }
 
-        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let embeds_blob: Vec<u8> = row.get(1)?;
-                Ok((id, embeds_blob))
-            })
-            .map_err(|e| e.to_string())?;
-
-        let mut scores: Vec<(i64, f32)> = Vec::new();
-
-        // Cosine similarity floor. Honor the caller's value (settings slider + smart-tag
-        // override). Only fall back when missing/non-positive — never silently replace a
-        // valid text/smart-tag threshold with a hardcoded 0.25 (that made smart tags ignore
-        // SMART_TAG_SEARCH_THRESHOLD and made the image-search similarity setting a no-op
-        // for free-text search).
-        let threshold = if params.threshold > 0.0 {
-            params.threshold
-        } else {
-            0.25
-        };
-
-        // Stream cosine over LE f32 blobs without allocating a Vec per candidate.
-        for row in rows {
-            let (id, embeds_blob) = row.map_err(|e| e.to_string())?;
-            let score = Self::cosine_similarity_blob(&embedding, query_norm, &embeds_blob);
-            if score > threshold {
-                scores.push((id, score));
+        // Similar-from-file: drop the query image (cosine≈1.0). Keep text-search self hits.
+        if let Some(ex) = exclude_id {
+            scores.retain(|(id, _)| *id != ex);
+            if scores.is_empty() {
+                max_score = f32::NEG_INFINITY;
+            } else {
+                max_score = scores
+                    .iter()
+                    .map(|(_, s)| *s)
+                    .fold(f32::NEG_INFINITY, f32::max);
             }
         }
 
         // Sort by score descending
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Limit
-        let limit = if params.limit > 0 {
-            params.limit as usize
+        // Strictness → max results. User limit is a hard cap for every tier; thr_cap soft max.
+        let (thr_cap, top_k) = if is_image_query {
+            image_image_top_k(settings_thr, params.limit)
         } else {
-            scores.len()
+            image_search_top_k(settings_thr, params.limit)
         };
 
-        let final_ids: Vec<i64> = scores.iter().take(limit).map(|(id, _)| *id).collect();
+        let top1 = scores.first().map(|(_, s)| *s).unwrap_or(0.0);
+        // Fallback band near top1 (must be able to go *below* abs when slider emptied the list).
+        let relative_floor = if top1 > 0.0 {
+            if is_image_query {
+                // Image-image: stay near the best match so Low doesn't dump half the library.
+                (top1 * 0.92).max(absolute_floor * 0.9)
+            } else {
+                top1 * 0.85
+            }
+        } else if is_image_query {
+            absolute_floor
+        } else {
+            0.16
+        };
+
+        // Primary cut = absolute_floor (slider). Relative / all only if abs empties non-empty scores.
+        let mut ranked: Vec<(i64, f32)> = scores
+            .iter()
+            .copied()
+            .filter(|(_, s)| *s >= absolute_floor)
+            .collect();
+        let mut floor_mode = "abs";
+        if ranked.is_empty() && !scores.is_empty() {
+            ranked = scores
+                .iter()
+                .copied()
+                .filter(|(_, s)| *s >= relative_floor)
+                .collect();
+            floor_mode = "rel_fallback";
+            if ranked.is_empty() {
+                ranked = scores.clone();
+                floor_mode = "all_fallback";
+            }
+        }
+        let above_floor = ranked.len();
+        let final_ids: Vec<i64> = ranked.iter().take(top_k).map(|(id, _)| *id).collect();
+        let returned = final_ids.len();
+        let top3: Vec<String> = ranked
+            .iter()
+            .take(3)
+            .map(|(id, s)| format!("{}:{:.3}", id, s))
+            .collect();
+        let max_disp = if candidates == 0 || !max_score.is_finite() {
+            0.0
+        } else {
+            max_score
+        };
+        // Log preview only — full prompt is encoded (token max 77). Half-line ≠ encode cut.
+        let mode = if is_image_query { "image" } else { "text" };
+        let q_hint = if !params.search_text.is_empty() {
+            let raw = params.search_text.as_str();
+            let encoded = t_ai::AiEngine::normalize_clip_text_query(raw);
+            let full_chars = raw.chars().count();
+            let preview: String = raw.chars().take(40).collect();
+            let enc_preview: String = encoded.chars().take(48).collect();
+            let templated = encoded != raw.trim();
+            format!(
+                "text_chars={full_chars} preview={preview:?} enc_preview={enc_preview:?} templated={templated}"
+            )
+        } else if let Some(fid) = params.file_id {
+            format!("file_id={fid}")
+        } else {
+            "query=?".into()
+        };
+        println!(
+            "search_similar mode={mode} {q_hint} matrix={matrix_flag} settings_thr={settings_thr:.3} floor={absolute_floor:.3} rel_floor={relative_floor:.3} floor_mode={floor_mode} thr_cap={thr_cap} top_k={top_k} candidates={candidates} above_floor={above_floor} returned={returned} max={max_disp:.4} >0.18={} >0.22={} >0.28={} >0.34={} >0.40={} top3=[{}]",
+            band_gt[0],
+            band_gt[1],
+            band_gt[2],
+            band_gt[3],
+            band_gt[4],
+            top3.join(", ")
+        );
+
         if final_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -3242,6 +3483,794 @@ impl AFile {
             0.0
         } else {
             dot_product / (norm_a * norm_b)
+        }
+    }
+}
+
+/// User limit is a hard cap for every similarity tier. thr_cap is a soft tier max.
+/// Soft global max remains 200.
+fn image_search_top_k(settings_thr: f32, params_limit: i64) -> (usize, usize) {
+    let thr_cap: usize = if settings_thr >= 0.27 {
+        30
+    } else if settings_thr >= 0.23 {
+        40
+    } else if settings_thr >= 0.19 {
+        50
+    } else {
+        200
+    };
+    let requested = if params_limit > 0 {
+        params_limit as usize
+    } else {
+        thr_cap
+    };
+    let top_k = requested.min(thr_cap).min(200).max(1);
+    (thr_cap, top_k)
+}
+
+/// Image→image cosine is typically ~0.55–0.95 (far above text→image).
+/// Map the same UI ladder (0.28/0.24/0.20/0.16) onto image floors so Low ≠ Very High.
+fn image_image_absolute_floor(settings_thr: f32) -> f32 {
+    if settings_thr >= 0.27 {
+        0.88
+    } else if settings_thr >= 0.23 {
+        0.82
+    } else if settings_thr >= 0.19 {
+        0.74
+    } else {
+        0.62
+    }
+}
+
+/// Stricter caps for similar-from-file so default limit=50 does not hide the slider.
+fn image_image_top_k(settings_thr: f32, params_limit: i64) -> (usize, usize) {
+    let thr_cap: usize = if settings_thr >= 0.27 {
+        12
+    } else if settings_thr >= 0.23 {
+        24
+    } else if settings_thr >= 0.19 {
+        40
+    } else {
+        100
+    };
+    let requested = if params_limit > 0 {
+        params_limit as usize
+    } else {
+        thr_cap
+    };
+    let top_k = requested.min(thr_cap).min(200).max(1);
+    (thr_cap, top_k)
+}
+
+/// Process-local image-search embedding matrix for one library DB.
+/// Layout: ids[i] ↔ data[i*dim .. (i+1)*dim] (row-major f32).
+struct EmbedMatrix {
+    db_key: String,
+    generation: u64,
+    dim: usize,
+    ids: Vec<i64>,
+    data: Vec<f32>,
+    norms: Vec<f32>,
+}
+
+/// L2-normalized embedding row for HNSW (distance = 1 - dot = cosine distance).
+#[derive(Clone)]
+struct EmbedPoint(Arc<[f32]>);
+
+impl instant_distance::Point for EmbedPoint {
+    fn distance(&self, other: &Self) -> f32 {
+        let a = &self.0;
+        let b = &other.0;
+        if a.len() != b.len() || a.is_empty() {
+            return 2.0;
+        }
+        let mut dot = 0.0f32;
+        for i in 0..a.len() {
+            dot += a[i] * b[i];
+        }
+        1.0 - dot.clamp(-1.0, 1.0)
+    }
+}
+
+struct EmbedAnnIndex {
+    db_key: String,
+    generation: u64,
+    /// HNSW over unit vectors; values = row index into EmbedMatrix.
+    map: HnswMap<EmbedPoint, usize>,
+}
+
+struct EmbedMatrixCache {
+    current: Option<Arc<EmbedMatrix>>,
+    ann: Option<Arc<EmbedAnnIndex>>,
+    generations: HashMap<String, u64>,
+    /// (db_key, generation) pairs where ANN build returned None — skip rebuild until generation bumps.
+    ann_build_failed: HashSet<(String, u64)>,
+    /// Generations with a background ANN build in flight (avoid duplicate workers).
+    ann_building: HashSet<(String, u64)>,
+}
+
+fn embed_matrix_cache() -> &'static Mutex<EmbedMatrixCache> {
+    static CACHE: OnceLock<Mutex<EmbedMatrixCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(EmbedMatrixCache {
+            current: None,
+            ann: None,
+            generations: HashMap::new(),
+            ann_build_failed: HashSet::new(),
+            ann_building: HashSet::new(),
+        })
+    })
+}
+
+/// Soft cap: skip caching if matrix data would exceed this many bytes.
+const EMBED_MATRIX_MAX_BYTES: usize = 512 * 1024 * 1024;
+
+pub(crate) fn bump_embed_matrix_generation(db_path_key: &str) {
+    if let Ok(mut cache) = embed_matrix_cache().lock() {
+        let g = cache.generations.entry(db_path_key.to_string()).or_insert(0);
+        *g = g.saturating_add(1);
+        let new_g = *g;
+        if cache
+            .current
+            .as_ref()
+            .map(|m| m.db_key.as_str())
+            == Some(db_path_key)
+        {
+            cache.current = None;
+        }
+        if cache
+            .ann
+            .as_ref()
+            .map(|a| a.db_key.as_str())
+            == Some(db_path_key)
+        {
+            cache.ann = None;
+        }
+        cache
+            .ann_build_failed
+            .retain(|(k, _)| k.as_str() != db_path_key);
+        cache
+            .ann_building
+            .retain(|(k, _)| k.as_str() != db_path_key);
+        let _ = new_g;
+    }
+}
+
+pub(crate) fn invalidate_embed_matrix_for_current_db() {
+    if let Ok(path) = t_storage::get_current_db_path() {
+        let key = normalize_db_path_key(&path);
+        bump_embed_matrix_generation(&key);
+    }
+}
+
+/// Drop any cached matrix (e.g. library switch / storage migrate).
+pub(crate) fn clear_embed_matrix_cache() {
+    if let Ok(mut cache) = embed_matrix_cache().lock() {
+        cache.current = None;
+        cache.ann = None;
+        cache.ann_build_failed.clear();
+        cache.ann_building.clear();
+        // Bump all known generations so a concurrent load is discarded.
+        for g in cache.generations.values_mut() {
+            *g = g.saturating_add(1);
+        }
+    }
+}
+
+fn load_embed_matrix(
+    conn: &Connection,
+    db_key: &str,
+    generation: u64,
+) -> Result<Option<EmbedMatrix>, String> {
+    let exclusion = AFile::search_exclusion_condition("b");
+    let sql = format!(
+        "SELECT a.id, a.embeds
+         FROM afiles a
+         LEFT JOIN afolders b ON a.folder_id = b.id
+         WHERE a.embeds IS NOT NULL AND {exclusion}"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+    let mut ids: Vec<i64> = Vec::new();
+    let mut data: Vec<f32> = Vec::new();
+    let mut norms: Vec<f32> = Vec::new();
+    let mut dim: Option<usize> = None;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for row in rows {
+        let (id, blob) = row.map_err(|e| e.to_string())?;
+        if blob.is_empty() || blob.len() % 4 != 0 {
+            continue;
+        }
+        let row_dim = blob.len() / 4;
+        if let Some(d) = dim {
+            if row_dim != d {
+                continue; // skip mismatched rows
+            }
+        } else {
+            dim = Some(row_dim);
+        }
+        let d = dim.unwrap();
+        if ids
+            .len()
+            .saturating_add(1)
+            .saturating_mul(d)
+            .saturating_mul(4)
+            > EMBED_MATRIX_MAX_BYTES
+        {
+            return Ok(None);
+        }
+        let mut norm_sq = 0.0f32;
+        for chunk in blob.chunks_exact(4) {
+            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            data.push(v);
+            norm_sq += v * v;
+        }
+        ids.push(id);
+        norms.push(if norm_sq > 0.0 { norm_sq.sqrt() } else { 0.0 });
+    }
+
+    let d = dim.unwrap_or(0);
+    Ok(Some(EmbedMatrix {
+        db_key: db_key.to_string(),
+        generation,
+        dim: d,
+        ids,
+        data,
+        norms,
+    }))
+}
+
+fn get_or_load_embed_matrix(conn: &Connection) -> Result<Option<Arc<EmbedMatrix>>, String> {
+    let path = t_storage::get_current_db_path().map_err(|e| e.to_string())?;
+    let db_key = normalize_db_path_key(&path);
+
+    let generation = {
+        let mut cache = embed_matrix_cache().lock().map_err(|e| e.to_string())?;
+        *cache.generations.entry(db_key.clone()).or_insert(0)
+    };
+
+    {
+        let cache = embed_matrix_cache().lock().map_err(|e| e.to_string())?;
+        if let Some(ref m) = cache.current {
+            if m.db_key == db_key && m.generation == generation {
+                return Ok(Some(m.clone()));
+            }
+        }
+    }
+
+    let loaded = load_embed_matrix(conn, &db_key, generation)?;
+    let Some(matrix) = loaded else {
+        return Ok(None);
+    };
+    let arc = Arc::new(matrix);
+    if let Ok(mut cache) = embed_matrix_cache().lock() {
+        let g_now = *cache.generations.entry(db_key.clone()).or_insert(0);
+        if g_now == generation {
+            cache.current = Some(arc.clone());
+            return Ok(Some(arc));
+        }
+    }
+    // Generation advanced while loading — return loaded matrix for this query only.
+    Ok(Some(arc))
+}
+
+/// Prefer serial below this row count (thread-pool overhead not worth it).
+const SCORE_EMBED_MATRIX_PARALLEL_MIN_N: usize = 256;
+
+/// Score all matrix rows; returns (scores >= 0.16, max_score, band histogram).
+/// Uses rayon when N is large; serial otherwise. Semantics match `score_embed_matrix_serial`.
+fn score_embed_matrix(
+    matrix: &EmbedMatrix,
+    query: &[f32],
+    query_norm: f32,
+) -> (Vec<(i64, f32)>, f32, [u32; 5]) {
+    if matrix.ids.len() < SCORE_EMBED_MATRIX_PARALLEL_MIN_N {
+        return score_embed_matrix_serial(matrix, query, query_norm);
+    }
+    score_embed_matrix_parallel(matrix, query, query_norm)
+}
+
+/// Auto: ANN candidate + exact rerank when index present and large N; else full matrix.
+/// Returns (scores, max, bands, used_ann).
+fn score_embed_matrix_auto(
+    matrix: &EmbedMatrix,
+    ann: Option<&EmbedAnnIndex>,
+    query: &[f32],
+    query_norm: f32,
+) -> (Vec<(i64, f32)>, f32, [u32; 5], bool) {
+    if let Some(ann) = ann {
+        if ann.db_key == matrix.db_key
+            && ann.generation == matrix.generation
+            && matrix.ids.len() >= t_common::IMAGE_SEARCH_ANN_MIN_N
+        {
+            if let Some((scores, max_s, bands)) =
+                score_embed_matrix_ann(matrix, ann, query, query_norm)
+            {
+                return (scores, max_s, bands, true);
+            }
+        }
+    }
+    let (s, m, b) = score_embed_matrix(matrix, query, query_norm);
+    (s, m, b, false)
+}
+
+fn l2_normalize_owned(v: &[f32]) -> Option<Vec<f32>> {
+    let mut norm_sq = 0.0f32;
+    for &x in v {
+        norm_sq += x * x;
+    }
+    if norm_sq <= 0.0 {
+        return None;
+    }
+    let n = norm_sq.sqrt();
+    Some(v.iter().map(|x| x / n).collect())
+}
+
+fn build_embed_ann(matrix: &EmbedMatrix) -> Option<EmbedAnnIndex> {
+    if matrix.dim == 0 || matrix.ids.is_empty() {
+        return None;
+    }
+    let mut points: Vec<EmbedPoint> = Vec::with_capacity(matrix.ids.len());
+    let mut values: Vec<usize> = Vec::with_capacity(matrix.ids.len());
+    for i in 0..matrix.ids.len() {
+        if matrix.norms[i] <= 0.0 {
+            continue;
+        }
+        let start = i * matrix.dim;
+        let row = &matrix.data[start..start + matrix.dim];
+        let Some(unit) = l2_normalize_owned(row) else {
+            continue;
+        };
+        points.push(EmbedPoint(Arc::from(unit.into_boxed_slice())));
+        values.push(i);
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let ef_search = t_common::IMAGE_SEARCH_ANN_EF_SEARCH;
+    let ef_construction = t_common::IMAGE_SEARCH_ANN_EF_CONSTRUCTION.max(ef_search);
+    let map = HnswBuilder::default()
+        .ef_search(ef_search)
+        .ef_construction(ef_construction)
+        .seed(0xA11E_5EAC_u64)
+        .build(points, values);
+    Some(EmbedAnnIndex {
+        db_key: matrix.db_key.clone(),
+        generation: matrix.generation,
+        map,
+    })
+}
+
+fn get_or_build_embed_ann(matrix: &Arc<EmbedMatrix>) -> Option<Arc<EmbedAnnIndex>> {
+    if matrix.ids.len() < t_common::IMAGE_SEARCH_ANN_MIN_N {
+        return None;
+    }
+    let fail_key = (matrix.db_key.clone(), matrix.generation);
+    {
+        let cache = embed_matrix_cache().lock().ok()?;
+        if let Some(ref ann) = cache.ann {
+            if ann.db_key == matrix.db_key && ann.generation == matrix.generation {
+                return Some(ann.clone());
+            }
+        }
+        if cache.ann_build_failed.contains(&fail_key) {
+            return None;
+        }
+        // Background build in flight — use exact matrix this query.
+        if cache.ann_building.contains(&fail_key) {
+            return None;
+        }
+    }
+
+    // Non-blocking: schedule background build; this search uses exact matrix.
+    schedule_background_ann_build(Arc::clone(matrix));
+    None
+}
+
+/// Build HNSW off the search path so the first large-library query stays responsive.
+fn schedule_background_ann_build(matrix: Arc<EmbedMatrix>) {
+    let fail_key = (matrix.db_key.clone(), matrix.generation);
+    {
+        let Ok(mut cache) = embed_matrix_cache().lock() else {
+            return;
+        };
+        if cache.ann_build_failed.contains(&fail_key) || cache.ann_building.contains(&fail_key) {
+            return;
+        }
+        if let Some(ref ann) = cache.ann {
+            if ann.db_key == matrix.db_key && ann.generation == matrix.generation {
+                return;
+            }
+        }
+        cache.ann_building.insert(fail_key.clone());
+    }
+
+    std::thread::Builder::new()
+        .name("embed-ann-build".into())
+        .spawn(move || {
+            let built = build_embed_ann(&matrix);
+            if let Ok(mut cache) = embed_matrix_cache().lock() {
+                cache.ann_building.remove(&fail_key);
+                let g_now = *cache
+                    .generations
+                    .get(&matrix.db_key)
+                    .unwrap_or(&matrix.generation);
+                if g_now != matrix.generation {
+                    return;
+                }
+                match built {
+                    Some(ann) => {
+                        cache.ann_build_failed.remove(&fail_key);
+                        cache.ann = Some(Arc::new(ann));
+                        println!(
+                            "embed_ann ready db={} gen={} n={}",
+                            matrix.db_key,
+                            matrix.generation,
+                            matrix.ids.len()
+                        );
+                    }
+                    None => {
+                        cache.ann_build_failed.insert(fail_key);
+                        eprintln!(
+                            "embed_ann build failed db={} gen={} — using exact matrix until reindex",
+                            matrix.db_key, matrix.generation
+                        );
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+/// ANN retrieve then exact cosine on candidates only (band histogram is candidate-local).
+fn score_embed_matrix_ann(
+    matrix: &EmbedMatrix,
+    ann: &EmbedAnnIndex,
+    query: &[f32],
+    query_norm: f32,
+) -> Option<(Vec<(i64, f32)>, f32, [u32; 5])> {
+    if matrix.dim == 0 || query.len() != matrix.dim || query_norm <= 0.0 {
+        return None;
+    }
+    let unit_q = l2_normalize_owned(query)?;
+    let q_point = EmbedPoint(Arc::from(unit_q.into_boxed_slice()));
+    let mut search = HnswSearch::default();
+    let limit = t_common::IMAGE_SEARCH_ANN_CANDIDATES
+        .min(matrix.ids.len())
+        .max(1);
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(limit);
+    let mut max_score = f32::NEG_INFINITY;
+    let mut band_gt = [0u32; 5];
+
+    for item in ann.map.search(&q_point, &mut search) {
+        if seen.len() >= limit {
+            break;
+        }
+        let row_i = *item.value;
+        if !seen.insert(row_i) {
+            continue;
+        }
+        if row_i >= matrix.ids.len() {
+            continue;
+        }
+        let id = matrix.ids[row_i];
+        let Some((_, score)) = score_one_row(matrix, query, query_norm, row_i, id) else {
+            continue;
+        };
+        update_score_bands(score, &mut max_score, &mut band_gt);
+        if score >= 0.16 {
+            out.push((id, score));
+        }
+    }
+    Some((out, max_score, band_gt))
+}
+
+fn score_one_row(
+    matrix: &EmbedMatrix,
+    query: &[f32],
+    query_norm: f32,
+    i: usize,
+    id: i64,
+) -> Option<(i64, f32)> {
+    let row_norm = matrix.norms[i];
+    if row_norm <= 0.0 {
+        return None;
+    }
+    let start = i * matrix.dim;
+    let row = &matrix.data[start..start + matrix.dim];
+    let mut dot = 0.0f32;
+    for j in 0..matrix.dim {
+        dot += query[j] * row[j];
+    }
+    Some((id, dot / (query_norm * row_norm)))
+}
+
+fn update_score_bands(score: f32, max_score: &mut f32, band_gt: &mut [u32; 5]) {
+    if score > *max_score {
+        *max_score = score;
+    }
+    if score > 0.18 {
+        band_gt[0] += 1;
+    }
+    if score > 0.22 {
+        band_gt[1] += 1;
+    }
+    if score > 0.28 {
+        band_gt[2] += 1;
+    }
+    if score > 0.34 {
+        band_gt[3] += 1;
+    }
+    if score > 0.40 {
+        band_gt[4] += 1;
+    }
+}
+
+fn score_embed_matrix_serial(
+    matrix: &EmbedMatrix,
+    query: &[f32],
+    query_norm: f32,
+) -> (Vec<(i64, f32)>, f32, [u32; 5]) {
+    let mut out = Vec::with_capacity(matrix.ids.len());
+    let mut max_score = f32::NEG_INFINITY;
+    let mut band_gt = [0u32; 5];
+    if matrix.dim == 0 || query.len() != matrix.dim || query_norm <= 0.0 {
+        return (out, max_score, band_gt);
+    }
+    for (i, &id) in matrix.ids.iter().enumerate() {
+        let Some((id, score)) = score_one_row(matrix, query, query_norm, i, id) else {
+            continue;
+        };
+        update_score_bands(score, &mut max_score, &mut band_gt);
+        if score >= 0.16 {
+            out.push((id, score));
+        }
+    }
+    (out, max_score, band_gt)
+}
+
+fn score_embed_matrix_parallel(
+    matrix: &EmbedMatrix,
+    query: &[f32],
+    query_norm: f32,
+) -> (Vec<(i64, f32)>, f32, [u32; 5]) {
+    let empty = (Vec::new(), f32::NEG_INFINITY, [0u32; 5]);
+    if matrix.dim == 0 || query.len() != matrix.dim || query_norm <= 0.0 {
+        return empty;
+    }
+
+    // fold → reduce: no shared mutable band/max (histogram would race otherwise).
+    matrix
+        .ids
+        .par_iter()
+        .enumerate()
+        .fold(
+            || (Vec::new(), f32::NEG_INFINITY, [0u32; 5]),
+            |(mut out, mut max_score, mut band_gt), (i, &id)| {
+                if let Some((id, score)) = score_one_row(matrix, query, query_norm, i, id) {
+                    update_score_bands(score, &mut max_score, &mut band_gt);
+                    if score >= 0.16 {
+                        out.push((id, score));
+                    }
+                }
+                (out, max_score, band_gt)
+            },
+        )
+        .reduce(
+            || (Vec::new(), f32::NEG_INFINITY, [0u32; 5]),
+            |(mut a_out, a_max, a_band), (b_out, b_max, b_band)| {
+                a_out.extend(b_out);
+                let max_score = a_max.max(b_max);
+                let mut band_gt = a_band;
+                for i in 0..5 {
+                    band_gt[i] = band_gt[i].saturating_add(b_band[i]);
+                }
+                (a_out, max_score, band_gt)
+            },
+        )
+}
+
+#[cfg(test)]
+mod image_search_top_k_tests {
+    use super::{image_image_absolute_floor, image_image_top_k, image_search_top_k};
+
+    #[test]
+    fn low_respects_user_limit_20() {
+        let (cap, k) = image_search_top_k(0.16, 20);
+        assert_eq!(cap, 200);
+        assert_eq!(k, 20);
+    }
+
+    #[test]
+    fn low_default_limit_50_caps_at_50() {
+        let (_cap, k) = image_search_top_k(0.16, 50);
+        assert_eq!(k, 50);
+    }
+
+    #[test]
+    fn very_high_never_exceeds_30() {
+        let (cap, k) = image_search_top_k(0.28, 1000);
+        assert_eq!(cap, 30);
+        assert_eq!(k, 30);
+    }
+
+    #[test]
+    fn medium_honors_smaller_limit() {
+        let (_cap, k) = image_search_top_k(0.20, 10);
+        assert_eq!(k, 10);
+    }
+
+    #[test]
+    fn image_image_floors_spread_across_slider() {
+        let low = image_image_absolute_floor(0.16);
+        let med = image_image_absolute_floor(0.20);
+        let high = image_image_absolute_floor(0.24);
+        let vh = image_image_absolute_floor(0.28);
+        assert!(low < med && med < high && high < vh);
+        assert!((low - 0.62).abs() < 1e-5);
+        assert!((vh - 0.88).abs() < 1e-5);
+        // Text floors must not be reused for image queries (would make Low≈VH).
+        assert!(low > 0.50);
+    }
+
+    #[test]
+    fn image_image_top_k_stricter_than_text() {
+        let (vh_cap, vh_k) = image_image_top_k(0.28, 50);
+        let (low_cap, low_k) = image_image_top_k(0.16, 50);
+        assert_eq!(vh_cap, 12);
+        assert_eq!(vh_k, 12);
+        assert_eq!(low_cap, 100);
+        assert_eq!(low_k, 50);
+        assert!(vh_k < low_k);
+    }
+}
+
+#[cfg(test)]
+mod score_embed_matrix_tests {
+    use super::{
+        score_embed_matrix_parallel, score_embed_matrix_serial, EmbedMatrix,
+        SCORE_EMBED_MATRIX_PARALLEL_MIN_N,
+    };
+    use std::collections::HashMap;
+
+    fn synthetic_matrix(n: usize, dim: usize) -> (EmbedMatrix, Vec<f32>, f32) {
+        let mut ids = Vec::with_capacity(n);
+        let mut data = Vec::with_capacity(n * dim);
+        let mut norms = Vec::with_capacity(n);
+        for i in 0..n {
+            ids.push(i as i64 + 1);
+            let mut norm_sq = 0.0f32;
+            for j in 0..dim {
+                // Deterministic non-zero pattern
+                let v = (((i * 17 + j * 3) % 97) as f32) * 0.01 - 0.4;
+                data.push(v);
+                norm_sq += v * v;
+            }
+            norms.push(if norm_sq > 0.0 { norm_sq.sqrt() } else { 0.0 });
+        }
+        let mut query = vec![0.0f32; dim];
+        let mut qn_sq = 0.0f32;
+        for j in 0..dim {
+            let v = ((j * 5 % 53) as f32) * 0.02 - 0.3;
+            query[j] = v;
+            qn_sq += v * v;
+        }
+        let query_norm = qn_sq.sqrt();
+        let matrix = EmbedMatrix {
+            db_key: "test".into(),
+            generation: 0,
+            dim,
+            ids,
+            data,
+            norms,
+        };
+        (matrix, query, query_norm)
+    }
+
+    fn sort_scores(mut v: Vec<(i64, f32)>) -> Vec<(i64, f32)> {
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    #[test]
+    fn parallel_matches_serial_on_large_matrix() {
+        let n = SCORE_EMBED_MATRIX_PARALLEL_MIN_N.max(300);
+        let (matrix, query, query_norm) = synthetic_matrix(n, 32);
+        let (s_scores, s_max, s_band) = score_embed_matrix_serial(&matrix, &query, query_norm);
+        let (p_scores, p_max, p_band) = score_embed_matrix_parallel(&matrix, &query, query_norm);
+
+        assert_eq!(s_band, p_band, "band histogram must match");
+        assert!(
+            (s_max - p_max).abs() < 1e-5,
+            "max_score serial={s_max} parallel={p_max}"
+        );
+
+        let s_map: HashMap<i64, f32> = sort_scores(s_scores).into_iter().collect();
+        let p_map: HashMap<i64, f32> = sort_scores(p_scores).into_iter().collect();
+        assert_eq!(s_map.len(), p_map.len(), "score set size");
+        for (id, s) in &s_map {
+            let p = p_map.get(id).unwrap_or_else(|| panic!("missing id {id}"));
+            assert!((s - p).abs() < 1e-5, "id={id} serial={s} parallel={p}");
+        }
+    }
+
+    #[test]
+    fn serial_empty_on_dim_mismatch() {
+        let (matrix, mut query, query_norm) = synthetic_matrix(4, 8);
+        query.push(0.1);
+        let (scores, max_score, band) = score_embed_matrix_serial(&matrix, &query, query_norm);
+        assert!(scores.is_empty());
+        assert!(!max_score.is_finite() || max_score == f32::NEG_INFINITY);
+        assert_eq!(band, [0; 5]);
+    }
+
+    #[test]
+    fn ann_rerank_includes_query_nearest_cluster() {
+        use super::{build_embed_ann, score_embed_matrix_ann, score_embed_matrix_serial};
+
+        // Small hand-built matrix: first rows aligned with query, rest orthogonal-ish.
+        let dim = 16;
+        let n = 64;
+        let mut ids = Vec::new();
+        let mut data = Vec::new();
+        let mut norms = Vec::new();
+        for i in 0..n {
+            ids.push(i as i64 + 1);
+            let mut row = vec![0.0f32; dim];
+            if i < 8 {
+                // Near query (mostly e0)
+                row[0] = 1.0;
+                row[1] = 0.05 * (i as f32);
+            } else {
+                row[2] = 1.0;
+                row[3] = 0.1 * ((i % 7) as f32);
+            }
+            let mut nsq = 0.0f32;
+            for &v in &row {
+                nsq += v * v;
+            }
+            let norm = nsq.sqrt();
+            norms.push(norm);
+            data.extend(row);
+        }
+        let matrix = EmbedMatrix {
+            db_key: "ann-test".into(),
+            generation: 1,
+            dim,
+            ids,
+            data,
+            norms,
+        };
+        let mut query = vec![0.0f32; dim];
+        query[0] = 1.0;
+        let query_norm = 1.0f32;
+
+        let ann = build_embed_ann(&matrix).expect("ann build");
+        let (ann_scores, _, _) =
+            score_embed_matrix_ann(&matrix, &ann, &query, query_norm).expect("ann score");
+        let (exact_scores, _, _) = score_embed_matrix_serial(&matrix, &query, query_norm);
+
+        let exact_top: Vec<i64> = {
+            let mut v = exact_scores;
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            v.into_iter().take(5).map(|(id, _)| id).collect()
+        };
+        let ann_ids: HashMap<i64, f32> = ann_scores.into_iter().collect();
+        for id in exact_top {
+            assert!(
+                ann_ids.contains_key(&id),
+                "ANN candidates should include exact top id {id}"
+            );
         }
     }
 }
@@ -5472,10 +6501,18 @@ impl AFile {
                 })
             }
             "size" => {
-                let mut n = Self::sj_i64(value).unwrap_or(0);
-                if n > 0 && n < 100_000 {
-                    n *= 1_000_000;
-                }
+                // UI always labels values as MB; accept fractional MB (e.g. 0.5).
+                // Always convert MB → bytes so large numbers are never misread as raw bytes.
+                let mb = match value {
+                    serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+                    serde_json::Value::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
+                    _ => 0.0,
+                };
+                let n = if mb > 0.0 {
+                    (mb * 1_000_000.0).round() as i64
+                } else {
+                    0
+                };
                 match op {
                     "gt" => {
                         sql_params.push(Box::new(n));
@@ -5497,6 +6534,12 @@ impl AFile {
                         sql_params.push(Box::new(n));
                         Ok("a.size = ?".into())
                     }
+                    "is_not" | "neq" => {
+                        sql_params.push(Box::new(n));
+                        Ok("a.size != ?".into())
+                    }
+                    "empty" => Ok("(a.size IS NULL OR a.size = 0)".into()),
+                    "not_empty" => Ok("(a.size IS NOT NULL AND a.size > 0)".into()),
                     _ => Err(format!("Unsupported size op {}", op)),
                 }
             }
@@ -5566,15 +6609,25 @@ impl AFile {
                     _ => "a.taken_date",
                 };
                 match op {
+                    // Compare by local calendar day (same as calendar/content range filters)
+                    // so timezone offsets do not shift boundary days.
                     "before" => {
                         let ts = Self::sj_i64(value).ok_or("ts")?;
                         sql_params.push(Box::new(ts));
-                        Ok(format!("{} < ?", col))
+                        Ok(format!(
+                            "strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                             < strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime')",
+                            col
+                        ))
                     }
                     "after" => {
                         let ts = Self::sj_i64(value).ok_or("ts")?;
                         sql_params.push(Box::new(ts));
-                        Ok(format!("{} >= ?", col))
+                        Ok(format!(
+                            "strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                             >= strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime')",
+                            col
+                        ))
                     }
                     "between" => {
                         let start = value
@@ -5589,7 +6642,13 @@ impl AFile {
                             .ok_or("end")?;
                         sql_params.push(Box::new(start));
                         sql_params.push(Box::new(end));
-                        Ok(format!("{} >= ? AND {} < ?", col, col))
+                        Ok(format!(
+                            "strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                             >= strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime') \
+                             AND strftime('%Y-%m-%d', {0}, 'unixepoch', 'localtime') \
+                             < strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime')",
+                            col
+                        ))
                     }
                     "in_last" => {
                         let amount = value
@@ -6560,6 +7619,8 @@ pub(crate) fn clear_conn_pool() {
     if let Ok(mut pool) = CONN_POOL.lock() {
         pool.clear();
     }
+    // Library switch / storage migrate: drop any cached embedding matrix.
+    clear_embed_matrix_cache();
 }
 
 pub(crate) fn open_conn() -> Result<PooledConn, String> {

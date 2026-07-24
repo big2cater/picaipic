@@ -25,6 +25,20 @@
         <span class="text-xs opacity-50 ml-auto">{{ rules.length }}/20</span>
       </div>
 
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs opacity-70">{{ $t('album.smart_edit.sort') }}</span>
+        <select v-model.number="sortType" class="select select-bordered select-sm min-w-[7rem]">
+          <option v-for="(label, idx) in sortTypeOptions" :key="idx" :value="idx">{{ label }}</option>
+        </select>
+        <select
+          v-model.number="sortOrder"
+          class="select select-bordered select-sm"
+          :disabled="sortType === 8"
+        >
+          <option v-for="(label, idx) in sortOrderOptions" :key="idx" :value="idx">{{ label }}</option>
+        </select>
+      </div>
+
       <div class="space-y-2">
         <div
           v-for="(rule, idx) in rules"
@@ -35,7 +49,11 @@
             <select v-model="rule.field" class="select select-bordered select-xs min-w-[7rem]" @change="onFieldChange(rule)">
               <option v-for="f in fieldOptions" :key="f.id" :value="f.id">{{ f.label }}</option>
             </select>
-            <select v-model="rule.operator" class="select select-bordered select-xs min-w-[6rem]">
+            <select
+              v-model="rule.operator"
+              class="select select-bordered select-xs min-w-[6rem]"
+              @change="onOperatorChange(rule)"
+            >
               <option v-for="op in operatorsFor(rule.field)" :key="op.id" :value="op.id">{{ op.label }}</option>
             </select>
             <button type="button" class="btn btn-ghost btn-xs ml-auto" @click="removeRule(idx)">×</button>
@@ -71,8 +89,18 @@
             </template>
             <template v-else-if="['date_taken','date_created','date_modified'].includes(rule.field)">
               <template v-if="rule.operator === 'in_last' || rule.operator === 'older_than'">
-                <input v-model.number="rule.value.amount" type="number" min="1" class="input input-bordered input-xs w-20" />
-                <select v-model="rule.value.unit" class="select select-bordered select-xs">
+                <input
+                  :value="Number(rule.value?.amount) || 1"
+                  type="number"
+                  min="1"
+                  class="input input-bordered input-xs w-20"
+                  @input="setRelativeDateAmount(rule, ($event.target as HTMLInputElement).value)"
+                />
+                <select
+                  :value="rule.value?.unit || 'day'"
+                  class="select select-bordered select-xs"
+                  @change="setRelativeDateUnit(rule, ($event.target as HTMLSelectElement).value)"
+                >
                   <option value="day">{{ $t('album.smart_edit.unit_day') }}</option>
                   <option value="week">{{ $t('album.smart_edit.unit_week') }}</option>
                   <option value="month">{{ $t('album.smart_edit.unit_month') }}</option>
@@ -89,18 +117,68 @@
               </template>
             </template>
             <template v-else-if="rule.field === 'size'">
-              <input v-model.number="rule.value" type="number" min="0" step="0.1" class="input input-bordered input-xs w-28" />
-              <span class="text-xs opacity-50">MB</span>
+              <template v-if="!['empty','not_empty'].includes(rule.operator)">
+                <input v-model.number="rule.value" type="number" min="0" step="0.1" class="input input-bordered input-xs w-28" />
+                <span class="text-xs opacity-50">MB</span>
+              </template>
             </template>
             <template v-else-if="rule.field === 'tag'">
+              <template v-if="!['empty','not_empty'].includes(rule.operator)">
+                <select
+                  v-if="tags.length"
+                  v-model.number="rule.value"
+                  class="select select-bordered select-xs min-w-[8rem]"
+                >
+                  <option :value="0" disabled>{{ $t('album.smart_edit.pick_tag') }}</option>
+                  <option v-for="tag in tags" :key="tag.id" :value="tag.id">{{ tag.name }}</option>
+                </select>
+                <span v-else class="text-xs opacity-50">{{ $t('album.smart_edit.no_tags') }}</span>
+              </template>
+            </template>
+            <template v-else-if="rule.field === 'person'">
+              <template v-if="!['empty','not_empty'].includes(rule.operator)">
+                <select
+                  v-if="persons.length"
+                  v-model.number="rule.value"
+                  class="select select-bordered select-xs min-w-[8rem]"
+                >
+                  <option :value="0" disabled>{{ $t('album.smart_edit.pick_person') }}</option>
+                  <option v-for="person in persons" :key="person.id" :value="person.id">
+                    {{ person.name || (`Person ${person.id}`) }}
+                  </option>
+                </select>
+                <span v-else class="text-xs opacity-50">{{ $t('album.smart_edit.no_persons') }}</span>
+              </template>
+            </template>
+            <template v-else-if="rule.field === 'camera'">
               <select
-                v-if="!['empty','not_empty'].includes(rule.operator)"
-                v-model.number="rule.value"
-                class="select select-bordered select-xs min-w-[8rem]"
+                v-if="cameraOptions.length"
+                v-model="rule.value"
+                class="select select-bordered select-xs min-w-[10rem]"
               >
-                <option :value="0" disabled>{{ $t('album.smart_edit.pick_tag') }}</option>
-                <option v-for="tag in tags" :key="tag.id" :value="tag.id">{{ tag.name }}</option>
+                <option value="" disabled>{{ $t('album.smart_edit.pick_camera') }}</option>
+                <option v-for="opt in cameraOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
+              <span v-else class="text-xs opacity-50">{{ $t('album.smart_edit.no_cameras') }}</span>
+            </template>
+            <template v-else-if="rule.field === 'lens'">
+              <select
+                v-if="lensOptions.length"
+                v-model="rule.value"
+                class="select select-bordered select-xs min-w-[10rem]"
+              >
+                <option value="" disabled>{{ $t('album.smart_edit.pick_lens') }}</option>
+                <option v-for="opt in lensOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+              <span v-else class="text-xs opacity-50">{{ $t('album.smart_edit.no_lenses') }}</span>
+            </template>
+            <template v-else-if="rule.field === 'extension'">
+              <input
+                v-model="rule.value"
+                type="text"
+                class="input input-bordered input-xs flex-1 min-w-[8rem]"
+                :placeholder="$t('album.smart_edit.extension_placeholder')"
+              />
             </template>
             <template v-else>
               <input v-model="rule.value" type="text" class="input input-bordered input-xs flex-1 min-w-[8rem]" />
@@ -132,7 +210,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import ModalDialog from '@/components/ModalDialog.vue';
-import { getAllTags } from '@/common/api';
+import { getAllTags, getCameraInfo, getLensInfo, getPersons } from '@/common/api';
 
 const props = defineProps<{
   smartAlbum?: any | null;
@@ -143,12 +221,47 @@ const emit = defineEmits<{
   ok: [any];
 }>();
 
-const { t } = useI18n();
+const { t, tm } = useI18n();
 const isEdit = computed(() => !!props.smartAlbum?.id);
 const name = ref(props.smartAlbum?.name || '');
 const matchMode = ref<'all' | 'any'>(props.smartAlbum?.query?.match || 'all');
+const sortType = ref(Number(props.smartAlbum?.sort?.type ?? 0));
+const sortOrder = ref(Number(props.smartAlbum?.sort?.order ?? 1));
 const errorMessage = ref('');
 const tags = ref<any[]>([]);
+const persons = ref<any[]>([]);
+const cameras = ref<any[]>([]);
+const lenses = ref<any[]>([]);
+
+const sortTypeOptions = computed(() => {
+  const opts = tm('toolbar.filter.sort_type_options');
+  return Array.isArray(opts) ? (opts as string[]) : [];
+});
+const sortOrderOptions = computed(() => {
+  const opts = tm('toolbar.filter.sort_order_options');
+  return Array.isArray(opts) ? (opts as string[]) : [];
+});
+
+function flattenMakeModelOptions(groups: any[]) {
+  const out: { value: string; label: string }[] = [];
+  for (const g of groups || []) {
+    const make = String(g?.make || '').trim();
+    if (!make) continue;
+    const models = Array.isArray(g?.models) ? g.models : [];
+    for (const modelRaw of models) {
+      const model = String(modelRaw || '').trim();
+      if (!model) continue;
+      out.push({
+        value: `${make}||${model}`,
+        label: `${make} ${model}`,
+      });
+    }
+  }
+  return out;
+}
+
+const cameraOptions = computed(() => flattenMakeModelOptions(cameras.value));
+const lensOptions = computed(() => flattenMakeModelOptions(lenses.value));
 
 type Rule = {
   id: string;
@@ -201,6 +314,9 @@ function operatorsFor(field: string) {
       { id: 'is', label: t('album.smart_edit.op_is') },
     ];
   }
+  if (field === 'extension') {
+    return common;
+  }
   if (field === 'rating' || field === 'size') {
     return [
       ...common,
@@ -213,11 +329,12 @@ function operatorsFor(field: string) {
     ];
   }
   if (field.startsWith('date_')) {
+    // Default first op is relative window (amount+unit UI) — less confusing than bare date.
     return [
-      { id: 'before', label: t('album.smart_edit.op_before') },
-      { id: 'after', label: t('album.smart_edit.op_after') },
       { id: 'in_last', label: t('album.smart_edit.op_in_last') },
       { id: 'older_than', label: t('album.smart_edit.op_older_than') },
+      { id: 'before', label: t('album.smart_edit.op_before') },
+      { id: 'after', label: t('album.smart_edit.op_after') },
       { id: 'empty', label: t('album.smart_edit.op_empty') },
       { id: 'not_empty', label: t('album.smart_edit.op_not_empty') },
     ];
@@ -240,6 +357,44 @@ function needsValue(rule: Rule) {
   return !['empty', 'not_empty'].includes(rule.operator);
 }
 
+function defaultDateValue(operator: string) {
+  if (operator === 'in_last' || operator === 'older_than') {
+    return { amount: 30, unit: 'day' };
+  }
+  if (operator === 'empty' || operator === 'not_empty') {
+    return null;
+  }
+  // before / after / between: local midnight today
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function ensureRelativeDateValue(rule: Rule) {
+  if (typeof rule.value !== 'object' || rule.value === null || Array.isArray(rule.value)) {
+    rule.value = { amount: 30, unit: 'day' };
+    return;
+  }
+  if (!Number(rule.value.amount)) rule.value.amount = 30;
+  if (!rule.value.unit) rule.value.unit = 'day';
+}
+
+function setRelativeDateAmount(rule: Rule, raw: string) {
+  ensureRelativeDateValue(rule);
+  rule.value = {
+    ...rule.value,
+    amount: Math.max(1, Number(raw) || 1),
+  };
+}
+
+function setRelativeDateUnit(rule: Rule, unit: string) {
+  ensureRelativeDateValue(rule);
+  rule.value = {
+    ...rule.value,
+    unit: unit || 'day',
+  };
+}
+
 function onFieldChange(rule: Rule) {
   const ops = operatorsFor(rule.field);
   rule.operator = ops[0]?.id || 'is';
@@ -247,10 +402,26 @@ function onFieldChange(rule: Rule) {
   else if (rule.field === 'rating') rule.value = 5;
   else if (rule.field === 'file_type') rule.value = 1;
   else if (rule.field === 'orientation') rule.value = 'landscape';
-  else if (rule.field.startsWith('date_')) rule.value = { amount: 30, unit: 'day' };
+  else if (rule.field.startsWith('date_')) rule.value = defaultDateValue(rule.operator);
   else if (rule.field === 'size') rule.value = 5;
   else if (rule.field === 'tag' || rule.field === 'person') rule.value = 0;
+  else if (rule.field === 'camera') rule.value = cameraOptions.value[0]?.value || '';
+  else if (rule.field === 'lens') rule.value = lensOptions.value[0]?.value || '';
+  else if (rule.field === 'extension') rule.value = 'jpg';
   else rule.value = '';
+}
+
+function onOperatorChange(rule: Rule) {
+  if (!rule.field.startsWith('date_')) return;
+  const op = rule.operator;
+  if (op === 'in_last' || op === 'older_than') {
+    ensureRelativeDateValue(rule);
+  } else if (op === 'empty' || op === 'not_empty') {
+    rule.value = null;
+  } else if (typeof rule.value === 'object' || rule.value == null || !Number(rule.value)) {
+    // before / after need a day timestamp, not a relative object
+    rule.value = defaultDateValue(op);
+  }
 }
 
 function addRule() {
@@ -267,20 +438,36 @@ function tsToDateInput(ts: any) {
   if (!n) return '';
   const d = new Date(n * 1000);
   if (Number.isNaN(d.getTime())) return '';
-  return d.toISOString().slice(0, 10);
+  // Local calendar day (not UTC) — matches backend localtime day compare.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 function dateInputToTs(s: string) {
   if (!s) return 0;
+  // Local midnight epoch for the selected calendar day.
   const d = new Date(s + 'T00:00:00');
   return Math.floor(d.getTime() / 1000);
 }
 
 onMounted(async () => {
   try {
-    const list = await getAllTags();
-    tags.value = Array.isArray(list) ? list : [];
+    const [tagList, personList, cameraList, lensList] = await Promise.all([
+      getAllTags(),
+      getPersons(),
+      getCameraInfo(),
+      getLensInfo(),
+    ]);
+    tags.value = Array.isArray(tagList) ? tagList : [];
+    persons.value = Array.isArray(personList) ? personList : [];
+    cameras.value = Array.isArray(cameraList) ? cameraList : [];
+    lenses.value = Array.isArray(lensList) ? lensList : [];
   } catch {
     tags.value = [];
+    persons.value = [];
+    cameras.value = [];
+    lenses.value = [];
   }
 });
 
@@ -295,18 +482,50 @@ function submit() {
     errorMessage.value = t('album.smart_edit.rules_required');
     return;
   }
-  // normalize date relative values
+  // normalize date relative values + trim text fields
   const normalized = rules.value.map((r) => {
     const copy = { ...r, value: typeof r.value === 'object' && r.value ? { ...r.value } : r.value };
     if (['date_taken', 'date_created', 'date_modified'].includes(r.field)) {
       if (r.operator === 'in_last' || r.operator === 'older_than') {
-        if (typeof r.value !== 'object' || r.value === null) {
-          copy.value = { amount: Number(r.value) || 7, unit: 'day' };
+        if (typeof r.value !== 'object' || r.value === null || Array.isArray(r.value)) {
+          copy.value = { amount: Number(r.value) || 30, unit: 'day' };
+        } else {
+          copy.value = {
+            amount: Math.max(1, Number(r.value.amount) || 30),
+            unit: r.value.unit || 'day',
+          };
+        }
+      } else if (r.operator === 'before' || r.operator === 'after') {
+        if (typeof r.value === 'object' || !Number(r.value)) {
+          copy.value = defaultDateValue(r.operator);
         }
       }
     }
+    if (r.field === 'extension' || r.field === 'name') {
+      copy.value = String(r.value ?? '').trim();
+    }
     return copy;
   });
+
+  for (const r of normalized) {
+    if (['empty', 'not_empty'].includes(r.operator)) continue;
+    if ((r.field === 'tag' || r.field === 'person') && !Number(r.value)) {
+      errorMessage.value = r.field === 'tag'
+        ? (tags.value.length ? t('album.smart_edit.pick_tag') : t('album.smart_edit.no_tags'))
+        : (persons.value.length ? t('album.smart_edit.pick_person') : t('album.smart_edit.no_persons'));
+      return;
+    }
+    if ((r.field === 'camera' || r.field === 'lens') && !String(r.value || '').includes('||')) {
+      errorMessage.value = r.field === 'camera'
+        ? (cameraOptions.value.length ? t('album.smart_edit.pick_camera') : t('album.smart_edit.no_cameras'))
+        : (lensOptions.value.length ? t('album.smart_edit.pick_lens') : t('album.smart_edit.no_lenses'));
+      return;
+    }
+    if ((r.field === 'name' || r.field === 'extension') && !String(r.value || '').trim()) {
+      errorMessage.value = t('album.smart_edit.rules_required');
+      return;
+    }
+  }
 
   const now = Math.floor(Date.now() / 1000);
   const payload = {
@@ -320,7 +539,10 @@ function submit() {
       rules: normalized,
     },
     group: props.smartAlbum?.group || { type: 0 },
-    sort: props.smartAlbum?.sort || { type: 0, order: 1 },
+    sort: {
+      type: Number(sortType.value) || 0,
+      order: sortType.value === 8 ? 0 : (Number(sortOrder.value) || 0),
+    },
     coverFileId: props.smartAlbum?.coverFileId ?? null,
     count: props.smartAlbum?.count ?? null,
     createdAt: props.smartAlbum?.createdAt || now,

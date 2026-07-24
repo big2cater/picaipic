@@ -79,9 +79,10 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["std"] }
 jxl-oxide = { version = "0.12.5", features = ["image"] }
 libc = "0.2"
-instant-distance = "0.6.1"
-
-[target.'cfg(target_os = "linux")'.dependencies]
+	instant-distance = "0.6.1"
+	rayon = "1.10"
+	
+	[target.'cfg(target_os = "linux")'.dependencies]
 percent-encoding = "2.3.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]

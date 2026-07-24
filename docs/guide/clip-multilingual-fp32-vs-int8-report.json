@@ -1,0 +1,72 @@
+{
+  "rows": [
+    {
+      "en": "a bird",
+      "zh": "一只鸟",
+      "max_en": 0.2718018889427185,
+      "max_fp32": 0.2698712944984436,
+      "max_int8": 0.2699812948703766,
+      "ov_en_fp32": 4,
+      "ov_en_int8": 4,
+      "ov_fp32_int8": 5,
+      "top1_same_fp_i8": true
+    },
+    {
+      "en": "a cat",
+      "zh": "一只猫",
+      "max_en": 0.23438474535942078,
+      "max_fp32": 0.23599310219287872,
+      "max_int8": 0.2368404120206833,
+      "ov_en_fp32": 4,
+      "ov_en_int8": 4,
+      "ov_fp32_int8": 4,
+      "top1_same_fp_i8": true
+    },
+    {
+      "en": "a plant",
+      "zh": "植物",
+      "max_en": 0.2668118476867676,
+      "max_fp32": 0.27653783559799194,
+      "max_int8": 0.275653213262558,
+      "ov_en_fp32": 5,
+      "ov_en_int8": 5,
+      "ov_fp32_int8": 5,
+      "top1_same_fp_i8": true
+    },
+    {
+      "en": "architecture",
+      "zh": "建筑",
+      "max_en": 0.275135338306427,
+      "max_fp32": 0.28211477398872375,
+      "max_int8": 0.28323307633399963,
+      "ov_en_fp32": 3,
+      "ov_en_int8": 3,
+      "ov_fp32_int8": 5,
+      "top1_same_fp_i8": true
+    },
+    {
+      "en": "landscape",
+      "zh": "风景",
+      "max_en": 0.2719673812389374,
+      "max_fp32": 0.26751360297203064,
+      "max_int8": 0.26943111419677734,
+      "ov_en_fp32": 3,
+      "ov_en_int8": 3,
+      "ov_fp32_int8": 4,
+      "top1_same_fp_i8": true
+    },
+    {
+      "en": "insects",
+      "zh": "昆虫",
+      "max_en": 0.247625470161438,
+      "max_fp32": 0.2503787875175476,
+      "max_int8": 0.2511664032936096,
+      "ov_en_fp32": 5,
+      "ov_en_int8": 5,
+      "ov_fp32_int8": 5,
+      "top1_same_fp_i8": true
+    }
+  ],
+  "fp32_mb": 540.650752,
+  "int8_mb": 135.548548
+}

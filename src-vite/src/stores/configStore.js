@@ -196,9 +196,15 @@ export const useConfigStore = defineStore('configStore', {
 
       // image search settings
       imageSearch: {
-        model: 0,                  // 0: default English-only model, 1: multilingual model
-        thresholdIndex: 3,         // image search threshold index (default is Low)
-        limit: 1000,               // image search limit
+        // 0: bundled bilingual text (resources int8 EN+CN). 1 reserved / cloud override observation.
+        model: 0,
+        // Default High (1 → thr 0.24): abs floor thr*0.85=0.204, thr_cap 40.
+        // Histogram-calibrated after owner search_similar logs (2026-07-23): absent
+        // concepts max≈0.21 so Low (0.16) floods false positives; VH (0.28) is optional.
+        // Existing installs keep their saved index until user changes Settings.
+        thresholdIndex: 1,
+        // Ranked top-K after floor (host soft-caps at 200). 1000 dumped half-library noise.
+        limit: 50,
       },
       
       // face recognition settings
@@ -213,11 +219,17 @@ export const useConfigStore = defineStore('configStore', {
   }),
 
   getters: {
-    // Image search cosine-similarity floors (higher = stricter, fewer results).
-    // Tuned for local CLIP figure–ground range (~0.2–0.4 typical positive hits).
-    // Old [0.8, 0.6, 0.4, 0.25] made Very High/High effectively empty for text search.
+    // Image search settings_thr (higher = stricter).
+    // Text search primary cut = max(0.16, thr*0.85); thr_cap VH30/H40/M50/L200.
+    // Similar-from-file (image→image) uses a separate host ladder (floors ~0.62–0.88, caps 12–100)
+    // because CLIP image-image scores sit far above text-image. Same UI index for both.
+    // Relative top1*0.85 is empty-fallback only for text. Smart tags share the text ladder.
+    // Calibrated 2026-07-23 from owner search_similar histograms (~100–300 embeds):
+    //   strong (bird/landscape) max ≈ 0.25–0.28; >0.28 rare; nothing useful >0.30
+    //   concept tags (portrait/family w/ people) max ≈ 0.23–0.26
+    //   absent concept max ≈ 0.21 (empty is correct)
     // [Very High, High, Medium, Low]
-    imageSearchThresholds: () => [0.40, 0.34, 0.28, 0.22],
+    imageSearchThresholds: () => [0.28, 0.24, 0.20, 0.16],
     
     // Cluster threshold values: cosine distance (lower = stricter, higher = looser)
     // [Very High, High, Medium, Low]
@@ -382,13 +394,21 @@ export const useConfigStore = defineStore('configStore', {
     // image search settings
     setImageSearchModel(model) {
       const n = Number(model);
-      this.settings.imageSearch.model = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+      // Product: bundled bilingual is 0. Value 1 only if cloud Multilingual path is used later.
+      if (!Number.isFinite(n)) {
+        this.settings.imageSearch.model = 0;
+        return;
+      }
+      this.settings.imageSearch.model = n === 1 ? 1 : 0;
     },
     setImageSearchThresholdIndex(imageSearchThresholdIndex) {
-      this.settings.imageSearch.thresholdIndex = imageSearchThresholdIndex;
+      // HTML <select> / event payload may be string; host thr ladder needs a numeric index.
+      const n = Number(imageSearchThresholdIndex);
+      this.settings.imageSearch.thresholdIndex = Number.isFinite(n) ? n : 1;
     },
     setImageSearchLimit(imageSearchLimit) {
-      this.settings.imageSearch.limit = imageSearchLimit;
+      const n = Number(imageSearchLimit);
+      this.settings.imageSearch.limit = Number.isFinite(n) && n > 0 ? n : 50;
     },
 
     // face recognition settings

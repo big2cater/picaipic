@@ -2,7 +2,7 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-22 (audit packs + face-cluster ANN plan)._
+_Last reviewed: 2026-07-24 (smart albums UX + smart tags 6-bucket people/pets prompts + default High thr)._
 
 | Pattern | Use when |
 |---------|----------|
@@ -33,4 +33,8 @@ _Last reviewed: 2026-07-22 (audit packs + face-cluster ANN plan)._
 | [change-media-badges.md](change-media-badges.md) | Configurable thumbnail media-info badges (format/ISO/shutter/…) |
 | [settings-cross-window-sync.md](settings-cross-window-sync.md) | Main↔settings Pinia emit/listen hydrate gate and object equal-noop setters |
 | [change-viewer-background.md](change-viewer-background.md) | Image/quick viewer canvas background modes + B shortcut |
-| [change-ai-search-filters.md](change-ai-search-filters.md) | AI/similar/filename search file-type filter + result section headers |
+| [change-ai-search-filters.md](change-ai-search-filters.md) | AI/similar/filename search file-type filter, result headers, text vs image-image ranking floors, free-text template, embed ladder |
+| [change-smart-tags.md](change-smart-tags.md) | CLIP smart-tag categories, short prompts, smart-tag threshold |
+| [change-image-search-model.md](change-image-search-model.md) | CLIP B/32 vision + bilingual int8 text default (Track C); SigLIP Track B probe; B0 abandoned |
+| [../../docs/guide/altclip-phase0-probe.md](../../docs/guide/altclip-phase0-probe.md) | Track C bilingual text Phase 0 + product C (no reindex) |
+| [../../docs/guide/siglip2-phase0-probe.md](../../docs/guide/siglip2-phase0-probe.md) | SigLIP2 ONNX Phase 0 probe results (no product vision default change) |

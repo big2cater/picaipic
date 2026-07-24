@@ -56,6 +56,9 @@ pub const VIDEOS: &[&str] = &[
 pub const AI_TEXT_MODEL: &str = "text_model.onnx";
 pub const AI_VISION_MODEL: &str = "vision_model.onnx";
 pub const AI_TOKENIZER: &str = "tokenizer.json";
+/// Longest edge for CLIP embed source (before final 224 square). Shared by JPEG
+/// scaled decode, generic open+thumbnail, and RAW LibRaw preview sizing.
+pub const EMBED_SOURCE_MAX_EDGE: u32 = 1024;
 
 // Face Recognition Constants
 
@@ -83,3 +86,12 @@ pub const CLUSTER_BLOCK_SIZE: usize = 2048;
 pub const CLUSTER_ANN_EF_SEARCH: usize = 120;
 /// HNSW `efConstruction` — higher = better graph quality / slower build.
 pub const CLUSTER_ANN_EF_CONSTRUCTION: usize = 200;
+
+// Image-search ANN (exact matrix for smaller libraries)
+/// Below this embed count, AI search scores the full in-memory matrix (rayon).
+/// At/above: HNSW candidate retrieval + exact cosine rerank (`instant-distance`).
+pub const IMAGE_SEARCH_ANN_MIN_N: usize = 8000;
+pub const IMAGE_SEARCH_ANN_EF_SEARCH: usize = 120;
+pub const IMAGE_SEARCH_ANN_EF_CONSTRUCTION: usize = 200;
+/// How many HNSW neighbors to pull before exact rerank (covers thr_cap 200 + headroom).
+pub const IMAGE_SEARCH_ANN_CANDIDATES: usize = 500;

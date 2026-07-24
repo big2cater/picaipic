@@ -424,7 +424,7 @@ pub fn is_jpeg_path(file_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn decode_scaled_jpeg_image(
+pub(crate) fn decode_scaled_jpeg_image(
     file_path: &str,
     _orientation: i32,
     thumbnail_size: u32,
@@ -448,6 +448,51 @@ fn decode_scaled_jpeg_image(
             Ok(None) // Fallback to standard decode
         }
     }
+}
+
+fn cap_longest_edge(img: DynamicImage, max_edge: u32) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    if w.max(h) <= max_edge {
+        img
+    } else {
+        img.thumbnail(max_edge, max_edge)
+    }
+}
+
+/// Load pixels for CLIP embedding **outside** the AiEngine mutex.
+/// - RAW: LibRaw / embedded preview at `EMBED_SOURCE_MAX_EDGE`
+/// - JPEG: libjpeg-turbo scaled decode (no full-res materialize)
+/// - other: open + longest-edge cap
+/// Returns (image, source label for diagnostics).
+pub fn load_image_for_clip_embed(
+    file_path: &str,
+    file_type: i64,
+    orientation: i32,
+) -> Result<(DynamicImage, &'static str), String> {
+    let edge = crate::t_common::EMBED_SOURCE_MAX_EDGE;
+
+    if file_type == 3 {
+        match get_raw_thumbnail(file_path, orientation, edge) {
+            Ok(Some(jpeg_bytes)) => {
+                let img = image::load_from_memory(&jpeg_bytes)
+                    .map_err(|e| format!("Failed to decode RAW preview for embed: {e}"))?;
+                return Ok((cap_longest_edge(img, edge), "raw_preview"));
+            }
+            Ok(None) => return Err("raw preview unavailable".into()),
+            Err(e) => return Err(e),
+        }
+    }
+
+    if is_jpeg_path(file_path) {
+        if let Some(img) = decode_scaled_jpeg_image(file_path, orientation, edge)? {
+            let img = apply_orientation(img, orientation);
+            return Ok((cap_longest_edge(img, edge), "jpeg_scaled"));
+        }
+    }
+
+    let img = image::open(file_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    let img = apply_orientation(img, orientation);
+    Ok((cap_longest_edge(img, edge), "original_capped"))
 }
 
 pub(crate) fn resize_dynamic_image_to_jpeg(

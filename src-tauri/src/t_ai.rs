@@ -3,7 +3,7 @@
  * Handles ONNX Runtime sessions and model inference.
  */
 use crate::t_common;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use ndarray::{Array, Array4};
 use ort::{
     inputs,
@@ -22,8 +22,15 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
-use tokenizers::Tokenizer;
+use tokenizers::{
+    TruncationDirection, TruncationParams, TruncationStrategy, Tokenizer,
+};
 use tokio::io::AsyncWriteExt;
+
+/// CLIP-aligned bilingual text tower max length (bundled int8 + cloud pack).
+const MULTILINGUAL_TEXT_MAX_LEN: usize = 128;
+/// Product CLIP embedding width (vision + aligned text projection).
+const CLIP_EMBED_DIM: usize = 512;
 
 pub struct AiEngine {
     text_model: Option<Session>,
@@ -33,12 +40,19 @@ pub struct AiEngine {
 }
 
 const AI_INTRA_THREADS: usize = 2;
+// CLIP-B/32-aligned bilingual text (Track C) — self-hosted dynamic int8 on picaipic-binaries.
+// Asset names on release tag `models` (not the local install filenames).
 const MULTILINGUAL_TEXT_MODEL_URL: &str =
-    "https://github.com/big2cater/picaipic-binaries/releases/download/models/text_model.onnx";
+    "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-int8.onnx";
 const MULTILINGUAL_TOKENIZER_URL: &str =
-    "https://github.com/big2cater/picaipic-binaries/releases/download/models/tokenizer.json";
+    "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-tokenizer.json";
 const MULTILINGUAL_RELEASE_API_URL: &str =
     "https://api.github.com/repos/big2cater/picaipic-binaries/releases/tags/models";
+/// Expected sha256 of self-hosted int8 text tower (Phase 0 quantize_dynamic).
+const MULTILINGUAL_TEXT_MODEL_SHA256: &str =
+    "50357311fe7b8e06afcaab355e0147291bbc47db869b8ec0671b3e4b2bfa248e";
+const MULTILINGUAL_TOKENIZER_SHA256: &str =
+    "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088";
 static MULTILINGUAL_MODEL_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,6 +75,16 @@ impl ImageSearchTextModel {
             Self::Default => 0,
             Self::Multilingual => 1,
         }
+    }
+}
+
+/// Old sentence-embedding packs without CLIP projection (wrong space). Kept for error matching.
+pub const ERR_MULTILINGUAL_TEXT_ONLY_DISABLED: &str =
+    "MULTILINGUAL_TEXT_ONLY_DISABLED: text tower is not CLIP-B/32-aligned (missing sentence_embedding 512-d). Stay on default model or re-download the bilingual pack.";
+
+pub fn assert_text_model_activatable(model: ImageSearchTextModel) -> Result<(), String> {
+    match model {
+        ImageSearchTextModel::Default | ImageSearchTextModel::Multilingual => Ok(()),
     }
 }
 
@@ -104,7 +128,24 @@ impl AiEngine {
         }
 
         if self.text_model.is_none() {
-            self.set_text_model(app, ImageSearchTextModel::Default)?;
+            // Product default: bundled resources text is CLIP-aligned bilingual int8 (EN+CN).
+            // Observation period: optional app-data Multilingual re-download may override via settings.
+            // Legacy EN-only CLIP text is no longer shipped in resources (kept on picaipic-binaries / probe backup).
+            if Self::is_multilingual_model_available(app) {
+                match self.set_text_model(app, ImageSearchTextModel::Multilingual) {
+                    Ok(()) => println!("Text tower: app-data bilingual (CLIP-aligned)"),
+                    Err(e) => {
+                        eprintln!(
+                            "App-data bilingual text failed ({e}); trying bundled bilingual text"
+                        );
+                        self.set_text_model(app, ImageSearchTextModel::Default)?;
+                        println!("Text tower: bundled bilingual (CLIP-aligned int8)");
+                    }
+                }
+            } else {
+                self.set_text_model(app, ImageSearchTextModel::Default)?;
+                println!("Text tower: bundled bilingual (CLIP-aligned int8)");
+            }
         }
 
         println!("AI Models Loaded Successfully!");
@@ -137,8 +178,30 @@ impl AiEngine {
             .map_err(|e| format!("Failed to resolve resource path: {}", e))
     }
 
+    /// CLIP-aligned bilingual text pack (no vision). Prefer int8 subdir when present.
     fn multilingual_model_dir(_app: &AppHandle) -> Result<PathBuf, String> {
-        crate::t_config::get_app_data_dir().map(|dir| dir.join("models").join("multilingual"))
+        crate::t_config::get_app_data_dir().map(|dir| {
+            dir.join("models")
+                .join("image-search")
+                .join("clip-vit-b32-multilingual-v1-text")
+        })
+    }
+
+    /// Prefer `…-int8` install when both exist (smaller download / Phase 0 preferred).
+    fn multilingual_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
+        let base = Self::multilingual_model_dir(app)?;
+        let int8 = base.with_file_name(format!(
+            "{}-int8",
+            base.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("clip-vit-b32-multilingual-v1-text")
+        ));
+        let int8_model = int8.join(t_common::AI_TEXT_MODEL);
+        let int8_tok = int8.join(t_common::AI_TOKENIZER);
+        if int8_model.is_file() && int8_tok.is_file() {
+            return Ok(int8);
+        }
+        Ok(base)
     }
 
     fn text_model_paths(
@@ -147,7 +210,7 @@ impl AiEngine {
     ) -> Result<TextModelPaths, String> {
         let model_dir = match model {
             ImageSearchTextModel::Default => Self::resource_model_dir(app)?,
-            ImageSearchTextModel::Multilingual => Self::multilingual_model_dir(app)?,
+            ImageSearchTextModel::Multilingual => Self::multilingual_install_dir(app)?,
         };
 
         Ok(TextModelPaths {
@@ -174,6 +237,7 @@ impl AiEngine {
         app: &AppHandle,
         model: ImageSearchTextModel,
     ) -> Result<(), String> {
+        assert_text_model_activatable(model)?;
         if self.text_model.is_some() && self.text_model_kind == model {
             return Ok(());
         }
@@ -186,13 +250,76 @@ impl AiEngine {
             ));
         }
 
-        let tokenizer = Tokenizer::from_file(&paths.tokenizer)
+        // Bundled Default and Multilingual are both CLIP-aligned bilingual text (int8).
+        // Use multilingual max length; sentence_embedding path is required for both.
+        let max_len = MULTILINGUAL_TEXT_MAX_LEN;
+
+        let mut tokenizer = Tokenizer::from_file(&paths.tokenizer)
             .map_err(|e| format!("Failed to load tokenizer from {:?}: {}", paths.tokenizer, e))?;
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: max_len,
+                strategy: TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: TruncationDirection::Right,
+            }))
+            .map_err(|e| format!("Failed to set tokenizer truncation: {}", e))?;
         let text_model = Self::load_session(&paths.model, "text")?;
 
+        // Require CLIP-aligned 512-d sentence_embedding (not DistilBERT 768 token stream).
+        Self::assert_clip_aligned_text_session(&text_model)?;
+
+        // Trial encode smoke; restore previous session on failure.
+        let prev_tok = self.tokenizer.take();
+        let prev_sess = self.text_model.take();
+        let prev_kind = self.text_model_kind;
         self.tokenizer = Some(tokenizer);
         self.text_model = Some(text_model);
         self.text_model_kind = model;
+
+        if let Err(e) = self.smoke_multilingual_text_tower() {
+            self.tokenizer = prev_tok;
+            self.text_model = prev_sess;
+            self.text_model_kind = prev_kind;
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    fn assert_clip_aligned_text_session(session: &Session) -> Result<(), String> {
+        let has_sentence = session.outputs.iter().any(|o| {
+            let n = o.name.to_ascii_lowercase();
+            n == "sentence_embedding" || n == "sentence_embeddings" || n == "text_embeds"
+        });
+        if !has_sentence {
+            return Err(format!(
+                "{} (no sentence_embedding/text_embeds output)",
+                ERR_MULTILINGUAL_TEXT_ONLY_DISABLED
+            ));
+        }
+        Ok(())
+    }
+
+    /// Encode short EN+ZH probes and require 512-d finite vectors.
+    fn smoke_multilingual_text_tower(&mut self) -> Result<(), String> {
+        for q in ["a photo of a bird", "一只鸟"] {
+            let emb = self.encode_text(q)?;
+            if emb.len() != CLIP_EMBED_DIM {
+                return Err(format!(
+                    "Multilingual smoke failed: dim {} != {} for query {:?}",
+                    emb.len(),
+                    CLIP_EMBED_DIM,
+                    q
+                ));
+            }
+            if !emb.iter().all(|x| x.is_finite()) {
+                return Err(format!(
+                    "Multilingual smoke failed: non-finite embedding for {:?}",
+                    q
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -200,14 +327,61 @@ impl AiEngine {
         self.text_model.is_some() && self.vision_model.is_some() && self.tokenizer.is_some()
     }
 
+    /// Normalize free-text for CLIP: short bare labels → `a photo of a {label}`.
+    /// Leaves longer phrases / already-templated prompts / CJK free-text alone.
+    pub fn normalize_clip_text_query(text: &str) -> String {
+        let t = text.trim();
+        if t.is_empty() {
+            return String::new();
+        }
+        let lower = t.to_ascii_lowercase();
+        // Already CLIP-style or descriptive English.
+        if lower.starts_with("a photo of")
+            || lower.starts_with("a close ")
+            || lower.starts_with("an image of")
+            || lower.starts_with("a picture of")
+        {
+            return t.to_string();
+        }
+        // Multi-word / long free text: keep as-is (smart tags already short-templated).
+        let word_count = t.split_whitespace().count();
+        if word_count > 3 || t.chars().count() > 32 {
+            return t.to_string();
+        }
+        // Bare short EN label (letters/digits/hyphen/space only): wrap.
+        let is_simple_latin = t.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '-' || c == '\''
+        });
+        if is_simple_latin && word_count >= 1 {
+            // "a bird" / "an insect" already have an article → "a photo of a bird".
+            if lower.starts_with("a ")
+                || lower.starts_with("an ")
+                || lower.starts_with("the ")
+            {
+                return format!("a photo of {t}");
+            }
+            // Bare "bird" / "insect": choose a/an for the first letter.
+            let first = lower.chars().next().unwrap_or('x');
+            let art = if matches!(first, 'a' | 'e' | 'i' | 'o' | 'u') {
+                "an"
+            } else {
+                "a"
+            };
+            return format!("a photo of {art} {t}");
+        }
+        // CJK / mixed: do not invent English wrappers.
+        t.to_string()
+    }
+
     pub fn encode_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
         if !self.is_loaded() {
             return Err("AI models not loaded".to_string());
         }
 
+        let text = Self::normalize_clip_text_query(text);
         let tokenizer = self.tokenizer.as_ref().unwrap();
         let encoding = tokenizer
-            .encode(text, true)
+            .encode(text.as_str(), true)
             .map_err(|e| format!("Tokenization error: {}", e))?;
 
         let input_ids = encoding.get_ids();
@@ -248,9 +422,14 @@ impl AiEngine {
         }
         .map_err(|e| format!("Inference error: {}", e))?;
 
-        let (embedding, first_token_only) = if let Some(vals) = outputs.get("pooler_output") {
+        // Prefer projected CLIP-space vectors. Never use token_embeddings (often 768).
+        let (embedding, first_token_only) = if let Some(vals) = outputs.get("sentence_embedding") {
+            (vals, false)
+        } else if let Some(vals) = outputs.get("sentence_embeddings") {
             (vals, false)
         } else if let Some(vals) = outputs.get("text_embeds") {
+            (vals, false)
+        } else if let Some(vals) = outputs.get("pooler_output") {
             (vals, false)
         } else if let Some(vals) = outputs.get("last_hidden_state") {
             (vals, true)
@@ -258,7 +437,15 @@ impl AiEngine {
             (&outputs[0], true)
         };
 
-        Self::extract_text_embedding(embedding, first_token_only)
+        let emb = Self::extract_text_embedding(embedding, first_token_only)?;
+        if emb.len() != CLIP_EMBED_DIM {
+            return Err(format!(
+                "Text embedding dim {} != {} (use sentence_embedding, not token_embeddings)",
+                emb.len(),
+                CLIP_EMBED_DIM
+            ));
+        }
+        Ok(emb)
     }
 
     fn extract_text_embedding(
@@ -288,13 +475,16 @@ impl AiEngine {
         Ok(embedding_data.to_vec())
     }
 
+    /// Path encode (legacy entry). Prefer `load_image_for_clip_embed` +
+    /// `encode_image_from_dynamic` so I/O stays outside the engine lock.
+    #[allow(dead_code)]
     pub fn encode_image(&mut self, image_path: &str) -> Result<Vec<f32>, String> {
         if !self.is_loaded() {
             return Err("AI models not loaded".to_string());
         }
-
-        let image_input = self.preprocess_image(image_path)?;
-        self.run_vision_model(image_input)
+        // file_type 1: JPEG scaled / open+cap; orientation default 1
+        let (img, _) = crate::t_image::load_image_for_clip_embed(image_path, 1, 1)?;
+        self.encode_image_from_dynamic(img)
     }
 
     pub fn encode_image_from_bytes(&mut self, image_bytes: &[u8]) -> Result<Vec<f32>, String> {
@@ -304,8 +494,15 @@ impl AiEngine {
 
         let img = image::load_from_memory(image_bytes)
             .map_err(|e| format!("Failed to load image from memory: {}", e))?;
-        let image_input = self.preprocess_dynamic_image(img)?;
+        self.encode_image_from_dynamic(img)
+    }
 
+    /// Encode a pre-decoded image (preferred: decode/I/O outside AiEngine mutex).
+    pub fn encode_image_from_dynamic(&mut self, img: DynamicImage) -> Result<Vec<f32>, String> {
+        if !self.is_loaded() {
+            return Err("AI models not loaded".to_string());
+        }
+        let image_input = self.preprocess_dynamic_image(img)?;
         self.run_vision_model(image_input)
     }
 
@@ -336,13 +533,20 @@ impl AiEngine {
         Ok(embedding_data.to_vec())
     }
 
-    fn preprocess_image(&self, path: &str) -> Result<Array4<f32>, String> {
-        let img = image::open(path).map_err(|e| format!("Failed to open image: {}", e))?;
-        self.preprocess_dynamic_image(img)
+    /// Cap longest edge before the final 224 square (defense in depth if caller
+    /// did not already apply `t_common::EMBED_SOURCE_MAX_EDGE`).
+    fn downscale_for_embed(img: DynamicImage) -> DynamicImage {
+        let max_edge = t_common::EMBED_SOURCE_MAX_EDGE;
+        let (w, h) = img.dimensions();
+        if w.max(h) <= max_edge {
+            return img;
+        }
+        img.thumbnail(max_edge, max_edge)
     }
 
     fn preprocess_dynamic_image(&self, img: DynamicImage) -> Result<Array4<f32>, String> {
-        // resize to 224x224
+        let img = Self::downscale_for_embed(img);
+        // Final square for CLIP (Triangle ≈ product / offline compare BILINEAR)
         let img = img.resize_exact(224, 224, image::imageops::FilterType::Triangle);
         let rgb_img = img.to_rgb8();
 
@@ -408,14 +612,42 @@ async fn get_release_asset_total_size(
     let assets = value.get("assets")?.as_array()?;
     let mut total_size = 0u64;
 
-    for (_, filename, _) in files {
-        let asset = assets
-            .iter()
-            .find(|asset| asset.get("name").and_then(|name| name.as_str()) == Some(*filename))?;
+    // Match release asset names from URL path (self-hosted names differ from install filenames).
+    for (url, _install_name, _) in files {
+        let asset_name = url.rsplit('/').next()?;
+        let asset = assets.iter().find(|asset| {
+            asset.get("name").and_then(|name| name.as_str()) == Some(asset_name)
+        })?;
         total_size += asset.get("size")?.as_u64()?;
     }
 
     Some(total_size)
+}
+
+fn sha256_hex_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1024 * 256];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_sha256(path: &Path, expected_hex: &str, label: &str) -> Result<(), String> {
+    let got = sha256_hex_file(path)?;
+    if !got.eq_ignore_ascii_case(expected_hex) {
+        return Err(format!(
+            "SHA-256 mismatch for {label}: expected {expected_hex}, got {got}"
+        ));
+    }
+    Ok(())
 }
 
 async fn get_download_total_size(client: &reqwest::Client, files: &[(&str, &str, &str)]) -> u64 {
@@ -472,7 +704,14 @@ async fn clean_multilingual_download_temp_dirs(model_dir: &Path) {
 
 pub async fn download_multilingual_text_model(app: AppHandle) -> Result<(), String> {
     let download_id = MULTILINGUAL_MODEL_DOWNLOAD_ID.fetch_add(1, Ordering::SeqCst) + 1;
-    let model_dir = AiEngine::multilingual_model_dir(&app)?;
+    // Self-hosted pack is dynamic int8 — install under the -int8 directory.
+    let base = AiEngine::multilingual_model_dir(&app)?;
+    let model_dir = base.with_file_name(format!(
+        "{}-int8",
+        base.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip-vit-b32-multilingual-v1-text")
+    ));
     clean_multilingual_download_temp_dirs(&model_dir).await;
     let temp_dir = model_dir.with_extension(format!("download.{}", download_id));
     match tokio::fs::remove_dir_all(&temp_dir).await {
@@ -592,6 +831,22 @@ pub async fn download_multilingual_text_model(app: AppHandle) -> Result<(), Stri
     ensure_current_multilingual_download(download_id, &temp_dir)?;
     let temp_text_model_path = temp_dir.join(t_common::AI_TEXT_MODEL);
     let temp_tokenizer_path = temp_dir.join(t_common::AI_TOKENIZER);
+    if let Err(e) = verify_sha256(
+        &temp_text_model_path,
+        MULTILINGUAL_TEXT_MODEL_SHA256,
+        "text_model.onnx",
+    ) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(e);
+    }
+    if let Err(e) = verify_sha256(
+        &temp_tokenizer_path,
+        MULTILINGUAL_TOKENIZER_SHA256,
+        "tokenizer.json",
+    ) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(e);
+    }
     Tokenizer::from_file(&temp_tokenizer_path).map_err(|e| {
         let _ = std::fs::remove_dir_all(&temp_dir);
         format!("Downloaded tokenizer is invalid: {}", e)
@@ -634,4 +889,20 @@ pub async fn cancel_multilingual_text_model_download(app: AppHandle) -> Result<(
     let model_dir = AiEngine::multilingual_model_dir(&app)?;
     clean_multilingual_download_temp_dirs(&model_dir).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod multilingual_gate_tests {
+    use super::*;
+
+    #[test]
+    fn default_text_model_is_allowed() {
+        assert!(assert_text_model_activatable(ImageSearchTextModel::Default).is_ok());
+    }
+
+    #[test]
+    fn multilingual_aligned_is_allowed_at_gate() {
+        // File/session smoke still required at set_text_model; gate only allows the variant.
+        assert!(assert_text_model_activatable(ImageSearchTextModel::Multilingual).is_ok());
+    }
 }

@@ -1620,15 +1620,12 @@ export async function generateEmbedding(fileId) {
 export async function searchSimilarImages(params) {
   try {
     if (params?.searchText) {
+      // Bundled resources text is bilingual int8 (model 0). Ensure host session is loaded.
       try {
-        await setImageSearchModel(config.settings.imageSearch?.model || 0);
-      } catch (error) {
-        if (Number(config.settings.imageSearch?.model || 0) !== 1) {
-          throw error;
-        }
-        console.warn('Falling back to default image search model:', error);
-        config.settings.imageSearch.model = 0;
         await setImageSearchModel(0);
+      } catch (error) {
+        console.warn('Failed to ensure text model session:', error);
+        throw error;
       }
     }
     const results = await invoke('search_similar_images', { params });
@@ -2081,9 +2078,9 @@ export async function listenIndexProgress(callback) {
 
 // deduplication
 
-// start deduplication scan
-export async function dedupStartScan(params = null) {
-  return await invoke('dedup_start_scan', { params });
+// start deduplication scan (mode: 'exact' | 'similar')
+export async function dedupStartScan(params = null, mode = 'exact') {
+  return await invoke('dedup_start_scan', { params, mode });
 }
 
 // get deduplication scan status
@@ -2106,35 +2103,35 @@ export async function dedupCancelScan() {
   }
 }
 
-// list deduplication groups
-export async function dedupListGroups(page = 1, pageSize = 0, sortBy = 'size_desc', filter = 'all') {
+// list deduplication groups (mode: 'exact' | 'similar')
+export async function dedupListGroups(page = 1, pageSize = 0, sortBy = 'size_desc', filter = 'all', mode = 'exact') {
   try {
-    const groups = await invoke('dedup_list_groups', { page, pageSize, sortBy, filter });
+    const groups = await invoke('dedup_list_groups', { page, pageSize, sortBy, filter, mode });
     return groups;
   } catch (error) {
     console.error('dedupListGroups error:', error);
   }
 }
 
-// get deduplication overview
-export async function dedupGetOverview() {
+// get deduplication overview (mode: 'exact' | 'similar')
+export async function dedupGetOverview(mode = 'exact') {
   try {
-    const overview = await invoke('dedup_get_overview');
+    const overview = await invoke('dedup_get_overview', { mode });
     return overview;
   } catch (error) {
     console.error('dedupGetOverview error:', error);
   }
 }
 
-// set keep file in duplicate group
-export async function dedupSetKeep(groupId, fileId) {
-  return await invoke('dedup_set_keep', { groupId, fileId });
+// set keep file in duplicate group (mode: 'exact' | 'similar')
+export async function dedupSetKeep(groupId, fileId, mode = 'exact') {
+  return await invoke('dedup_set_keep', { groupId, fileId, mode });
 }
 
-// delete selected duplicates
-export async function dedupDeleteSelected(groupIds = null, fileIds = null) {
+// delete selected duplicates (mode: 'exact' | 'similar')
+export async function dedupDeleteSelected(groupIds = null, fileIds = null, mode = 'exact') {
   try {
-    const result = await invoke('dedup_delete_selected', { groupIds, fileIds });
+    const result = await invoke('dedup_delete_selected', { groupIds, fileIds, mode });
     return result;
   } catch (error) {
     console.error('dedupDeleteSelected error:', error);
