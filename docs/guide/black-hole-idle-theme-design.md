@@ -161,12 +161,12 @@ state: () => ({
 
 | themeId | 菜单名 zh / en | Daisy `data-theme`（chrome） |
 |---|---|---|
-| 0 | 默认 / Default | `light`（明亮）或 `dark`（暗黑） |
-| 1 | 复古 / Retro | `retro`（明亮表）/ 暗黑表用接近复古的现有暗色：优先 **`coffee`**（若观感不对可改为 `dim`，实现时二选一并写死） |
-| 2 | CMYK / CMYK | `cmyk`（明亮）；暗黑表无原生 cmyk 时用 **`business`** 或保留 `cmyk`（Daisy 列表里 cmyk 可两模式共用）——**实现钉死一种**并在注释标明 |
-| 3 | 黑洞 / Black hole | **chrome 底座**：明亮用 `light` 或轻量自定义；暗黑用 `dark` / `black` / `abyss` 之一作 UI 控件底色；**宇宙层由 `BlackHoleBackground` 画，不靠 Daisy 内置主题名** |
+| 0 | 默认 / Default | 明亮：`light`；暗黑：`dark` |
+| 1 | 复古 / Retro | 明亮：`retro`；暗黑：**`coffee`**（已锁定） |
+| 2 | CMYK / CMYK | 明亮/暗黑均：**`cmyk`**（已锁定，不变） |
+| 3 | 黑洞 / Black hole | **chrome 底座**：明亮 `light`；暗黑 `dark`（或 `black`，实现时与默认暗色一致即可）；**宇宙层由 `BlackHoleBackground` 画，不靠 Daisy 内置「黑洞」主题名** |
 
-> 说明：用户要的是菜单只留这四项；Daisy 包内其它主题可从 **`app.css` 的 `themes:` 白名单** 收紧到实际用到的名字（减小 CSS），但非必须第一刀。
+> 说明：菜单只留这四项。`app.css` 的 `themes:` 白名单至少保留：`light`、`dark`、`retro`、`coffee`、`cmyk`（及黑洞 chrome 若用 `black`/`abyss` 再列入）；其余可收紧以减小 CSS。
 
 #### 3.3.2 持久化与迁移
 
