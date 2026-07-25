@@ -149,6 +149,7 @@ export const useConfigStore = defineStore('configStore', {
       showCollections: true,     // show collections tray under left sidebar
       autoCheckUpdates: true,      // automatically check for updates
       debugMode: false,           // debug mode
+      blackHoleMode: false, // opt-in black hole ambient + idle gravity (main grid only)
 
       // navigation settings
       folderSort: 0,              // folder_sort_options: 0=name asc, 1=name desc, 2=date asc(oldest first), 3=date desc(newest first)
@@ -279,6 +280,9 @@ export const useConfigStore = defineStore('configStore', {
     },
     setDebugMode(debugMode) {
       this.settings.debugMode = debugMode;
+    },
+    setBlackHoleMode(blackHoleMode) {
+      this.settings.blackHoleMode = !!blackHoleMode;
     },
     setSettingsTabIndex(tabIndex) {
       this.settings.tabIndex = tabIndex;

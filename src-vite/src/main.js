@@ -88,6 +88,9 @@ listen('settings-autoCheckUpdates-changed', (event) => {
 listen('settings-debugMode-changed', (event) => {
   config.setDebugMode(event.payload)
 })
+listen('settings-blackHoleMode-changed', (event) => {
+  config.setBlackHoleMode(event.payload)
+})
 listen('settings-settingsTabIndex-changed', (event) => {
   config.setSettingsTabIndex(event.payload)
 })

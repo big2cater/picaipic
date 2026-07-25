@@ -16,7 +16,8 @@ export const useUIStore = defineStore('ui', {
       blur: 0,
       filter: null,
       resize: null
-    }
+    },
+    isMaximized: false, // main Home window system maximize (black-hole gravity gate)
   }),
   getters: {
     isInputActive: (state) => (name) => {
@@ -87,6 +88,9 @@ export const useUIStore = defineStore('ui', {
         filter: null,
         resize: null
       };
-    }
+    },
+    setMaximized(value) {
+      this.isMaximized = !!value;
+    },
   },
 });
