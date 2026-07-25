@@ -46,7 +46,7 @@
 | 文件 | 改动 |
 |---|---|
 | `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **签名不变**（沿用 v1.4 读 appearance 查活动槽） |
-| `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展字段；`computeCardWarp` 接收 `intensity` 参数输出 6 层参数 |
+| `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展 6 层字段；`computeCardWarp` 加 `intensity` + `swirl` 参数；`cardWarpCss` 返回 struct `{transform, filter, vars}`；新增 `readPrimaryColor()` |
 | `src-vite/src/composables/useGravityWarp.ts` | 写 transform/filter + CSS 变量（`--bh-tear` 等）；性能开关（L4/L5 阈值、>80 张降级） |
 | `src-vite/src/components/BlackHoleBackground.vue` | 不改 shader；`appearance` prop 由 Home 在黑洞时恒传 1 |
 | `src-vite/src/views/Home.vue` | `isBlackHoleTheme` 调用不变（沿用 v1.4 签名）；黑洞时传 `appearance=1`；provide `intensity` |
@@ -85,9 +85,13 @@ I        = dynamicThemeIntensity  (0 / 0.5 / 1 / 1.5)
 
 ### 2.3 组合公式
 
+> **扩展声明（Issue D）**：本节在现有 `computeCardWarp`（`blackHoleMath.ts:54-84`）基础上**扩展**，非重写。保留 `dx/dy/dist/angle/t/s/targetR/orbit/a2/nx/ny` 的求法不动，将 `scale/rotDeg/blur` 替换为带 I 的版本，并新增 `stretchX/stretchY/dispPx/hueShift/ring/tear` 输出。实现时**只跑本节公式一次**，不要既跑基类又套本节（否则 scale 会被套两次）。
+> 另注：基类 `blur` 仅 `t>0.7` 才生效，本节改为 `lerp(0,4,s)*I` 从 `t>0` 就起糊——有意增强径向模糊延展感，非 bug。
+
 ```ts
 // L1 基础位移旋转缩放（乘 I；I=0 时输出空 transform，卡片不动但仍属动态主题）
 // 注：所有 s*I 都钳到 [0,1]，防未来 I 放开后 lerp 越界（建议 8）
+// 注：基类 scale=lerp(1,0.45,t) 用线性 t；本节改用 s=smoothstep(t) 作观感增强，最小 0.5 vs 0.45，眼校即可
 const k = clamp(s * I, 0, 1);
 const tx = (nx - cx) * I;
 const ty = (ny - cy) * I;
@@ -110,23 +114,31 @@ const radialBlur = lerp(0, 4, s) * I;     // I=0 → 0
 const dispPx = lerp(0, 6, s) * I;
 const hueShift = lerp(0, 20, s) * I;
 // L4 启用条件：t>0.5 且 I>0；I>=1.5 时也降档（建议 7）——近黑洞卡多时 drop-shadow 开销大
+// visibleCardCount 由 useGravityWarp 每轮传入（≈ 网格 .bh-card 总数，非"可见数"，作上限保护）
 const useDispersion = t > 0.5 && I > 0 && !(I >= 1.5 && visibleCardCount > 40);
 const filter = `blur(${radialBlur}px) hue-rotate(${hueShift}deg)`
              + (useDispersion
                 ? ` drop-shadow(${dispPx}px 0 0 rgba(255,0,0,0.5)) drop-shadow(${-dispPx}px 0 0 rgba(0,255,255,0.5))`
                 : '');
 
-// L5/L6 通过 CSS 变量驱动伪元素（I=0 时变量为 0，伪元素不可见）
-// useGravityWarp 写入：
-el.style.setProperty('--bh-tear', `${lerp(0, 8, s) * I}px`);
-el.style.setProperty('--bh-tear-op', t > 0.35 && I > 0 ? String(s * I) : '0');
-el.style.setProperty('--bh-ring', String(lerp(0, 0.6, s) * I));
-el.style.setProperty('--bh-primary', primaryColor);
+// L5/L6 CSS 变量（I=0 时为 0/transparent，伪元素不可见）
+// computeCardWarp / cardWarpCss 返回 struct（Issue B），useGravityWarp 负责 el.style.setProperty 落元素
+const vars = {
+  '--bh-tear': `${lerp(0, 8, s) * I}px`,
+  '--bh-tear-op': t > 0.35 && I > 0 ? String(s * I) : '0',
+  '--bh-ring': String(lerp(0, 0.6, s) * I),
+  // --bh-primary 是颜色，由 useGravityWarp 从 readPrimaryColor() 取后单独写入（不在此 struct 内，因与卡片无关、全局同值）
+};
+
+// cardWarpCss 返回：{ transform: string, filter: string, vars: Record<string,string> }
+// useGravityWarp 落元素：el.style.transform = r.transform; el.style.filter = r.filter;
+//   for (const [k,v] of Object.entries(r.vars)) el.style.setProperty(k, v);
+//   el.style.setProperty('--bh-primary', primaryColor);  // 单独写
 ```
 
 > 注：I=0 时 `transform`/`filter` 输出空或单位值（`rotate(0)`、`scale(1,1)`、`blur(0)`），`gravityActive` 仍可为 true（宇宙背景正常转），仅卡片层不动。clear 不由 intensity 触发。
-> `visibleCardCount` 由 `useGravityWarp` 每轮 `querySelectorAll('.bh-card').length` 得到，用于 L4 降档判断。
-> `primaryColor` 来源：`useGravityWarp` 是独立 composable，需自行 `getComputedStyle(document.documentElement).getPropertyValue('--color-primary')` 取（黑洞时 appearance 已钉 1，拿到的是暗色强调色）；与 `BlackHoleBackground.vue` 的 `readPrimary()` 同源逻辑，可抽公共函数或各自读取。建议在 `blackHoleMath.ts` 导出 `readPrimaryColor()` 复用。
+> `visibleCardCount` 由 `useGravityWarp` 每轮 `querySelectorAll('.bh-card').length` 得到（≈ 网格总卡数，非"可见数"，所有缩略图都带 `.bh-card` 类），用于 L4 降档判断。
+> `primaryColor` 来源：`useGravityWarp` 是独立 composable，需自行 `getComputedStyle(document.documentElement).getPropertyValue('--color-primary')` 取（黑洞时 appearance 已钉 1，拿到的是暗色强调色）；与 `BlackHoleBackground.vue` 的 `readPrimary()`（真实存在，`BlackHoleBackground.vue:153-155`）同源逻辑，建议在 `blackHoleMath.ts` 导出 `readPrimaryColor()` 复用。
 
 ### 2.4 伪元素 CSS（`app.css`，`.bh-card` 作用域）
 
@@ -237,26 +249,35 @@ export function setTheme(appearance: number, themeId: number) {
 
 ### 3.3 Settings 主题切换双钉
 
-用户从 Settings 选「黑洞」时，同时写两个槽；**切走时必须清残留槽**（必做，非可选）：
+用户从 Settings 选「黑洞」时，同时写两个槽；**切走时必须清残留槽**（必做，非可选）。改写现有 `currentTheme` computed 的 set（真实名 `currentTheme`，非 `themeModel`）：
 
 ```ts
-// Settings.vue themeModel setter（已有，扩展）
-set themeModel(value) {
-  if (value === THEME_ID.BLACK_HOLE) {
-    config.settings.lightTheme = THEME_ID.BLACK_HOLE;
-    config.settings.darkTheme = THEME_ID.BLACK_HOLE;
-  } else {
-    // 写活动槽；若非活动槽残留 3（曾选黑洞），一并清掉，防翻转 appearance 复活
-    if (config.settings.appearance === 0) {
-      config.settings.lightTheme = value;
-      if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
+// Settings.vue 现有 currentTheme computed（Settings.vue:2223-2230）的 set 扩展
+const currentTheme = computed({
+  get() {
+    return config.settings.appearance === 0
+      ? config.settings.lightTheme
+      : config.settings.darkTheme;
+  },
+  set(value) {
+    if (value === THEME_ID.BLACK_HOLE) {
+      config.settings.lightTheme = THEME_ID.BLACK_HOLE;
+      config.settings.darkTheme = THEME_ID.BLACK_HOLE;
     } else {
-      config.settings.darkTheme = value;
-      if (config.settings.lightTheme === THEME_ID.BLACK_HOLE) config.settings.lightTheme = value;
+      // 写活动槽；若非活动槽残留 3（曾选黑洞），一并清掉，防翻转 appearance 复活
+      if (config.settings.appearance === 0) {
+        config.settings.lightTheme = value;
+        if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
+      } else {
+        config.settings.darkTheme = value;
+        if (config.settings.lightTheme === THEME_ID.BLACK_HOLE) config.settings.lightTheme = value;
+      }
     }
   }
-}
+});
 ```
+
+**为何逻辑能跑通**（顺 3 个 watch 推演）：选黑洞 → set(3) 写 lightTheme=3+darkTheme=3，各自触发 watch(5476/5480) → `setTheme(appearance,3)` → `data-theme='dark'`；切默认(appearance=0) → 写 lightTheme=0 且把残留 darkTheme:3→0，两个 watch 都走 `setTheme(0,0)='light'`，黑洞关；之后再翻 appearance 到 dark → `setTheme(1, darkTheme=0)` → `'dark'`，不复活（残留已清）。算法与真实代码机制严丝合缝。
 
 **为何必做（残留槽复活 bug）**：若不清残留槽，复现路径——选黑洞（lightTheme=3, darkTheme=3）→ 切「默认」（appearance=0 → lightTheme=0，darkTheme 残留 3）→ 此时 `isBlackHole=false`、黑洞关（看似正常）→ 用户在默认主题下翻 appearance 到 dark（select 已解禁）→ 活动槽变 darkTheme=3 → `isBlackHoleTheme` 又返回 true → **黑洞复活**。清残留槽后两槽都干净，翻 appearance 不会复活；且只清残留 3，不破坏 v1.4 的 light/dark 独立主题（正常 retro/cmyk 互不影响）。
 
@@ -384,11 +405,11 @@ settings.general.intensity_options
 | 文件 | 改动 |
 |---|---|
 | `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **签名不变**（沿用 v1.4 读 appearance 查活动槽） |
-| `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展 6 层字段；`computeCardWarp(cx,cy,HX,HY,R_event,R_inf,orbitPhase,intensity)`；`cardWarpCss` 输出 transform+filter+CSS 变量 |
+| `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展 6 层字段；`computeCardWarp(cx,cy,HX,HY,R_event,R_inf,orbitPhase,swirl=12,intensity)`（Issue C：补 swirl 参数）；`cardWarpCss` 返回 struct `{ transform, filter, vars }`（Issue B：CSS 变量由 useGravityWarp 写入元素，非字符串内带）；新增 `readPrimaryColor()` 导出 |
 | `src-vite/src/composables/useGravityWarp.ts` | 消费 `intensity`；写 CSS 变量；L4/L5 阈值开关；>80 张降级 |
 | `src-vite/src/components/BlackHoleBackground.vue` | 不改 shader；props 不变（appearance 由 Home 控） |
 | `src-vite/src/views/Home.vue` | `isBlackHoleTheme` 调用不变（沿用 v1.4）；黑洞时传 `appearance=1`；provide `intensity` |
-| `src-vite/src/views/Settings.vue` | appearance `:disabled="isBlackHole"` + hint；theme 双钉；新增 intensity select（仅动态主题） |
+| `src-vite/src/views/Settings.vue` | appearance `:disabled="isBlackHole"` + hint；改写 `currentTheme` computed set（黑洞双钉+清残留）；新增 intensity select（仅动态主题） |
 | `src-vite/src/stores/configStore.js` | `dynamicThemeIntensity` 字段 + hydrate 默认 1 |
 | `src-vite/src/assets/app.css` | `.bh-card::before` / `::after` 伪元素 |
 | `src-vite/src/locales/en.json` / `zh.json` | `black_hole_appearance_locked`、`dynamic_theme_intensity`、`intensity_options` |
