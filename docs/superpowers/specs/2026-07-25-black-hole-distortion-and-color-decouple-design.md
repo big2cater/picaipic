@@ -126,6 +126,7 @@ el.style.setProperty('--bh-primary', primaryColor);
 
 > 注：I=0 时 `transform`/`filter` 输出空或单位值（`rotate(0)`、`scale(1,1)`、`blur(0)`），`gravityActive` 仍可为 true（宇宙背景正常转），仅卡片层不动。clear 不由 intensity 触发。
 > `visibleCardCount` 由 `useGravityWarp` 每轮 `querySelectorAll('.bh-card').length` 得到，用于 L4 降档判断。
+> `primaryColor` 来源：`useGravityWarp` 是独立 composable，需自行 `getComputedStyle(document.documentElement).getPropertyValue('--color-primary')` 取（黑洞时 appearance 已钉 1，拿到的是暗色强调色）；与 `BlackHoleBackground.vue` 的 `readPrimary()` 同源逻辑，可抽公共函数或各自读取。建议在 `blackHoleMath.ts` 导出 `readPrimaryColor()` 复用。
 
 ### 2.4 伪元素 CSS（`app.css`，`.bh-card` 作用域）
 
@@ -184,7 +185,7 @@ el.style.setProperty('--bh-primary', primaryColor);
 任一条件（idle=false / isMaximized=false / 离开黑洞 / inputStack>0 / 库切换 / document.hidden / reduced-motion）触发 clear：
 - **不含 intensity=0**（I=0 时 `gravityActive` 仍可 true，宇宙背景正常转，仅卡片扭曲层输出空值，不触发 clear）
 - 移除内联 `transform` / `filter` / `will-change`
-- 移除 CSS 变量 `--bh-tear` / `--bh-tear-op` / `--bh-ring` / `--bh-primary`（或置 0）
+- 移除 CSS 变量 `--bh-tear` / `--bh-tear-op` / `--bh-ring`（数值变量置 0）；`--bh-primary` 是颜色，置 `transparent` 或移除（置 0 无效）
 - 停 orbit 与有效增长
 - 依赖 CSS 回到 VirtualScroll 布局位置
 
@@ -215,7 +216,7 @@ export function isBlackHoleTheme(
 
 **调用点**：`Home.vue:275` 现有调用 `isBlackHoleTheme(appearance, light, dark)` 不变。
 
-**可选加固（非必须）**：若担心非 UI 途径的 appearance 变动（如系统深色同步），可在 §3.3 else 分支额外清残留：`if (inactiveSlot === 3) inactiveSlot = value`。本期不实现，留作未来。
+**残留槽清理（必做，见 §3.3）**：单靠「活动槽检测 + 双钉 + appearance 置灰」仍有一条复活路径——选黑洞→切默认（darkTheme 残留 3）→ 翻 appearance 到 dark → 黑洞复活。§3.3 的 setter else 分支必须清掉非活动槽的残留 3，本节标此为**必做**（非可选加固）。
 
 ### 3.2 `setTheme` 黑洞钉暗底座
 
@@ -236,7 +237,8 @@ export function setTheme(appearance: number, themeId: number) {
 
 ### 3.3 Settings 主题切换双钉
 
-用户从 Settings 选「黑洞」时，同时写两个槽：
+用户从 Settings 选「黑洞」时，同时写两个槽；**切走时必须清残留槽**（必做，非可选）：
+
 ```ts
 // Settings.vue themeModel setter（已有，扩展）
 set themeModel(value) {
@@ -244,12 +246,19 @@ set themeModel(value) {
     config.settings.lightTheme = THEME_ID.BLACK_HOLE;
     config.settings.darkTheme = THEME_ID.BLACK_HOLE;
   } else {
-    config.settings.appearance === 0
-      ? config.settings.lightTheme = value
-      : config.settings.darkTheme = value;
+    // 写活动槽；若非活动槽残留 3（曾选黑洞），一并清掉，防翻转 appearance 复活
+    if (config.settings.appearance === 0) {
+      config.settings.lightTheme = value;
+      if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
+    } else {
+      config.settings.darkTheme = value;
+      if (config.settings.lightTheme === THEME_ID.BLACK_HOLE) config.settings.lightTheme = value;
+    }
   }
 }
 ```
+
+**为何必做（残留槽复活 bug）**：若不清残留槽，复现路径——选黑洞（lightTheme=3, darkTheme=3）→ 切「默认」（appearance=0 → lightTheme=0，darkTheme 残留 3）→ 此时 `isBlackHole=false`、黑洞关（看似正常）→ 用户在默认主题下翻 appearance 到 dark（select 已解禁）→ 活动槽变 darkTheme=3 → `isBlackHoleTheme` 又返回 true → **黑洞复活**。清残留槽后两槽都干净，翻 appearance 不会复活；且只清残留 3，不破坏 v1.4 的 light/dark 独立主题（正常 retro/cmyk 互不影响）。
 
 ### 3.4 Settings UI：appearance 置灰
 
@@ -342,6 +351,16 @@ settings: {
 
 外观区顺序：appearance → theme → (dynamic_theme_intensity if dynamic) → black_hole hint if black hole
 
+**`intensityOptions` JS 常量**：`<select>` 的 `v-for="item in intensityOptions"` 需要 `{value, label}[]`，不能直接用纯字符串数组。仿 `appearanceOptions` 模式在 `Settings.vue` 新增：
+
+```ts
+const intensityOptions = computed(() => {
+  const labels = localeMsg.value.settings.general.intensity_options; // ["关","弱","标准","强"]
+  const values = [0, 0.5, 1, 1.5];
+  return labels.map((label: string, i: number) => ({ label, value: values[i] }));
+});
+```
+
 ### 4.6 i18n 新增
 
 ```text
@@ -409,7 +428,8 @@ settings.general.intensity_options
 | 8 | 引力中输入 | 立即回弹（transform/filter/CSS 变量全清） |
 | 9 | 引力中切强度 | 实时生效（下一轮 120ms） |
 | 10 | 切回默认/复古/CMYK | 立即卸宇宙 + clear warp + appearance 解禁 |
-| 10b | 选黑洞→切「默认」(appearance=0) | lightTheme=0、darkTheme 不残留 3；isBlackHole=false；黑洞彻底关（Bug 1 回归） |
+| 10b | 选黑洞→切「默认」(appearance=0) | lightTheme=0、darkTheme 被清成 0（不残留 3）；isBlackHole=false；黑洞彻底关（Bug 1 回归） |
+| 10c | 选黑洞→切默认→翻 appearance 到 dark | isBlackHole 仍 false、宇宙不重载、特效不复活（验证残留槽已清，复活路径堵死） |
 | 11 | 卡片可见数 >80（异常） | L4/L5 跳过，只 L1+L2，不卡顿 |
 | 12 | reduced-motion | 无宇宙动效层、无扭曲 |
 | 13 | 旧配置无 dynamicThemeIntensity | hydrate 填 1，不报错 |
