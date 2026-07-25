@@ -10,6 +10,13 @@
       </div>
     </transition>
 
+    <BlackHoleBackground
+      v-if="showBlackHole"
+      :gravity-active="gravityActive"
+      :effective-elapsed-sec="effectiveElapsedSec"
+      @radii="onHoleRadii"
+    />
+
     <!-- Title Bar -->
     <TitleBar v-if="showDesktopTitleBar" titlebar="PicAiPic" viewName="Home" :icon="iconLogo"/>
 
@@ -171,7 +178,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, defineAsyncComponent, onBeforeUnmount, onMounted, watch, nextTick } from 'vue';
+import { ref, computed, defineAsyncComponent, onBeforeUnmount, onMounted, watch, nextTick, provide } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -183,11 +190,13 @@ import { useUIStore } from '@/stores/uiStore';
 import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex, setImportAiPrompts } from '@/common/api';
+import { useIdle } from '@/composables/useIdle';
 
 // vue components
 import TitleBar from '@/components/TitleBar.vue';
 import TButton from '@/components/TButton.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
+import BlackHoleBackground from '@/components/BlackHoleBackground.vue';
 import iconLogo from '@/assets/images/icon.png';
 
 const Library = defineAsyncComponent(() => import('@/components/Library.vue'));
@@ -249,6 +258,76 @@ const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const uiStore = useUIStore();
+
+const { idle } = useIdle(15000);
+const reducedMotion = ref(false);
+const docHidden = ref(typeof document !== 'undefined' ? document.hidden : false);
+const effectiveElapsedSec = ref(0);
+const holeRadii = ref({ R_event: 0, R_inf: 0 });
+let growthRaf = 0;
+let growthAnchor = 0;
+let growthAccum = 0;
+let reducedMotionMq: MediaQueryList | null = null;
+
+const gravityActive = computed(() =>
+  !!config.settings.blackHoleMode
+  && !!uiStore.isMaximized
+  && idle.value
+  && !reducedMotion.value
+  && !docHidden.value
+  && uiStore.inputStack.length === 0
+  && !isSwitchingLibrary.value
+);
+
+const showBlackHole = computed(
+  () => !!config.settings.blackHoleMode && !reducedMotion.value,
+);
+
+function onHoleRadii(payload: { R_event: number; R_inf: number }) {
+  holeRadii.value = payload;
+}
+
+provide('bhGravityActive', gravityActive);
+provide('bhRadii', holeRadii);
+
+function onVisibilityChange() {
+  docHidden.value = document.hidden;
+}
+
+function applyReducedMotionMq() {
+  reducedMotion.value = !!reducedMotionMq?.matches;
+}
+
+function growthLoop(ts: number) {
+  if (gravityActive.value && !docHidden.value) {
+    if (!growthAnchor) growthAnchor = ts;
+    effectiveElapsedSec.value = growthAccum + (ts - growthAnchor) / 1000;
+  }
+  growthRaf = requestAnimationFrame(growthLoop);
+}
+
+watch(gravityActive, (on, was) => {
+  if (on && !was) {
+    growthAccum = 0;
+    growthAnchor = performance.now();
+    effectiveElapsedSec.value = 0;
+  } else if (!on) {
+    growthAccum = 0;
+    growthAnchor = 0;
+    effectiveElapsedSec.value = 0;
+  }
+});
+
+watch(docHidden, (hidden) => {
+  if (hidden) {
+    if (gravityActive.value && growthAnchor) {
+      growthAccum += (performance.now() - growthAnchor) / 1000;
+      growthAnchor = 0;
+    }
+  } else if (gravityActive.value) {
+    growthAnchor = performance.now();
+  }
+});
 
 // Panel component ref
 const panelRef = ref<any>(null);
@@ -464,6 +543,12 @@ onMounted(async () => {
 
   // Sync scan-time AI PNG prompt import flag with persisted UI setting (default on).
   void setImportAiPrompts(config.settings.importAiPromptsToComments !== false);
+
+  reducedMotionMq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  applyReducedMotionMq();
+  reducedMotionMq.addEventListener?.('change', applyReducedMotionMq);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  growthRaf = requestAnimationFrame(growthLoop);
 });
 
 onBeforeUnmount(() => {
@@ -479,6 +564,11 @@ onBeforeUnmount(() => {
   unlistenAddAlbumRequested = null;
   unlistenEditAlbumRequested?.();
   unlistenEditAlbumRequested = null;
+  if (growthRaf) cancelAnimationFrame(growthRaf);
+  growthRaf = 0;
+  document.removeEventListener('visibilitychange', onVisibilityChange);
+  reducedMotionMq?.removeEventListener?.('change', applyReducedMotionMq);
+  reducedMotionMq = null;
 });
 
 function handleHomeKeyDown(event: KeyboardEvent) {

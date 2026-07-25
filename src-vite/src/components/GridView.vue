@@ -103,7 +103,7 @@
 
 <script setup lang="ts">
 
-import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
+import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick, inject, type Ref, type ComputedRef } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
@@ -112,6 +112,7 @@ import Thumbnail from '@/components/Thumbnail.vue';
 import VirtualScroll from '@/components/VirtualScroll.vue';
 import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColumnLayout, calculateMasonryLayout, type Geometry } from '@/common/layout';
 import { IconCalendarDay, IconCalendarMonth, IconSearch } from '@/common/icons';
+import { useGravityWarp, type RadiiValue } from '@/composables/useGravityWarp';
 
 const props = withDefaults(defineProps<{
   selectedItemIndex: number;
@@ -162,6 +163,16 @@ const uiStore = useUIStore();
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const containerRef = ref<HTMLElement | null>(null);
+const bhGravityActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('bhGravityActive', null);
+const bhRadii = inject<Ref<RadiiValue> | ComputedRef<RadiiValue> | null>('bhRadii', null);
+const gravityActiveFallback = ref(false);
+const radiiFallback = ref<RadiiValue>({ R_event: 0, R_inf: 0 });
+// useGravityWarp needs Ref-like; if inject null (shouldn't under Home), use fallbacks
+useGravityWarp({
+  rootEl: containerRef,
+  gravityActive: (bhGravityActive ?? gravityActiveFallback) as Ref<boolean> | ComputedRef<boolean>,
+  radii: (bhRadii ?? radiiFallback) as Ref<RadiiValue> | ComputedRef<RadiiValue>,
+});
 const scroller = ref<any>(null);
 const columnCount = ref(4);
 const containerWidth = ref(0);
