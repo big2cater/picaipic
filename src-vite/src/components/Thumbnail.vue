@@ -1,7 +1,7 @@
 <template>
   <div
     :class="[
-      'border-2 rounded-box flex flex-col items-center cursor-pointer group',
+      'bh-card border-2 rounded-box flex flex-col items-center cursor-pointer group',
       isTransitionDisabled ? 'transition-none' : 'transition-all ease-in-out duration-300 ',
       config.settings.grid.style === 0 ? 'p-1 w-fit h-fit' : 'w-full h-full',
       isActive && !isTransitionDisabled
