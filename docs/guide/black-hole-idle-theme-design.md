@@ -1,9 +1,10 @@
 # 黑洞主题（Black Hole Idle Theme）设计文档
 
-> 状态：设计稿 v1.3（WebGL 背景档已采纳，待实现）
-> 范围：纯前端（`src-vite`），不触及 Rust / Tauri 命令 / Track C 模型栈 / DaisyUI `data-theme`
-> 目标：可选开启的「黑洞主题」——黑洞居中，平时只作界面氛围背景；当**主窗**最大化且用户空闲 15 秒后，黑洞缓慢变大，引力把**主网格可见照片**拉向事件视界并环绕（不消失、可随时回弹）。
-> 背景渲染：**WebGL 解析近似着色器**（默认）+ **Canvas2D 降级**；照片聚拢仍为 CSS transform（非 WebGL 真透镜）。
+> 状态：设计稿 **v1.4**（主题菜单并入 + 宇宙背景 + WebGL 档，待实现）
+> 范围：纯前端（`src-vite`），不触及 Rust / Tauri 命令 / Track C 模型栈
+> 目标：在 **设置 → 主题** 中选择「黑洞」后启用宇宙+黑洞氛围；主窗最大化且空闲 15 秒后，引力把主网格可见照片拉向事件视界并环绕（不消失、可回弹）。
+> 背景渲染：**宇宙场景 + 中心黑洞**（WebGL 解析近似着色器默认 + Canvas2D 降级）；照片聚拢仍为 CSS transform。
+> **无独立「黑洞主题」开关**；主题列表精简为 **默认 / 复古 / CMYK / 黑洞**。
 
 ---
 
@@ -24,25 +25,35 @@
 |---|---|
 | Canvas2D 慢转盘背景 | **WebGL 解析近似着色器背景**（光子环+吸积盘+轻透镜）+ **Canvas2D 降级档**；照片聚拢仍 CSS |
 
+| v1.3 | v1.4 |
+|---|---|
+| 独立 `blackHoleMode` 开关 | **取消独立开关**；主题下拉里选「黑洞」即启用 |
+| 长主题列表（Daisy 多色） | 主题仅 **默认 / 复古 / CMYK / 黑洞**（明亮/暗黑两套索引表各自 4 项） |
+| 背景偏“单黑洞” | **宇宙场景**（星空/星云）+ 中心黑洞；**配色模式（明亮/暗黑）影响宇宙与盘色** |
+
 ---
 
 ## 1. 已锁定的产品决策
 
 | 决策点 | 结论 |
 |---|---|
-| 形态 | 独立可选「黑洞主题」（opt-in），**非** DaisyUI 主题替换，非默认 |
+| 形态 | **主题菜单中的「黑洞」**（opt-in）；**无**单独 toggle |
+| 主题列表 | 明亮/暗黑各自仅 **4 项**：`默认` / `复古` / `CMYK` / `黑洞`；其余 Daisy 主题从菜单移除 |
+| 默认项 | 明亮默认 = Daisy `light`；暗黑默认 = Daisy `dark`；**非**黑洞 |
 | 黑洞位置 | 屏幕正中央（视口中心，不跟随鼠标） |
-| 作用范围 | **仅主窗 Home 的 `GridView` 缩略图**（含胶片条模式条内卡片） |
+| 宇宙背景 | 选中黑洞主题后：全屏 **宇宙**（星空/淡星云）+ **中心黑洞**（非孤立黑圆） |
+| 配色模式 | **明亮/暗黑**仍用现有 `settings.appearance`；影响 UI chrome 的 `data-theme` **与** 宇宙/盘的调色（见 §5.3） |
+| 作用范围（引力） | **仅主窗 Home 的 `GridView` 缩略图**（含胶片条模式条内卡片） |
 | 不作用 | 侧栏、地图、FileInfo、独立 ImageViewer/Editor/Settings 窗、Content 内嵌预览大图本身 |
-| 黑洞行为 | **禁止静止增长**：触发后缓慢变大（半径/引力范围随有效空闲时长扩张） |
+| 黑洞行为 | **禁止静止增长**：引力触发后缓慢变大（半径/引力范围随有效空闲时长扩张） |
 | 照片结局 | 弯折聚拢在事件视界边缘**环绕**（不消失，`opacity` 保持 1） |
-| 回弹 | 任意输入 / 退出最大化 / 阻塞 UI / 关开关 → 立即清除 transform，CSS 过渡回位 |
-| 生效条件 | **系统窗口最大化**（`uiStore.isMaximized`）**且** 空闲 15 秒 **且** 网格可玩（见 §4） |
-| 平时（未最大化或未空闲） | 开关开着时：黑洞仅作居中静态/慢转氛围背景（WebGL 近似着色器，失败则 Canvas2D），不增长拉照片 |
-| 背景画质 | **默认 WebGL 解析近似**（非 geodesic raytrace）；失败/弱 GPU → **Canvas2D 降级**；照片仍 CSS warp |
-| 阻塞 UI 时 | **不启引力**；**静态黑洞背景仍显示** |
-| 独立大图窗 | 大图窗不挂特效；主窗若仍满足条件可继续引力 |
-| 无障碍 | `prefers-reduced-motion: reduce` 时**整体禁用** |
+| 回弹 | 任意输入 / 退出最大化 / 阻塞 UI / **换离黑洞主题** → 立即清除 transform |
+| 引力生效 | **当前主题为黑洞** 且 **系统窗口最大化** 且 **空闲 15s** 且 网格可玩（见 §4） |
+| 平时（黑洞主题但未最大化/未空闲） | 宇宙+黑洞氛围慢转，不增长、不拉照片 |
+| 背景画质 | **默认 WebGL 解析近似**；失败/弱 GPU → **Canvas2D 宇宙+盘降级**；照片仍 CSS warp |
+| 阻塞 UI 时 | **不启引力**；宇宙背景仍可显示 |
+| 独立大图窗 | 大图窗不挂宇宙层；主窗按自身条件 |
+| 无障碍 | `prefers-reduced-motion: reduce` 时**不挂宇宙/不跑引力**（主题仍可显示为「黑洞」名，但无动效层） |
 
 ---
 
@@ -50,31 +61,35 @@
 
 ```mermaid
 graph TD
-    O[blackHoleMode=true] --> H[Home.vue 挂载 BlackHoleBackground]
-    H --> B[BlackHoleBackground pointer-events:none<br/>WebGL 近似着色器 / Canvas2D 降级]
+    T[主题=黑洞 themeId] --> H[Home.vue 挂载 BlackHoleBackground]
+    A[appearance 明亮/暗黑] --> H
+    A --> ST[setTheme 精简表 data-theme]
+    H --> B[宇宙+黑洞层 pointer-events:none<br/>WebGL / Canvas2D 降级]
     B --> G{gravityActive?}
-    G -->|否| BG[背景模式: 居中慢转 不增长 不拉照片]
-    G -->|是| ACT[引力模式: R_event/R_inf 随有效空闲扩张]
-    ACT --> W[useGravityWarp: GridView 内可见 .bh-card]
-    W -->|任意输入/退出最大化/阻塞| R[移除 transform 弹簧回位]
+    G -->|否| BG[宇宙慢转 黑洞不增长 不拉照片]
+    G -->|是| ACT[引力: R_event/R_inf 扩张]
+    ACT --> W[useGravityWarp: GridView .bh-card]
+    W -->|输入/退出最大化/换主题/阻塞| R[clear transform]
     ACT -->|document.hidden| P[暂停 rAF + 有效时间]
-    O -->|prefers-reduced-motion| X[整体不挂载]
+    T -->|prefers-reduced-motion| X[不挂宇宙层]
 ```
 
 ### 2.1 组件职责
 
 | 单元 | 职责 | 不负责 |
 |---|---|---|
-| `configStore.settings.blackHoleMode` | 持久总开关 | 窗口/空闲/绘制 |
-| `uiStore.isMaximized` | **主窗**系统最大化真相源（**本期新增**，当前 store 无此字段） | 特效；其它窗口最大化 |
-| `TitleBar`（共享） | **仅** `viewName==='Home'` 时同步 `uiStore.isMaximized` | Settings / ImageEditor 的 TitleBar 不得写该字段 |
-| `useIdle` | 全局 15s 空闲（建议在 Home 生命周期内） | 是否最大化 / 是否可玩 |
-| `BlackHoleBackground` | WebGL 着色器背景（光子环+吸积盘+轻透镜，解析近似非 raytrace）+ Canvas2D 降级；半径增长 | 改卡片 DOM |
-| `useGravityWarp` | 消费 `gravityActive` + 半径；节流写 `.bh-card` | 自己拼 `inputStack` / `isSwitchingLibrary` 等源 |
-| `GridView` | warp 查询根 / 传入或注入 `gravityActive` | 组装全局 UI 条件 |
-| `Thumbnail` | **外层 root** 加 `.bh-card`（非 `containerRef`） | 自己算引力；不改内层 layoutStyle |
-| `Home.vue` | 挂背景；**组装 `gravityActive` computed**；把布尔/半径交给子树 | 不进 `App.vue` |
-| `Settings` 外观区 | 开关 + 文案 | 改 `data-theme` |
+| `settings.lightTheme` / `darkTheme` | 主题索引（**0 默认 / 1 复古 / 2 CMYK / 3 黑洞**） | 窗口/空闲 |
+| `isBlackHoleTheme`（派生） | `currentThemeId === 3`（见 §3.3） | 持久第二开关 |
+| `uiStore.isMaximized` | **主窗**系统最大化真相源 | 特效；其它窗口最大化 |
+| `TitleBar`（共享） | **仅** `viewName==='Home'` 时同步 `uiStore.isMaximized` | Settings / ImageEditor 写 store |
+| `setTheme` / `app.css` themes | 精简菜单对应的 Daisy 名；黑洞用约定 base chrome | 画宇宙 |
+| `useIdle` | 全局 15s 空闲（Home 生命周期） | 是否最大化 |
+| `BlackHoleBackground` | **宇宙 + 黑洞** WebGL/Canvas2D；读 appearance 调色；半径增长 | 改卡片 DOM |
+| `useGravityWarp` | 消费 `gravityActive` + 半径；节流写 `.bh-card` | 拼 inputStack / isSwitchingLibrary |
+| `GridView` | warp 查询根 | 组装全局 UI 条件 |
+| `Thumbnail` | **外层 root** `.bh-card` | 自己算引力 |
+| `Home.vue` | 主题=黑洞时挂背景；组装 `gravityActive` | 不进 `App.vue` |
+| `Settings` 外观区 | **仅**配色模式 + **精简主题下拉**（无黑洞 toggle） | 长主题列表 |
 
 ### 2.2 为何挂 Home 而非 App
 
@@ -138,16 +153,46 @@ state: () => ({
    - **卸载**：取消 listen，避免 Settings 短窗泄漏监听（即使守卫不写 store，监听器也只应在需要同步的实例上挂，或统一挂但写 store 仍受 `viewName` 守卫）。
 4. 推荐实现形状：`const syncMaximizedToStore = viewName === 'Home'`；所有读窗状态的路径都走同一 `applyMaximizedState(bool)`，内部 `localRef = bool; if (sync) uiStore.setMaximized(bool)`。
 
-### 3.3 `src-vite/src/stores/configStore.js`
+### 3.3 主题索引与「是否黑洞」（**取代** `blackHoleMode` 开关）
 
-```js
-settings: {
-  // ...existing...
-  blackHoleMode: false, // 黑洞主题总开关；persist: true 已开启
+#### 3.3.1 精简主题表（与 `setTheme` / i18n 同步）
+
+明亮（`appearance === 0`）与暗黑（`appearance === 1`）**各自**索引：
+
+| themeId | 菜单名 zh / en | Daisy `data-theme`（chrome） |
+|---|---|---|
+| 0 | 默认 / Default | `light`（明亮）或 `dark`（暗黑） |
+| 1 | 复古 / Retro | `retro`（明亮表）/ 暗黑表用接近复古的现有暗色：优先 **`coffee`**（若观感不对可改为 `dim`，实现时二选一并写死） |
+| 2 | CMYK / CMYK | `cmyk`（明亮）；暗黑表无原生 cmyk 时用 **`business`** 或保留 `cmyk`（Daisy 列表里 cmyk 可两模式共用）——**实现钉死一种**并在注释标明 |
+| 3 | 黑洞 / Black hole | **chrome 底座**：明亮用 `light` 或轻量自定义；暗黑用 `dark` / `black` / `abyss` 之一作 UI 控件底色；**宇宙层由 `BlackHoleBackground` 画，不靠 Daisy 内置主题名** |
+
+> 说明：用户要的是菜单只留这四项；Daisy 包内其它主题可从 **`app.css` 的 `themes:` 白名单** 收紧到实际用到的名字（减小 CSS），但非必须第一刀。
+
+#### 3.3.2 持久化与迁移
+
+- **删除**（或停止使用）`settings.blackHoleMode` 布尔开关；已落盘的 `true` 在 hydrate 时：
+  - 将当前 appearance 对应的 `lightTheme` 或 `darkTheme` **钳到 3（黑洞）** 一次，然后可忽略该字段。
+- 旧用户 `lightTheme` / `darkTheme` 若 **≥ 4**（旧长列表索引）：**钳到 0（默认）**，避免越界读到 `undefined`。
+- `setTheme(appearance, themeId)` 数组改为长度 4，与上表一致。
+
+#### 3.3.3 派生布尔
+
+```ts
+// Home / Settings / background 共用
+function isBlackHoleTheme(settings): boolean {
+  const id = settings.appearance === 0 ? settings.lightTheme : settings.darkTheme;
+  return Number(id) === 3;
 }
 ```
 
-- Settings 外观区绑定该字段；可按仓库惯例增加 `setBlackHoleMode`。
+- **挂载宇宙层**：`isBlackHoleTheme && !reducedMotion`
+- **不要**再引入第二套 persist 开关。
+
+### 3.4 Settings UI
+
+- **删除**外观区独立「黑洞主题」toggle 行（若分支已加，实现时去掉）。
+- 主题 `<select>` 仅 4 项（i18n `theme_options_light` / `theme_options_dark` 各 4 字符串）。
+- 可选：选中黑洞时在主题行下方一行 hint（原 `black_hole_theme_hint` 文案可复用）。
 
 ---
 
@@ -166,70 +211,68 @@ export function useIdle(ms = 15000) {
 }
 ```
 
-建议在 **Home** 内使用，随 Home 卸载而清理（不要挂在 `App` 或长期存活的无路由壳上）。
+建议在 **Home** 内使用，随 Home 卸载而清理。
 
 ### 4.2 `gravityActive`（**组装点 = Home.vue only**）
 
-逻辑式（语义）：
-
 ```text
 gravityActive =
-  blackHoleMode
+  isBlackHoleTheme          // themeId === 3（当前 appearance 下）
   && uiStore.isMaximized
   && idle
   && !reducedMotion
   && !document.hidden
   && uiStore.inputStack.length === 0
-  && !isSwitchingLibrary   // Home 本地 ref，不在 uiStore
+  && !isSwitchingLibrary
 ```
 
-**作用域硬约束（实现必须遵守）：**
+**作用域硬约束：**
 
 | 符号 | 所在 | 谁可读 |
 |---|---|---|
-| `blackHoleMode` | `configStore.settings` | Home / 任意 |
-| `uiStore.isMaximized` | uiStore（本期新增） | Home |
-| `idle` | `useIdle()` 在 Home 调用的返回值 | Home |
-| `reducedMotion` | Home 内 `matchMedia` ref/computed | Home |
-| `document.hidden` | 浏览器 API；Home 监听 `visibilitychange` 映到 ref，或读即时值 | Home 组装时 |
-| `uiStore.inputStack` | uiStore | Home（用 `length === 0`） |
-| `isSwitchingLibrary` | **`Home.vue` 本地 `ref`，不在 store** | **仅 Home** |
+| `isBlackHoleTheme` | 由 `lightTheme`/`darkTheme`+`appearance` 派生 | Home / 任意 |
+| `uiStore.isMaximized` | uiStore | Home |
+| `idle` | `useIdle()` @ Home | Home |
+| `reducedMotion` | Home `matchMedia` | Home |
+| `document.hidden` | visibility 映射 | Home |
+| `uiStore.inputStack` | uiStore | Home |
+| `isSwitchingLibrary` | **Home 本地 ref** | **仅 Home** |
 
-因此：
-
-1. **`gravityActive` 必须在 `Home.vue` 用 `computed` 组装**（唯一有权同时看见 store 与 `isSwitchingLibrary` 的地方）。
-2. 向下传递方式任选其一（实现选一种写清即可）：
-   - provide/inject（`gravityActive` + 可选 `R_event`/`R_inf`）给 `Content` → `GridView` / background；或
-   - 显式 prop 钻透（若层级可接受）。
-3. **`useGravityWarp` / `GridView` / `BlackHoleBackground` 只消费传入的布尔（与半径）**，**禁止**在 composable 内直接 `useUIStore` 拼 `inputStack`、更禁止假设能读到 `isSwitchingLibrary`。
-4. 进入引力时由消费方或 Home 侧记录 `idleStart`（有效时间基准）；`gravityActive` 下降沿 clear warp；再升沿重新计时。
-5. `document.hidden`：暂停 rAF 与**有效空闲时长**累加（勿用墙上时钟在后台偷跑增长）——暂停逻辑可放在 background/warp 内，但「是否算 grav 激活」仍以 Home 的 computed 为准。
+1. **`gravityActive` 仅在 Home `computed` 组装**。
+2. provide/inject 或 prop 下传布尔 + 半径；warp **只消费**传入值。
+3. 换离主题 id=3 → `gravityActive` false → clear warp + 卸宇宙层。
+4. `document.hidden`：暂停 rAF 与有效空闲时长。
 
 ### 4.3 网格「可玩」边界
 
-| 场景 | 背景 | 引力 |
+| 场景 | 宇宙背景 | 引力 |
 |---|---|---|
-| 开关开、普通浏览 | 有 | 否（除非最大化+空闲+…） |
-| `inputStack.length > 0`（对话框/重命名等） | 有 | 否 |
+| 主题=黑洞，普通浏览 | 有 | 否（除非最大化+空闲+…） |
+| 主题≠黑洞 | 无 | 无 |
+| `inputStack.length > 0` | 有（若主题=黑洞） | 否 |
 | 库切换 `isSwitchingLibrary` | 有 | 否 |
-| Content 胶片/quick view 预览 | 有 | GridView 卡可吸；预览大图不吸 |
+| Content 胶片/quick view | 有 | GridView 卡可吸；预览大图不吸 |
 | 独立 `/image-viewer` | 该窗无 | 主窗按自身条件 |
 | `/settings`、`/image-editor` | 无（未挂 Home） | 无 |
 
 ---
 
-## 5. 黑洞本体：`BlackHoleBackground.vue`（WebGL 着色器 + Canvas2D 降级）
+## 5. 黑洞本体：`BlackHoleBackground.vue`（宇宙 + WebGL / Canvas2D）
 
-- 仅由 **`Home.vue`** 在 `blackHoleMode && !reducedMotion` 时挂载。
+- 仅由 **`Home.vue`** 在 `isBlackHoleTheme && !reducedMotion` 时挂载。
 - `position: fixed; inset: 0; pointer-events: none`；z-index 在网格内容之下、主壳背景之上。
+- **场景内容（必须有宇宙，不只是黑洞）**：
+  - 远景：程序化 **星空**（稳定哈希星点 + 少量闪烁可选极弱）
+  - 中景：淡 **星云/尘埃** 色块或噪声（低对比，勿抢照片）
+  - 近景中心：**事件视界** + **吸积盘**（极坐标、伪多普勒左右不对称）+ **光子环**
+  - 可选：星场轻微 **径向透镜**（屏幕空间，解析近似）
 - **渲染分层（两档）**：
-  - **高画质档（默认，WebGL）**：单个全屏 `<canvas>` + 片元着色器，**无新 npm 依赖**（裸 `getContext('webgl')` / `webgl2` + 内联 GLSL 文本）。绘制：纯黑事件视界 + 发光吸积盘（极坐标盘，两侧亮度不对称的伪多普勒）+ 爱因斯坦/光子环（径向渐变辉光）+ 背景星空轻透镜（屏幕空间径向扭曲）。
-    - **解析近似，非逐像素测地线积分**：不搬 GARGANTUA 的 geodesic raytracer（那才是性能重灾区）；用公式近似拿 ~80% 观感。
-    - **性能三开关（必须）**：① 内部渲染分辨率上限（如 `0.5×` 视口，CSS 放大）；② rAF 低帧率（20–30fps，背景慢转足够）；③ `document.hidden` 暂停 rAF（§4.2）。
-  - **降级档（Canvas2D 圆盘）**：WebGL 不可用 / 初始化失败 / 弱 GPU 检测时回退到 v1.2 的 Canvas 2D 慢转盘，保证功能不崩。
-- 颜色用 `var(--color-primary)` 染色，随 DaisyUI 主题变化。
-- **背景模式**：半径固定 `R0`，吸积盘慢转，无增长、无引力。
-- **引力模式**：视觉半径跟随 `R_event` 增大，可略加强辉光。
+  - **高画质（默认 WebGL）**：全屏 canvas + 片元着色器，**无新 npm 依赖**（裸 WebGL/WebGL2 + 内联 GLSL）。
+    - **解析近似，非 geodesic raytrace**。
+    - **性能三开关**：① 内部分辨率上限（如 `0.5×`）；② 20–30fps；③ `document.hidden` 停 rAF。
+  - **降级（Canvas2D）**：星点 + 径向渐变盘 + 黑圆；WebGL 失败时必走此路。
+- **背景模式**：`R0` 固定，盘/宇宙慢转，无增长、不拉照片。
+- **引力模式**：`R_event` 随有效空闲增大，辉光可略加强；宇宙可略加快视差。
 
 ### 5.1 增长曲线（引力模式）
 
@@ -240,21 +283,32 @@ const R_event = lerp(R_event0, R_eventMax, k);
 const R_inf   = lerp(R_inf0,   R_infMax,   k);
 ```
 
-建议尺度（实现可微调，语义不变）：
-
 - `R0` / `R_event0` ≈ `0.06 * min(vw, vh)`
 - `R_eventMax` ≈ `0.16 * min(vw, vh)`
 - `R_inf0` 略大于 `R_event0`
 - `R_infMax` ≈ `0.92 * Math.hypot(vw, vh) / 2`
 
-半径由 background 算出，经 prop/provide 交给 `useGravityWarp`，避免两套曲线。
+半径由 background 算出，经 provide 交给 `useGravityWarp`。
 
-### 5.2 实现钉点（相对当前分支代码）
+### 5.2 实现钉点（相对当前分支）
 
-- 分支 `feat/black-hole-idle-theme` 已有 Canvas2D 版 `BlackHoleBackground.vue`：**升级为先尝试 WebGL，失败则保留/回退 Canvas2D 路径**，勿拆掉降级。
-- 对外 props/emit 契约保持不变：`gravityActive`、`effectiveElapsedSec`、`emit('radii', { R_event, R_inf })`，避免 Home / warp 二次接线。
-- 弱 GPU 启发式可极简（任选其一即可，勿过度探测）：`fail` on context create；或 `renderer` 字符串含 `SwiftShader` / 软件渲染；或首帧 compile/link 失败。
-- 分辨率缩放只影响 **内部 framebuffer / drawingBuffer**，CSS 仍 `inset:0` 铺满；resize 时重算。
+- 已有 Canvas2D 版：升级为 **WebGL 优先 + Canvas2D 宇宙降级**。
+- props/emit 契约建议保持：`gravityActive`、`effectiveElapsedSec`、`emit('radii', …)`；**新增** prop 或读取 `appearance`（0/1）与 CSS 变量以调色。
+- 弱 GPU：context 失败 / compile 失败 → 降级即可。
+
+### 5.3 配色模式（明亮 / 暗黑）对宇宙层的影响
+
+`settings.appearance` 与黑洞主题**正交**：同一「黑洞」菜单项在两种配色下都可选，但画面不同。
+
+| 维度 | 暗黑（appearance=1，默认更贴宇宙） | 明亮（appearance=0） |
+|---|---|---|
+| 宇宙底板 | 近黑 / 深蓝黑 | 深靛蓝～灰蓝，**略亮**，避免整窗死黑难读 UI |
+| 星点 | 偏冷白、对比高 | 略少/略淡，避免刺眼 |
+| 星云 | 紫/青低饱和 | 更淡的青灰/暖灰雾 |
+| 吸积盘 / 光子环 | 可偏 `primary` + 暖橙一侧伪多普勒 | 仍跟 `--color-primary`，整体亮度抬一点、饱和略收 |
+| UI chrome | `data-theme` 用暗底座（如 `dark`/`black`） | `data-theme` 用亮底座（如 `light`），保证侧栏/按钮可读 |
+
+实现：shader uniforms（如 `uAppearance`、`uPrimaryRgb`）或 2D 路径读 computed style；**切换明亮/暗黑时宇宙层即时换色**，不必重挂组件。
 
 ---
 
@@ -312,7 +366,7 @@ filter    = blur > 0 ? blur(Npx) : none
 
 - `idle === false`
 - `isMaximized === false`
-- `blackHoleMode === false`
+- 离开黑洞主题（`themeId !== 3`）
 - `inputStack.length > 0` / 库切换 / `document.hidden` / reduced-motion
 
 动作：去掉内联 `transform` / `filter` / `will-change`；停 orbit 与有效增长；依赖 CSS 回到 VirtualScroll 布局位置。  
@@ -330,19 +384,22 @@ filter    = blur > 0 ? blur(Npx) : none
 
 | 文件 | 改动 |
 |---|---|
-| `src-vite/src/composables/useIdle.ts` | **新增** |
-| `src-vite/src/composables/useGravityWarp.ts` | **新增** |
-| `src-vite/src/components/BlackHoleBackground.vue` | **新增/升级**（WebGL 着色器 + Canvas2D 降级；props/emit 契约不变） |
-| `src-vite/src/stores/uiStore.js` | **新增** `isMaximized` + `setMaximized`（当前不存在） |
-| `src-vite/src/components/TitleBar.vue` | 初始化 + 窗口监听（**非平凡新增**）；**仅 `viewName==='Home'` 写 store** |
-| `src-vite/src/stores/configStore.js` | `settings.blackHoleMode` |
-| `src-vite/src/views/Home.vue` | 挂 background；**computed 组装 `gravityActive`** 并 provide/下传 |
-| `src-vite/src/components/GridView.vue` | 接入 warp；**只读**传入的 `gravityActive` |
-| `src-vite/src/components/Thumbnail.vue` | **外层 root** 加 `.bh-card`；warp 只打外层，不打 `containerRef` / img |
-| `src-vite/src/views/Settings.vue` | 外观区开关 |
-| `src-vite/src/locales/en.json` / `zh.json` | 文案 |
-| `App.vue` / `Content.vue` | **不作**特效宿主；Content 至多透传 provide（若采用） |
-| `MediaViewer.vue` | **不改**其本地 `isMaximized` |
+| `src-vite/src/common/utils.ts` | `setTheme` 表改为 4 项；导出 `isBlackHoleTheme` / 主题常量（可选） |
+| `src-vite/src/assets/app.css` | `themes:` 白名单可收紧到实际用到的 Daisy 名 |
+| `src-vite/src/locales/en.json` / `zh.json` | `theme_options_*` 仅 4 项；黑洞 hint；**去掉**独立 toggle 长文案或改作 hint |
+| `src-vite/src/stores/configStore.js` | 迁移：废 `blackHoleMode`；clamp 旧 theme 索引；setter 不变语义 |
+| `src-vite/src/views/Settings.vue` | 主题下拉 4 项；**删除**黑洞 toggle；可选 hint |
+| `src-vite/src/main.js` | 可删 `settings-blackHoleMode-changed` 监听（若已加） |
+| `src-vite/src/composables/useIdle.ts` | 空闲检测 |
+| `src-vite/src/composables/useGravityWarp.ts` | 卡片 warp |
+| `src-vite/src/components/BlackHoleBackground.vue` | **宇宙+黑洞** WebGL + Canvas2D；appearance 调色 |
+| `src-vite/src/stores/uiStore.js` | `isMaximized` + `setMaximized` |
+| `src-vite/src/components/TitleBar.vue` | 仅 Home 写 maximize |
+| `src-vite/src/views/Home.vue` | `isBlackHoleTheme` 挂载；组装 `gravityActive` |
+| `src-vite/src/components/GridView.vue` | inject warp |
+| `src-vite/src/components/Thumbnail.vue` | 外层 `.bh-card` |
+| `App.vue` / `Content.vue` | 不作宇宙宿主 |
+| `MediaViewer.vue` | 不改本地 maximize |
 
 ---
 
@@ -350,11 +407,11 @@ filter    = blur > 0 ? blur(Npx) : none
 
 | 场景 | CPU | GPU/合成 | 内存 | 说明 |
 |---|---|---|---|---|
-| 未开启 / reduced-motion | 0 | 0 | 0 | 不挂载 |
-| 背景模式（WebGL 高画质） | 极低 | 低~中（受内部分辨率上限 + 低帧率约束） | 低（单 canvas + 着色器） | 解析近似着色器，非逐像素 raytrace |
-| 背景模式（Canvas2D 降级） | 极低 | 低 | 忽略 | 弱 GPU / WebGL 不可用回退 |
-| 引力模式 | 低~中（~120ms 重算） | 中（少量合成层+少数 blur）+ 背景 WebGL | 低 | 仅可见 `.bh-card` |
-| 输入/隐藏/关开关 | 0 | 0 | 0 | clear + 停 rAF |
+| 主题≠黑洞 / reduced-motion | 0 | 0 | 0 | 不挂宇宙层 |
+| 黑洞主题背景（WebGL） | 极低 | 低~中（分辨率上限+低帧率） | 低 | 宇宙+盘，解析近似 |
+| 黑洞主题背景（Canvas2D） | 极低 | 低 | 忽略 | 降级 |
+| 引力模式 | 低~中（~120ms） | 中 + 背景 WebGL | 低 | 仅可见 `.bh-card` |
+| 输入/隐藏/换主题 | 0 | 0 | 0 | clear + 停 rAF |
 
 - **新依赖：无**（裸 WebGL + CSS；不引 three.js）
 - **包体增量：≪ 0.1 MB gzip**（着色器为内联 GLSL 文本）
@@ -364,37 +421,41 @@ filter    = blur > 0 ? blur(Npx) : none
 
 ## 9. i18n 文案 key（建议）
 
-挂在 Settings General / Appearance 一带：
+主题列表（**各 4 项，顺序固定**）：
 
 ```text
-settings.general.black_hole_theme
-  zh: 黑洞主题
-  en: Black hole theme
+settings.general.theme_options_light / theme_options_dark:
+  [0] 默认 / Default
+  [1] 复古 / Retro
+  [2] CMYK / CMYK
+  [3] 黑洞 / Black hole
+```
 
-settings.general.black_hole_theme_desc
-  zh: 窗口最大化且空闲时，引力会聚拢主网格照片（可随时回弹）
-  en: When maximized and idle, gravity gathers main-grid photos (always reversible)
+可选 hint（主题行下，仅当 id=3 时显示）：
 
+```text
 settings.general.black_hole_theme_hint
-  zh: 平时仅作居中氛围背景；最大化后发呆约 15 秒释放引力
-  en: Ambient centered background until ~15s idle while maximized
+  zh: 宇宙氛围背景；窗口最大化后发呆约 15 秒释放引力（可随时回弹）
+  en: Cosmic ambient background; ~15s idle while maximized enables gravity (always reversible)
 
 settings.general.black_hole_theme_reduced_motion
-  zh: 系统已开启「减少动态效果」，此特效不会运行
-  en: Reduced motion is on; this effect stays off
+  zh: 系统已开启「减少动态效果」，宇宙动效不会运行
+  en: Reduced motion is on; cosmic motion stays off
 ```
+
+**删除**独立 toggle 用的 `black_hole_theme` / `_desc` 作为开关标题（可并入 hint）。
 
 ---
 
 ## 10. 实现顺序
 
-1. `uiStore.isMaximized` + `TitleBar`：**仅 Home** 写 store；**新增**挂载初始化 + `onResized`/maximize 监听（非平凡）
-2. `configStore.blackHoleMode` + Settings 外观开关 + i18n
-3. `BlackHoleBackground`：WebGL 高画质 + Canvas2D 降级；背景模式挂 **`Home.vue`**
-4. `useIdle` 于 Home；**Home `computed` 组装 `gravityActive`**（含 inputStack / **本地** `isSwitchingLibrary` / hidden / reduced-motion）并下传
-5. `.bh-card` + `useGravityWarp`（**只消费布尔+半径**）+ **`GridView`**
-6. will-change 清理与 transition 协调；WebGL 三开关（分辨率/帧率/hidden）
-7. 按 §11 自测（含 WebGL 失败回退 Canvas2D）
+1. 主题表瘦身：`setTheme` + i18n 4 项 + 旧索引 clamp 迁移；去掉 `blackHoleMode` UI/监听
+2. `uiStore.isMaximized` + TitleBar 仅 Home 同步（若尚未完成）
+3. `BlackHoleBackground`：宇宙+黑洞，WebGL + Canvas2D，appearance 调色；Home 按 `isBlackHoleTheme` 挂载
+4. `useIdle` + Home `gravityActive`（`isBlackHoleTheme && …`）
+5. `.bh-card` + `useGravityWarp` + GridView
+6. WebGL 三开关 + will-change 清理
+7. §11 自测
 
 ---
 
@@ -402,23 +463,23 @@ settings.general.black_hole_theme_reduced_motion
 
 | # | 步骤 | 期望 |
 |---|---|---|
-| 1 | 默认 | 开关关；无 canvas、无 transform |
-| 2 | 开开关，非最大化 | 居中慢转黑洞（WebGL 或降级 2D）；照片不动 |
-| 2b | 强制 WebGL 失败路径（devtools / 临时 stub） | 自动 Canvas2D 降级；无白屏/无抛死 |
-| 3 | 最大化后立即操作 | 仍仅背景 |
-| 4 | 最大化静止 ≥15s | 黑洞变大；可见网格卡聚拢环绕；不透明消失 |
-| 5 | 引力中键鼠/滚轮 | 立即回弹 |
-| 6 | 引力中还原窗口（按钮 **或** 系统快捷键） | 立即回弹；背景模式；`uiStore.isMaximized===false` |
-| 6b | 在 **Settings 窗** 点最大化 | **不**改变主窗 `uiStore.isMaximized` / 主窗引力 |
-| 7 | `inputStack` 对话框 | 不进或退出引力；背景可仍在 |
-| 7b | 库切换遮罩 `isSwitchingLibrary` | 引力抑制；遮罩结束后按其余条件重算 |
-| 8 | 独立 ImageViewer | 大图窗无黑洞；主窗按 2–6 |
-| 9 | Settings 窗 | 无黑洞层 |
-| 10 | 胶片条 | 条内 GridView 卡可吸；预览 MediaViewer 不吸 |
-| 11 | 虚拟滚动进出视野 | 无错误残留 transform |
-| 12 | reduced-motion | 整关 |
-| 13 | `document.hidden` | 暂停增长/rAF |
-| 14 | 关开关 | 立刻卸背景 + clear |
+| 1 | 主题=默认 | 无宇宙层、无 transform |
+| 2 | 主题菜单仅 4 项 | 默认/复古/CMYK/黑洞 |
+| 3 | 选黑洞，非最大化 | 宇宙+中心黑洞慢转；照片不动 |
+| 3b | 黑洞 + 切换明亮/暗黑 | UI chrome 与宇宙调色都变；仍可读 |
+| 3c | WebGL 失败 | Canvas2D 宇宙降级，不崩 |
+| 4 | 黑洞+最大化后立即操作 | 仅氛围，无引力 |
+| 5 | 黑洞+最大化静止 ≥15s | 增长+卡片环绕；opacity 1 |
+| 6 | 引力中输入 | 立即回弹 |
+| 7 | 引力中还原窗口 | 回弹；氛围保留 |
+| 7b | Settings 窗最大化 | 不污染主窗 `isMaximized` |
+| 8 | 换到默认/复古/CMYK | 立刻卸宇宙 + clear warp |
+| 9 | inputStack / 库切换 | 抑引力；氛围可在 |
+| 10 | ImageViewer / Settings 路由窗 | 无宇宙层 |
+| 11 | 胶片条 | 条内卡可吸；预览不吸 |
+| 12 | 虚拟列表进出 | 无残留 transform |
+| 13 | reduced-motion | 无宇宙动效层 |
+| 14 | 旧配置 themeId 很大 | 启动后钳到默认，不白屏 |
 
 ---
 
@@ -430,7 +491,9 @@ settings.general.black_hole_theme_reduced_motion
 - 黑洞跟随鼠标或多位置
 - 吸侧栏、地图、非 GridView 的 Thumbnail
 - 改 Rust / IPC / DB / AI / 包体模型
-- 将黑洞做成 DaisyUI `data-theme` 包
+- 为黑洞单独做完整 Daisy 主题 token 包（本期仅用现有 light/dark 等作 chrome 底座 + 自绘宇宙）
+- 保留旧版几十项 Daisy 主题菜单（**明确删除**）
+- 独立「黑洞主题」设置开关（**明确删除**，改主题下拉）
 
 ---
 
