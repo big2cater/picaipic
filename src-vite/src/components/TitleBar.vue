@@ -71,10 +71,11 @@
 
 <script setup>
 
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow  } from '@tauri-apps/api/window';
 import { isWin, isMac, isLinux } from '@/common/utils';
+import { useUIStore } from '@/stores/uiStore';
 
 import { 
   IconWinMinus,
@@ -107,6 +108,9 @@ const searchValue = ref('');
 const appWindow = getCurrentWindow();
 const isMaximized = ref(false);
 const showDesktopWindowControls = isWin || isLinux;
+const uiStore = useUIStore();
+const syncMaximizedToStore = props.viewName === 'Home';
+let unlistenResize = null;
 
 watch(() => searchValue.value, (newValue) => { 
   console.log('searchValue:', newValue);
@@ -120,6 +124,23 @@ watch(() => searchValue.value, (newValue) => {
 //   }
 // };
 
+function applyMaximizedState(maximized) {
+  const next = !!maximized;
+  isMaximized.value = next;
+  if (syncMaximizedToStore) {
+    uiStore.setMaximized(next);
+  }
+}
+
+async function refreshMaximized() {
+  try {
+    const maximized = await appWindow.isMaximized();
+    applyMaximizedState(maximized);
+  } catch (e) {
+    console.warn('TitleBar isMaximized failed', e);
+  }
+}
+
 const minimizeWindow = () => {
   appWindow.minimize();
 };
@@ -127,10 +148,10 @@ const minimizeWindow = () => {
 const toggleMaximizeWindow = () => {
   appWindow.isMaximized().then((maximized) => {
     if (maximized) {
-      isMaximized.value = false;
+      applyMaximizedState(false);
       appWindow.unmaximize();
     } else {
-      isMaximized.value = true;
+      applyMaximizedState(true);
       appWindow.maximize();
     }
   });
@@ -139,6 +160,24 @@ const toggleMaximizeWindow = () => {
 const closeWindow = () => {
   appWindow.close();
 };
+
+onMounted(async () => {
+  await refreshMaximized();
+  try {
+    unlistenResize = await appWindow.onResized(() => {
+      void refreshMaximized();
+    });
+  } catch (e) {
+    console.warn('TitleBar onResized failed', e);
+  }
+});
+
+onUnmounted(() => {
+  if (typeof unlistenResize === 'function') {
+    unlistenResize();
+    unlistenResize = null;
+  }
+});
 
 </script>
 
