@@ -64,6 +64,12 @@
                 <option v-for="(option, index) in themeOptions" :key="index" :value="option.value">{{ option.label }}</option>
               </select>
             </div>
+            <div
+              v-if="currentTheme === 3"
+              class="px-1 text-xs text-base-content/30 leading-5"
+            >
+              {{ $t('settings.general.black_hole_theme_hint') }}
+            </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.general.font_size') }}</div>
@@ -71,18 +77,6 @@
               <select class="select select-bordered select-sm min-w-32" v-model="config.settings.scale">
                 <option v-for="(option, index) in scaleOptions" :key="index" :value="option.value">{{ option.label }}</option>
               </select>
-            </div>
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.general.black_hole_theme') }}</div>
-                <div class="text-xs text-base-content/30">{{ $t('settings.general.black_hole_theme_desc') }}</div>
-                <div class="text-xs text-base-content/30">{{ $t('settings.general.black_hole_theme_hint') }}</div>
-              </div>
-              <input
-                type="checkbox"
-                class="toggle toggle-primary toggle-sm shrink-0"
-                v-model="config.settings.blackHoleMode"
-              />
             </div>
           </div>
 
@@ -5516,9 +5510,6 @@ watch(() => config.settings.showToolTip, (newValue) => {
 });
 watch(() => config.settings.showStatusBar, (newValue) => {
   emitSettings('settings-showStatusBar-changed', newValue);
-});
-watch(() => config.settings.blackHoleMode, (newValue) => {
-  emitSettings('settings-blackHoleMode-changed', newValue);
 });
 watch(() => config.settings.autoCheckUpdates, (newValue) => {
   emitSettings('settings-autoCheckUpdates-changed', newValue);

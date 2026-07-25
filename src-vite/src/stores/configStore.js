@@ -140,8 +140,9 @@ export const useConfigStore = defineStore('configStore', {
       // general settings
       language: 'en',             // default language
       appearance: 1,              // appearance (0: light; 1: dark)
-      lightTheme: 0,              // light theme color index
-      darkTheme: 0,               // dark theme color index
+      // Theme index (v1.4): 0 default, 1 retro, 2 cmyk, 3 black hole — see setTheme / isBlackHoleTheme
+      lightTheme: 0,
+      darkTheme: 0,
       scale: 1,                   // root font-size scale
       showButtonText: true,       // show button text
       showToolTip: true,          // show button tooltip
@@ -149,7 +150,6 @@ export const useConfigStore = defineStore('configStore', {
       showCollections: true,     // show collections tray under left sidebar
       autoCheckUpdates: true,      // automatically check for updates
       debugMode: false,           // debug mode
-      blackHoleMode: false, // opt-in black hole ambient + idle gravity (main grid only)
 
       // navigation settings
       folderSort: 0,              // folder_sort_options: 0=name asc, 1=name desc, 2=date asc(oldest first), 3=date desc(newest first)
@@ -243,10 +243,12 @@ export const useConfigStore = defineStore('configStore', {
       this.settings.appearance = appearance;
     },
     setLightTheme(lightTheme) {
-      this.settings.lightTheme = lightTheme;
+      const n = Number(lightTheme);
+      this.settings.lightTheme = (Number.isFinite(n) && n >= 0 && n <= 3) ? Math.floor(n) : 0;
     },
     setDarkTheme(darkTheme) {
-      this.settings.darkTheme = darkTheme;
+      const n = Number(darkTheme);
+      this.settings.darkTheme = (Number.isFinite(n) && n >= 0 && n <= 3) ? Math.floor(n) : 0;
     },
     setScale(scale) {
       this.settings.scale = scale;
@@ -280,9 +282,6 @@ export const useConfigStore = defineStore('configStore', {
     },
     setDebugMode(debugMode) {
       this.settings.debugMode = debugMode;
-    },
-    setBlackHoleMode(blackHoleMode) {
-      this.settings.blackHoleMode = !!blackHoleMode;
     },
     setSettingsTabIndex(tabIndex) {
       this.settings.tabIndex = tabIndex;

@@ -28,7 +28,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 ## Current Project State
 
 **Working:**
-- **Black hole idle theme (2026-07-25, branch `feat/black-hole-idle-theme`):** opt-in `settings.blackHoleMode`; Home-only canvas ambient; main-window maximize via `uiStore.isMaximized` (TitleBar `viewName==='Home'` only); idle 15s gravity warps GridView `.bh-card` thumbnails; reduced-motion / hidden / inputStack / library-switch guards. Design `docs/guide/black-hole-idle-theme-design.md` (v1.3); plan `docs/superpowers/plans/2026-07-25-black-hole-idle-theme.md`. Manual QA still needed on maximized idle app run.
+- **Black hole idle theme (2026-07-25, branch `feat/black-hole-idle-theme`, design v1.4):** theme menu only **Default / Retro / CMYK / Black hole** (`coffee` dark retro, `cmyk` both modes); no separate toggle — `themeId===3` enables cosmos+black-hole layer (WebGL analytical shader, Canvas2D fallback, appearance-tinted); Home-only; maximize via `uiStore.isMaximized` (TitleBar Home only); idle 15s CSS gravity on GridView `.bh-card`. Design `docs/guide/black-hole-idle-theme-design.md`; plan `docs/superpowers/plans/2026-07-25-black-hole-idle-theme.md`. Manual QA still needed.
 - Tauri 2/Rust desktop host with Vue 3 frontend for Windows and Linux.
 - **v1.1.0** app/docs versions aligned; tag `v1.1.0` has a **private draft** multi-arch release (Linux deb/AppImage + Windows x64/arm64 MSI + updater latest JSON on the Release assets). Not published; keep private until the owner decides.
 - Release CI publishes installers to **GitHub Release assets** (not Actions artifact storage) after quota failures; PR builds use best-effort artifact upload — see `patterns/release-build.md`.

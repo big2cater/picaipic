@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core'
 import router from '@/common/router'
 import App from '@/App.vue'
 import { useConfigStore } from '@/stores/configStore'
+import { migrateThemeSettings } from '@/common/utils'
 import { setImportAiPrompts } from '@/common/api'
 import '@/assets/app.css'
 
@@ -22,6 +23,8 @@ const pinia = createPinia()
 pinia.use(piniaPersistedState)
 app.use(pinia) // Use Pinia
 const config = useConfigStore() // Use the config store
+// v1.4: clamp legacy long theme indices; map blackHoleMode flag → theme id 3
+migrateThemeSettings(config.settings)
 
 // Create the I18n instance
 const i18n = createI18n({
@@ -87,9 +90,6 @@ listen('settings-autoCheckUpdates-changed', (event) => {
 })
 listen('settings-debugMode-changed', (event) => {
   config.setDebugMode(event.payload)
-})
-listen('settings-blackHoleMode-changed', (event) => {
-  config.setBlackHoleMode(event.payload)
 })
 listen('settings-settingsTabIndex-changed', (event) => {
   config.setSettingsTabIndex(event.payload)

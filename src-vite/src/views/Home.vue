@@ -14,6 +14,7 @@
       v-if="showBlackHole"
       :gravity-active="gravityActive"
       :effective-elapsed-sec="effectiveElapsedSec"
+      :appearance="Number(config.settings.appearance)"
       @radii="onHoleRadii"
     />
 
@@ -191,6 +192,7 @@ import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex, setImportAiPrompts } from '@/common/api';
 import { useIdle } from '@/composables/useIdle';
+import { isBlackHoleTheme } from '@/common/utils';
 
 // vue components
 import TitleBar from '@/components/TitleBar.vue';
@@ -269,8 +271,16 @@ let growthAnchor = 0;
 let growthAccum = 0;
 let reducedMotionMq: MediaQueryList | null = null;
 
+const blackHoleThemeOn = computed(() =>
+  isBlackHoleTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
+
 const gravityActive = computed(() =>
-  !!config.settings.blackHoleMode
+  blackHoleThemeOn.value
   && !!uiStore.isMaximized
   && idle.value
   && !reducedMotion.value
@@ -280,7 +290,7 @@ const gravityActive = computed(() =>
 );
 
 const showBlackHole = computed(
-  () => !!config.settings.blackHoleMode && !reducedMotion.value,
+  () => blackHoleThemeOn.value && !reducedMotion.value,
 );
 
 function onHoleRadii(payload: { R_event: number; R_inf: number }) {
