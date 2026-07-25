@@ -1138,6 +1138,10 @@
         "大",
         "更大"
       ],
+      "black_hole_theme": "黑洞主题",
+      "black_hole_theme_desc": "窗口最大化且空闲时，引力会聚拢主网格照片（可随时回弹）",
+      "black_hole_theme_hint": "平时仅作居中氛围背景；最大化后发呆约 15 秒释放引力",
+      "black_hole_theme_reduced_motion": "系统已开启「减少动态效果」，此特效不会运行",
       "show_button_text": "显示侧边栏标签",
       "show_tool_tip": "显示按钮提示",
       "show_status_bar": "显示状态栏",

@@ -1138,6 +1138,10 @@
         "Large",
         "Larger"
       ],
+      "black_hole_theme": "Black hole theme",
+      "black_hole_theme_desc": "When maximized and idle, gravity gathers main-grid photos (always reversible)",
+      "black_hole_theme_hint": "Ambient centered background until ~15s idle while maximized",
+      "black_hole_theme_reduced_motion": "Reduced motion is on; this effect stays off",
       "show_button_text": "Show sidebar labels",
       "show_tool_tip": "Show button tips",
       "show_status_bar": "Show status bar",
