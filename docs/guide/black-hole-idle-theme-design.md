@@ -1,8 +1,9 @@
 # 黑洞主题（Black Hole Idle Theme）设计文档
 
-> 状态：设计稿 v1.3（已微调 + 硬伤修订 + 落地提示，待实现）
+> 状态：设计稿 v1.3（WebGL 背景档已采纳，待实现）
 > 范围：纯前端（`src-vite`），不触及 Rust / Tauri 命令 / Track C 模型栈 / DaisyUI `data-theme`
 > 目标：可选开启的「黑洞主题」——黑洞居中，平时只作界面氛围背景；当**主窗**最大化且用户空闲 15 秒后，黑洞缓慢变大，引力把**主网格可见照片**拉向事件视界并环绕（不消失、可随时回弹）。
+> 背景渲染：**WebGL 解析近似着色器**（默认）+ **Canvas2D 降级**；照片聚拢仍为 CSS transform（非 WebGL 真透镜）。
 
 ---
 
@@ -19,6 +20,10 @@
 | `isMaximized` 含糊 | **新增** `uiStore.isMaximized`；`TitleBar` **仅** `viewName==='Home'` 时写入（共享组件硬约束） |
 | `gravityActive` 源混写 | **仅在 `Home.vue` computed 组装**，composable / GridView **只消费布尔** |
 
+| v1.2 | v1.3 |
+|---|---|
+| Canvas2D 慢转盘背景 | **WebGL 解析近似着色器背景**（光子环+吸积盘+轻透镜）+ **Canvas2D 降级档**；照片聚拢仍 CSS |
+
 ---
 
 ## 1. 已锁定的产品决策
@@ -33,7 +38,8 @@
 | 照片结局 | 弯折聚拢在事件视界边缘**环绕**（不消失，`opacity` 保持 1） |
 | 回弹 | 任意输入 / 退出最大化 / 阻塞 UI / 关开关 → 立即清除 transform，CSS 过渡回位 |
 | 生效条件 | **系统窗口最大化**（`uiStore.isMaximized`）**且** 空闲 15 秒 **且** 网格可玩（见 §4） |
-| 平时（未最大化或未空闲） | 开关开着时：黑洞仅作居中静态/慢转氛围背景，不增长拉照片 |
+| 平时（未最大化或未空闲） | 开关开着时：黑洞仅作居中静态/慢转氛围背景（WebGL 近似着色器，失败则 Canvas2D），不增长拉照片 |
+| 背景画质 | **默认 WebGL 解析近似**（非 geodesic raytrace）；失败/弱 GPU → **Canvas2D 降级**；照片仍 CSS warp |
 | 阻塞 UI 时 | **不启引力**；**静态黑洞背景仍显示** |
 | 独立大图窗 | 大图窗不挂特效；主窗若仍满足条件可继续引力 |
 | 无障碍 | `prefers-reduced-motion: reduce` 时**整体禁用** |
@@ -45,7 +51,7 @@
 ```mermaid
 graph TD
     O[blackHoleMode=true] --> H[Home.vue 挂载 BlackHoleBackground]
-    H --> B[canvas 背景层 pointer-events:none]
+    H --> B[BlackHoleBackground pointer-events:none<br/>WebGL 近似着色器 / Canvas2D 降级]
     B --> G{gravityActive?}
     G -->|否| BG[背景模式: 居中慢转 不增长 不拉照片]
     G -->|是| ACT[引力模式: R_event/R_inf 随有效空闲扩张]
@@ -63,7 +69,7 @@ graph TD
 | `uiStore.isMaximized` | **主窗**系统最大化真相源（**本期新增**，当前 store 无此字段） | 特效；其它窗口最大化 |
 | `TitleBar`（共享） | **仅** `viewName==='Home'` 时同步 `uiStore.isMaximized` | Settings / ImageEditor 的 TitleBar 不得写该字段 |
 | `useIdle` | 全局 15s 空闲（建议在 Home 生命周期内） | 是否最大化 / 是否可玩 |
-| `BlackHoleBackground` | canvas 背景与半径增长 | 改卡片 DOM |
+| `BlackHoleBackground` | WebGL 着色器背景（光子环+吸积盘+轻透镜，解析近似非 raytrace）+ Canvas2D 降级；半径增长 | 改卡片 DOM |
 | `useGravityWarp` | 消费 `gravityActive` + 半径；节流写 `.bh-card` | 自己拼 `inputStack` / `isSwitchingLibrary` 等源 |
 | `GridView` | warp 查询根 / 传入或注入 `gravityActive` | 组装全局 UI 条件 |
 | `Thumbnail` | **外层 root** 加 `.bh-card`（非 `containerRef`） | 自己算引力；不改内层 layoutStyle |
@@ -212,13 +218,17 @@ gravityActive =
 
 ---
 
-## 5. 黑洞本体：`BlackHoleBackground.vue`
+## 5. 黑洞本体：`BlackHoleBackground.vue`（WebGL 着色器 + Canvas2D 降级）
 
 - 仅由 **`Home.vue`** 在 `blackHoleMode && !reducedMotion` 时挂载。
-- `position: fixed; inset: 0; pointer-events: none`；z-index 在网格内容之下、主壳背景之上（实现时在 Home 内标定，不挡 TitleBar 点击——本就 none）。
-- Canvas 2D：黑色事件视界 + 发光吸积盘（径向渐变）+ 爱因斯坦光环。
-- 光环/辉光用 `var(--color-primary)`（或读取计算后的 primary）染色，随 DaisyUI 主题变化。
-- **背景模式**：半径固定约 `R0`，吸积盘慢转，无增长、无引力。
+- `position: fixed; inset: 0; pointer-events: none`；z-index 在网格内容之下、主壳背景之上。
+- **渲染分层（两档）**：
+  - **高画质档（默认，WebGL）**：单个全屏 `<canvas>` + 片元着色器，**无新 npm 依赖**（裸 `getContext('webgl')` / `webgl2` + 内联 GLSL 文本）。绘制：纯黑事件视界 + 发光吸积盘（极坐标盘，两侧亮度不对称的伪多普勒）+ 爱因斯坦/光子环（径向渐变辉光）+ 背景星空轻透镜（屏幕空间径向扭曲）。
+    - **解析近似，非逐像素测地线积分**：不搬 GARGANTUA 的 geodesic raytracer（那才是性能重灾区）；用公式近似拿 ~80% 观感。
+    - **性能三开关（必须）**：① 内部渲染分辨率上限（如 `0.5×` 视口，CSS 放大）；② rAF 低帧率（20–30fps，背景慢转足够）；③ `document.hidden` 暂停 rAF（§4.2）。
+  - **降级档（Canvas2D 圆盘）**：WebGL 不可用 / 初始化失败 / 弱 GPU 检测时回退到 v1.2 的 Canvas 2D 慢转盘，保证功能不崩。
+- 颜色用 `var(--color-primary)` 染色，随 DaisyUI 主题变化。
+- **背景模式**：半径固定 `R0`，吸积盘慢转，无增长、无引力。
 - **引力模式**：视觉半径跟随 `R_event` 增大，可略加强辉光。
 
 ### 5.1 增长曲线（引力模式）
@@ -237,7 +247,14 @@ const R_inf   = lerp(R_inf0,   R_infMax,   k);
 - `R_inf0` 略大于 `R_event0`
 - `R_infMax` ≈ `0.92 * Math.hypot(vw, vh) / 2`
 
-半径由 background（或共享小模块）算出，经 prop/provide 或同级状态交给 `useGravityWarp`，避免两套曲线。
+半径由 background 算出，经 prop/provide 交给 `useGravityWarp`，避免两套曲线。
+
+### 5.2 实现钉点（相对当前分支代码）
+
+- 分支 `feat/black-hole-idle-theme` 已有 Canvas2D 版 `BlackHoleBackground.vue`：**升级为先尝试 WebGL，失败则保留/回退 Canvas2D 路径**，勿拆掉降级。
+- 对外 props/emit 契约保持不变：`gravityActive`、`effectiveElapsedSec`、`emit('radii', { R_event, R_inf })`，避免 Home / warp 二次接线。
+- 弱 GPU 启发式可极简（任选其一即可，勿过度探测）：`fail` on context create；或 `renderer` 字符串含 `SwiftShader` / 软件渲染；或首帧 compile/link 失败。
+- 分辨率缩放只影响 **内部 framebuffer / drawingBuffer**，CSS 仍 `inset:0` 铺满；resize 时重算。
 
 ---
 
@@ -315,7 +332,7 @@ filter    = blur > 0 ? blur(Npx) : none
 |---|---|
 | `src-vite/src/composables/useIdle.ts` | **新增** |
 | `src-vite/src/composables/useGravityWarp.ts` | **新增** |
-| `src-vite/src/components/BlackHoleBackground.vue` | **新增** |
+| `src-vite/src/components/BlackHoleBackground.vue` | **新增/升级**（WebGL 着色器 + Canvas2D 降级；props/emit 契约不变） |
 | `src-vite/src/stores/uiStore.js` | **新增** `isMaximized` + `setMaximized`（当前不存在） |
 | `src-vite/src/components/TitleBar.vue` | 初始化 + 窗口监听（**非平凡新增**）；**仅 `viewName==='Home'` 写 store** |
 | `src-vite/src/stores/configStore.js` | `settings.blackHoleMode` |
@@ -334,12 +351,13 @@ filter    = blur > 0 ? blur(Npx) : none
 | 场景 | CPU | GPU/合成 | 内存 | 说明 |
 |---|---|---|---|---|
 | 未开启 / reduced-motion | 0 | 0 | 0 | 不挂载 |
-| 背景模式 | 极低 | 低 | 忽略 | 单全屏 canvas |
-| 引力模式 | 低~中（~120ms 重算） | 中（少量合成层+少数 blur） | 低 | 仅可见 `.bh-card` |
+| 背景模式（WebGL 高画质） | 极低 | 低~中（受内部分辨率上限 + 低帧率约束） | 低（单 canvas + 着色器） | 解析近似着色器，非逐像素 raytrace |
+| 背景模式（Canvas2D 降级） | 极低 | 低 | 忽略 | 弱 GPU / WebGL 不可用回退 |
+| 引力模式 | 低~中（~120ms 重算） | 中（少量合成层+少数 blur）+ 背景 WebGL | 低 | 仅可见 `.bh-card` |
 | 输入/隐藏/关开关 | 0 | 0 | 0 | clear + 停 rAF |
 
-- **新依赖：无**（Canvas 2D + CSS）
-- **包体增量：≪ 0.1 MB gzip**
+- **新依赖：无**（裸 WebGL + CSS；不引 three.js）
+- **包体增量：≪ 0.1 MB gzip**（着色器为内联 GLSL 文本）
 - **Rust / exe：不变**
 
 ---
@@ -372,11 +390,11 @@ settings.general.black_hole_theme_reduced_motion
 
 1. `uiStore.isMaximized` + `TitleBar`：**仅 Home** 写 store；**新增**挂载初始化 + `onResized`/maximize 监听（非平凡）
 2. `configStore.blackHoleMode` + Settings 外观开关 + i18n
-3. `BlackHoleBackground` 背景模式，挂 **`Home.vue`**
+3. `BlackHoleBackground`：WebGL 高画质 + Canvas2D 降级；背景模式挂 **`Home.vue`**
 4. `useIdle` 于 Home；**Home `computed` 组装 `gravityActive`**（含 inputStack / **本地** `isSwitchingLibrary` / hidden / reduced-motion）并下传
 5. `.bh-card` + `useGravityWarp`（**只消费布尔+半径**）+ **`GridView`**
-6. will-change 清理与 transition 协调
-7. 按 §11 自测
+6. will-change 清理与 transition 协调；WebGL 三开关（分辨率/帧率/hidden）
+7. 按 §11 自测（含 WebGL 失败回退 Canvas2D）
 
 ---
 
@@ -385,7 +403,8 @@ settings.general.black_hole_theme_reduced_motion
 | # | 步骤 | 期望 |
 |---|---|---|
 | 1 | 默认 | 开关关；无 canvas、无 transform |
-| 2 | 开开关，非最大化 | 居中慢转黑洞；照片不动 |
+| 2 | 开开关，非最大化 | 居中慢转黑洞（WebGL 或降级 2D）；照片不动 |
+| 2b | 强制 WebGL 失败路径（devtools / 临时 stub） | 自动 Canvas2D 降级；无白屏/无抛死 |
 | 3 | 最大化后立即操作 | 仍仅背景 |
 | 4 | 最大化静止 ≥15s | 黑洞变大；可见网格卡聚拢环绕；不透明消失 |
 | 5 | 引力中键鼠/滚轮 | 立即回弹 |
@@ -405,10 +424,11 @@ settings.general.black_hole_theme_reduced_motion
 
 ## 12. 非目标（本期不做）
 
-- SVG `feDisplacementMap` / WebGL / three.js 真透镜（原「B 档」仍为未来可选）
+- 逐像素测地线积分 raytracer（GARGANTUA 那种全透镜，性能重）；本期仅用解析近似着色器
+- SVG `feDisplacementMap` 真透镜 / three.js
+- **对照片做 WebGL 真透镜扭曲**（照片聚拢保持 §6 CSS transform）
 - 黑洞跟随鼠标或多位置
 - 吸侧栏、地图、非 GridView 的 Thumbnail
-- 低性能设备自动降级档
 - 改 Rust / IPC / DB / AI / 包体模型
 - 将黑洞做成 DaisyUI `data-theme` 包
 
@@ -416,6 +436,7 @@ settings.general.black_hole_theme_reduced_motion
 
 ## 13. 未来可选（非本期）
 
-- B 档：近视界少数卡片 SVG 位移透镜
-- 质量开关 / 低性能默认关完整特效
+- 背景升级为真逐像素测地线 raytracer（GARGANTUA 级，需更强 GPU 预算）
+- 照片近事件视界真透镜扭曲（替代/增强 §6 CSS warp）
 - 黑洞位置：正中 / 跟随鼠标 / 角落
+- 低性能设备自动分级（更细于本期 Canvas2D 降级档）
