@@ -199,6 +199,15 @@ uniform vec2 u_res;
 uniform float u_time;
 uniform sampler2D u_tex;
 uniform float u_intensity;
+
+// REQUIRED (shipped): mediump-safe hash — NEVER fract(sin(dot)*43758.5453)
+// (overflows ±2^14 on true 16-bit mediump → frozen/NaN grain, frozen glitch cadence)
+float rand(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+// Time: float tt = mod(u_time, 64.0); use tt for glitch/scan/grain (not raw u_time)
 ```
 
 **Vertex (copy vortex):**
