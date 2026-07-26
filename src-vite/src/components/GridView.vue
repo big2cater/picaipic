@@ -137,6 +137,7 @@ import PhotoGlitchLayer from '@/components/PhotoGlitchLayer.vue';
 import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColumnLayout, calculateMasonryLayout, type Geometry } from '@/common/layout';
 import { IconCalendarDay, IconCalendarMonth, IconSearch } from '@/common/icons';
 import { readPrimaryColor, type RadiiValue } from '@/common/blackHoleMath';
+import { isBlackHoleTheme, isCyberpunkTheme } from '@/common/utils';
 // CSS per-card warp kept available but NOT driven while WebGL vortex is primary
 // import { useGravityWarp } from '@/composables/useGravityWarp';
 
@@ -195,18 +196,40 @@ const bhRadii = inject<Ref<RadiiValue> | ComputedRef<RadiiValue> | null>('bhRadi
 const gravityActiveFallback = ref(false);
 const radiiFallback = ref<RadiiValue>({ R_event: 0, R_inf: 0 });
 
+// Theme-gate mount so we don't keep two idle WebGL contexts alive at once.
+// Provide is always present from Home; inject != null alone is not enough.
+const blackHoleThemeOn = computed(() =>
+  isBlackHoleTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
+const cyberpunkThemeOn = computed(() =>
+  isCyberpunkTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
+
 // WebGL FragCoord-style vortex (photo area only). CSS card warp disabled as primary path.
-const vortexEnabled = computed(() => bhGravityActive != null);
-const vortexActive = computed(() => !!unref(bhGravityActive));
+const vortexEnabled = computed(() => blackHoleThemeOn.value && bhGravityActive != null);
+const vortexActive = computed(() => blackHoleThemeOn.value && !!unref(bhGravityActive));
 const vortexHidesGrid = ref(false);
 const vortexPrimaryRgb = ref<[number, number, number]>([180, 80, 200]);
 
 // Cyberpunk continuous glitch layer (photo area only)
-const glitchEnabled = cpGlitchActive != null;
+const glitchEnabled = computed(() => cyberpunkThemeOn.value && cpGlitchActive != null);
 const glitchHidesGrid = ref(false);
 const glitchLayerActive = computed(() => {
   const intensity = Number(config.settings.dynamicThemeIntensity);
-  return !!unref(cpGlitchActive) && Number.isFinite(intensity) && intensity > 0;
+  return (
+    cyberpunkThemeOn.value
+    && !!unref(cpGlitchActive)
+    && Number.isFinite(intensity)
+    && intensity > 0
+  );
 });
 const glitchIntensity = computed(() => {
   const n = Number(config.settings.dynamicThemeIntensity);

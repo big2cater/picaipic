@@ -21,14 +21,13 @@
 <script setup lang="ts">
 /**
  * Night-city cyberpunk ambient (always-on under Cyberpunk theme).
- * CSS: grid / neon / skyline. Canvas: rain, particles, floating kana.
- * Idle photo glitch remains PhotoGlitchLayer.
+ * CSS: grid / neon / skyline. Canvas: rain, particles, kana via pre-baked sprites
+ * (no per-frame shadowBlur / createLinearGradient).
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 
 const props = withDefaults(
   defineProps<{
-    /** false when prefers-reduced-motion: static scene, no rain/particles */
     animate?: boolean;
   }>(),
   { animate: true },
@@ -36,19 +35,18 @@ const props = withDefaults(
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 
-// Mixed katakana / sparse kanji — decorative only (not real sentences)
 const GLYPHS =
   'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン電脳都市夜雨霓虹未来記憶断片回路';
 
-type RainDrop = { x: number; y: number; len: number; spd: number; thick: number; a: number };
+type RainDrop = { x: number; y: number; spd: number; scale: number; a: number };
 type Particle = {
   x: number;
   y: number;
   vx: number;
   vy: number;
-  r: number;
+  scale: number;
   a: number;
-  hue: number;
+  sprite: number; // 0 magenta, 1 cyan
   life: number;
   maxLife: number;
 };
@@ -57,9 +55,9 @@ type Glyph = {
   y: number;
   ch: string;
   spd: number;
-  size: number;
+  scale: number;
   a: number;
-  hue: number;
+  sprite: number;
   blink: number;
 };
 
@@ -72,6 +70,12 @@ let w = 0;
 let h = 0;
 let dpr = 1;
 let running = false;
+let ctx: CanvasRenderingContext2D | null = null;
+
+// Pre-baked sprites (radial glow / rain streak / glyph cells)
+let particleSprites: HTMLCanvasElement[] = [];
+let rainSprite: HTMLCanvasElement | null = null;
+const glyphSpriteCache = new Map<string, HTMLCanvasElement>();
 
 function rand(a = 0, b = 1) {
   return a + Math.random() * (b - a);
@@ -81,11 +85,85 @@ function pickGlyph() {
   return GLYPHS[(Math.random() * GLYPHS.length) | 0] || 'ア';
 }
 
+function makeGlowSprite(hue: number, radius = 10): HTMLCanvasElement {
+  const pad = radius * 3;
+  const size = Math.ceil(pad * 2);
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d')!;
+  const cx = size / 2;
+  const grd = g.createRadialGradient(cx, cx, 0, cx, cx, pad);
+  grd.addColorStop(0, `hsla(${hue}, 100%, 70%, 1)`);
+  grd.addColorStop(0.35, `hsla(${hue}, 100%, 60%, 0.55)`);
+  grd.addColorStop(1, `hsla(${hue}, 100%, 50%, 0)`);
+  g.fillStyle = grd;
+  g.beginPath();
+  g.arc(cx, cx, pad, 0, Math.PI * 2);
+  g.fill();
+  return c;
+}
+
+function makeRainSprite(): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 8;
+  c.height = 40;
+  const g = c.getContext('2d')!;
+  const grd = g.createLinearGradient(4, 0, 1, 40);
+  grd.addColorStop(0, 'rgba(180, 220, 255, 0)');
+  grd.addColorStop(0.35, 'rgba(160, 210, 255, 0.85)');
+  grd.addColorStop(1, 'rgba(0, 229, 255, 0)');
+  g.strokeStyle = grd;
+  g.lineWidth = 1.4;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(5, 0);
+  g.lineTo(2, 40);
+  g.stroke();
+  return c;
+}
+
+function makeGlyphSprite(ch: string, hue: number): HTMLCanvasElement {
+  const key = `${ch}:${hue}`;
+  const hit = glyphSpriteCache.get(key);
+  if (hit) return hit;
+  const size = 48;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d')!;
+  g.font = '22px "Segoe UI", "Yu Gothic", "Meiryo", monospace';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  // soft glow baked once
+  g.shadowColor = `hsla(${hue}, 100%, 55%, 0.9)`;
+  g.shadowBlur = 12;
+  g.fillStyle = `hsla(${hue}, 100%, 72%, 1)`;
+  g.fillText(ch, size / 2, size / 2 - 4);
+  g.shadowBlur = 0;
+  g.fillStyle = `hsla(${hue}, 90%, 55%, 0.28)`;
+  g.fillText(ch, size / 2, size / 2 + 14);
+  glyphSpriteCache.set(key, c);
+  return c;
+}
+
+function bakeSprites() {
+  particleSprites = [makeGlowSprite(318, 9), makeGlowSprite(188, 9)];
+  rainSprite = makeRainSprite();
+  glyphSpriteCache.clear();
+  // warm common glyphs
+  for (const ch of 'アイウエオカキクケコ電脳都市夜雨') {
+    makeGlyphSprite(ch, 318);
+    makeGlyphSprite(ch, 188);
+  }
+}
+
 function resize() {
   const canvas = canvasRef.value;
   if (!canvas) return;
   const parent = canvas.parentElement;
-  const rect = parent?.getBoundingClientRect() ?? { width: window.innerWidth, height: window.innerHeight };
+  const rect = parent?.getBoundingClientRect() ?? {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
   dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   w = Math.max(1, Math.floor(rect.width));
   h = Math.max(1, Math.floor(rect.height));
@@ -93,16 +171,16 @@ function resize() {
   canvas.height = Math.floor(h * dpr);
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
-  const ctx = canvas.getContext('2d');
+  ctx = canvas.getContext('2d');
   if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   seedField(true);
 }
 
 function seedField(force = false) {
   const area = w * h;
-  const rainN = Math.min(220, Math.max(80, Math.floor(area / 9000)));
-  const partN = Math.min(90, Math.max(28, Math.floor(area / 22000)));
-  const glyphN = Math.min(36, Math.max(12, Math.floor(area / 55000)));
+  const rainN = Math.min(180, Math.max(70, Math.floor(area / 10000)));
+  const partN = Math.min(70, Math.max(24, Math.floor(area / 26000)));
+  const glyphN = Math.min(28, Math.max(10, Math.floor(area / 60000)));
 
   if (force || rain.length !== rainN) {
     rain = Array.from({ length: rainN }, () => makeRain(true));
@@ -119,23 +197,21 @@ function makeRain(scatter: boolean): RainDrop {
   return {
     x: rand(0, w),
     y: scatter ? rand(-h, h) : rand(-h * 0.2, 0),
-    len: rand(12, 36),
     spd: rand(520, 980),
-    thick: rand(0.7, 1.4),
-    a: rand(0.12, 0.38),
+    scale: rand(0.7, 1.35),
+    a: rand(0.18, 0.5),
   };
 }
 
 function makeParticle(scatter: boolean): Particle {
-  const magenta = Math.random() > 0.45;
   return {
     x: rand(0, w),
     y: scatter ? rand(0, h) : h + rand(0, 40),
     vx: rand(-12, 12),
     vy: rand(-28, -8),
-    r: rand(0.8, 2.6),
-    a: rand(0.25, 0.85),
-    hue: magenta ? rand(310, 330) : rand(180, 200),
+    scale: rand(0.35, 0.85),
+    a: rand(0.3, 0.9),
+    sprite: Math.random() > 0.45 ? 0 : 1,
     life: scatter ? rand(0, 1) : 0,
     maxLife: rand(3.5, 8),
   };
@@ -148,50 +224,42 @@ function makeGlyph(scatter: boolean): Glyph {
     y: scatter ? rand(0, h) : h + rand(20, 80),
     ch: pickGlyph(),
     spd: rand(18, 48),
-    size: rand(11, 20),
-    a: rand(0.18, 0.55),
-    hue: magenta ? 318 : 188,
+    scale: rand(0.55, 0.95),
+    a: rand(0.22, 0.6),
+    sprite: magenta ? 0 : 1,
     blink: rand(0, Math.PI * 2),
   };
 }
 
 function paint(ts: number) {
-  if (!running) return;
+  if (!running || !ctx) return;
   raf = requestAnimationFrame(paint);
-  const canvas = canvasRef.value;
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
 
   const dt = lastTs ? Math.min(0.05, (ts - lastTs) / 1000) : 0.016;
   lastTs = ts;
 
   ctx.clearRect(0, 0, w, h);
 
-  // Rain
-  ctx.lineCap = 'round';
-  for (let i = 0; i < rain.length; i++) {
-    const d = rain[i];
-    d.y += d.spd * dt;
-    d.x += 28 * dt; // slight wind
-    if (d.y > h + d.len) {
-      rain[i] = makeRain(false);
-      continue;
+  // Rain — drawImage sprites only
+  const rs = rainSprite;
+  if (rs) {
+    for (let i = 0; i < rain.length; i++) {
+      const d = rain[i];
+      d.y += d.spd * dt;
+      d.x += 28 * dt;
+      if (d.y > h + 40) {
+        rain[i] = makeRain(false);
+        continue;
+      }
+      if (d.x > w + 20) d.x = -10;
+      ctx.globalAlpha = d.a;
+      const dw = 6 * d.scale;
+      const dh = 36 * d.scale;
+      ctx.drawImage(rs, d.x - dw * 0.5, d.y, dw, dh);
     }
-    if (d.x > w + 20) d.x = -10;
-    const g = ctx.createLinearGradient(d.x, d.y, d.x - 2, d.y + d.len);
-    g.addColorStop(0, `rgba(180, 220, 255, 0)`);
-    g.addColorStop(0.4, `rgba(160, 210, 255, ${d.a})`);
-    g.addColorStop(1, `rgba(0, 229, 255, 0)`);
-    ctx.strokeStyle = g;
-    ctx.lineWidth = d.thick;
-    ctx.beginPath();
-    ctx.moveTo(d.x, d.y);
-    ctx.lineTo(d.x - 3, d.y + d.len);
-    ctx.stroke();
   }
 
-  // Floating neon particles / embers
+  // Particles
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
     p.life += dt;
@@ -203,47 +271,39 @@ function paint(ts: number) {
       continue;
     }
     const fade = 1 - p.life / p.maxLife;
-    const alpha = p.a * fade;
-    ctx.beginPath();
-    ctx.fillStyle = `hsla(${p.hue}, 100%, 65%, ${alpha})`;
-    ctx.shadowColor = `hsla(${p.hue}, 100%, 60%, ${alpha})`;
-    ctx.shadowBlur = 8;
-    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
+    const spr = particleSprites[p.sprite];
+    if (!spr) continue;
+    const size = spr.width * p.scale * 0.55;
+    ctx.globalAlpha = p.a * fade;
+    ctx.drawImage(spr, p.x - size * 0.5, p.y - size * 0.5, size, size);
   }
 
-  // Rising Japanese glyphs (matrix-ish columns feel without full matrix)
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
+  // Glyphs (baked glow)
   for (let i = 0; i < glyphs.length; i++) {
     const g = glyphs[i];
     g.y -= g.spd * dt;
     g.blink += dt * 3;
-    if (g.y < -30) {
+    if (g.y < -40) {
       glyphs[i] = makeGlyph(false);
       continue;
     }
-    // occasional glyph swap = "data flicker"
     if (Math.random() < 0.008) g.ch = pickGlyph();
     const flicker = 0.65 + 0.35 * Math.sin(g.blink + i);
-    const alpha = g.a * flicker;
-    ctx.font = `${g.size}px "Segoe UI", "Yu Gothic", "Meiryo", monospace`;
-    ctx.fillStyle = `hsla(${g.hue}, 100%, 70%, ${alpha})`;
-    ctx.shadowColor = `hsla(${g.hue}, 100%, 55%, ${alpha * 0.9})`;
-    ctx.shadowBlur = 10;
-    ctx.fillText(g.ch, g.x, g.y);
-    // trailing dim glyph
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = `hsla(${g.hue}, 90%, 55%, ${alpha * 0.25})`;
-    ctx.fillText(g.ch, g.x, g.y + g.size * 1.15);
+    const hue = g.sprite === 0 ? 318 : 188;
+    const spr = makeGlyphSprite(g.ch, hue);
+    const size = 48 * g.scale;
+    ctx.globalAlpha = g.a * flicker;
+    ctx.drawImage(spr, g.x - size * 0.5, g.y - size * 0.5, size, size);
   }
+
+  ctx.globalAlpha = 1;
 }
 
 function start() {
   if (running || !props.animate) return;
   running = true;
   lastTs = 0;
+  if (!particleSprites.length) bakeSprites();
   resize();
   raf = requestAnimationFrame(paint);
 }
@@ -252,20 +312,19 @@ function stop() {
   running = false;
   cancelAnimationFrame(raf);
   raf = 0;
-  const canvas = canvasRef.value;
-  const ctx = canvas?.getContext('2d');
   if (ctx && w && h) ctx.clearRect(0, 0, w, h);
 }
 
 let ro: ResizeObserver | null = null;
 
 onMounted(() => {
+  bakeSprites();
   resize();
   ro = new ResizeObserver(() => {
     resize();
   });
   if (canvasRef.value?.parentElement) ro.observe(canvasRef.value.parentElement);
-  window.addEventListener('resize', resize);
+  // ResizeObserver covers window resize of the fixed full-viewport parent
   if (props.animate) start();
 });
 
@@ -273,7 +332,10 @@ onUnmounted(() => {
   stop();
   ro?.disconnect();
   ro = null;
-  window.removeEventListener('resize', resize);
+  particleSprites = [];
+  rainSprite = null;
+  glyphSpriteCache.clear();
+  ctx = null;
 });
 
 watch(
@@ -303,7 +365,6 @@ watch(
     linear-gradient(180deg, #12081f 0%, #070312 40%, #020008 100%);
 }
 
-/* Soft far skyline silhouettes */
 .cp-backdrop__skyline {
   position: absolute;
   left: 0;
@@ -337,7 +398,6 @@ watch(
   opacity: 0.55;
 }
 
-/* blocky building silhouettes via layered gradients */
 .cp-backdrop__skyline::before {
   background-image:
     linear-gradient(rgba(12, 6, 24, 0.95), rgba(12, 6, 24, 0.95)),

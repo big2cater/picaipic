@@ -190,21 +190,50 @@ function initGl(canvas: HTMLCanvasElement): boolean {
   return true;
 }
 
-function resizeToSource() {
-  const canvas = canvasRef.value;
+// Cached CSS size — measure only on ResizeObserver / beginSession (not every paint)
+let cachedCssW = 0;
+let cachedCssH = 0;
+let bufW = 0;
+let bufH = 0;
+let sourceRo: ResizeObserver | null = null;
+let observedEl: HTMLElement | null = null;
+
+function measureSource() {
   const src = props.sourceEl;
-  if (!canvas || !src || !gl) return;
+  if (!src) return;
   const rect = src.getBoundingClientRect();
+  cachedCssW = rect.width;
+  cachedCssH = rect.height;
+}
+
+function applyCanvasSize() {
+  const canvas = canvasRef.value;
+  if (!canvas || !gl) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.max(1, Math.floor(rect.width * dpr));
-  const h = Math.max(1, Math.floor(rect.height * dpr));
+  const w = Math.max(1, Math.floor(cachedCssW * dpr));
+  const h = Math.max(1, Math.floor(cachedCssH * dpr));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
+    bufW = w;
+    bufH = h;
   }
-  canvas.style.width = `${rect.width}px`;
-  canvas.style.height = `${rect.height}px`;
+  canvas.style.width = `${cachedCssW}px`;
+  canvas.style.height = `${cachedCssH}px`;
   gl.viewport(0, 0, w, h);
+}
+
+function ensureSourceObserver() {
+  const src = props.sourceEl;
+  if (!src || typeof ResizeObserver === 'undefined') return;
+  if (observedEl === src && sourceRo) return;
+  sourceRo?.disconnect();
+  observedEl = src;
+  sourceRo = new ResizeObserver(() => {
+    measureSource();
+    if (hasTexture && props.active) applyCanvasSize();
+  });
+  sourceRo.observe(src);
 }
 
 /**
@@ -297,14 +326,15 @@ function paint(ts: number) {
   raf = requestAnimationFrame(paint);
   if (!gl || !program || !hasTexture || !props.active) return;
 
-  resizeToSource();
+  // No per-frame getBoundingClientRect — ResizeObserver updates size
+  if (bufW < 1 || bufH < 1) applyCanvasSize();
   const elapsed = startMs ? (ts - startMs) / 1000 : 0;
   const progress = progressAt(elapsed);
   const rgb = props.primaryRgb || [180, 80, 200];
 
   gl.useProgram(program);
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  if (uRes) gl.uniform2f(uRes, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  if (uRes) gl.uniform2f(uRes, bufW, bufH);
   if (uTime) gl.uniform1f(uTime, ts * 0.001);
   if (uProgress) gl.uniform1f(uProgress, progress);
   if (uRing) gl.uniform3f(uRing, rgb[0] / 255, rgb[1] / 255, rgb[2] / 255);
@@ -328,12 +358,15 @@ function beginSession() {
     }
   }
 
+  ensureSourceObserver();
+
   // Wait one frame so layout/images are stable, then freeze
   requestAnimationFrame(() => {
     if (!props.active || !props.sourceEl) return;
     const snap = captureSource(props.sourceEl);
     if (!snap) return;
-    resizeToSource();
+    measureSource();
+    applyCanvasSize();
     if (!uploadTexture(snap)) return;
 
     startMs = performance.now();
@@ -367,13 +400,16 @@ watch(
 );
 
 onMounted(() => {
-  const canvas = canvasRef.value;
-  if (canvas) initGl(canvas);
+  // Lazy GL: only init on first active session (saves a context when unmounted by theme gate)
+  ensureSourceObserver();
   if (props.active) beginSession();
 });
 
 onUnmounted(() => {
   endSession();
+  sourceRo?.disconnect();
+  sourceRo = null;
+  observedEl = null;
   if (gl && program) gl.deleteProgram(program);
   if (gl && buf) gl.deleteBuffer(buf);
   gl = null;
