@@ -10,7 +10,7 @@ Updated: 2026-07-26
 | Black-hole cosmos + PhotoVortex | **Shipped** — maximize + **6s** idle; UV lens; RO size cache; theme-gated mount — `change-black-hole-theme.md` |
 | Cyberpunk night-city ambient | **Shipped** — `CyberpunkBackground` (sprite-baked rain/particles/kana) — `change-cyberpunk-theme.md` |
 | Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1; **mediump-safe** hash + mod time; intensity `>0` — `change-cyberpunk-theme.md` |
-| FX correctness/perf follow-up | **Shipped** — commit `130b33a` (hash, sprites, reflow, theme-gate GL) |
+| FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |

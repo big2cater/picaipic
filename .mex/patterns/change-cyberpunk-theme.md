@@ -22,9 +22,9 @@ last_updated: 2026-07-26
 | Settings dual-pin | `Settings.vue` | BH **or** CP dual-pins light+dark slots; appearance locked under FX themes |
 | Idle | `useIdle.ts` default **6000** ms; `Home.vue` `useIdle(6000)` | Shared with black hole |
 | FX gate | `Home.vue` `cpFxActive` | Byte-for-byte mirror of `gravityActive` with `cyberpunkThemeOn`; provide as `cpGlitchActive` |
-| Daily ambient | `CyberpunkBackground.vue` | Night-city CSS + canvas rain/particles/kana via **pre-baked sprites** (no per-frame `shadowBlur` / gradients); static if reduced-motion |
+| Daily ambient | `CyberpunkBackground.vue` | Night-city CSS + canvas rain/particles/kana via **pre-baked sprites** (no per-frame `shadowBlur` / gradients); `resize` → `seedField(false)` so drag-resize does not reseed/jump; static if reduced-motion |
 | Chrome | `Home.vue` `cp-shell` + glass rails; `StatusBar` / `Content` FX glass | Magenta/cyan edges; TitleBar stays interactive |
-| **Photo effect** | `PhotoGlitchLayer.vue` + `GridView.vue` | Freeze thumbs → continuous glitch; **mediump-safe** hash + `mod(time)`; ResizeObserver size cache; lazy GL init |
+| **Photo effect** | `PhotoGlitchLayer.vue` + `GridView.vue` | Freeze thumbs → continuous glitch; **mediump-safe** hash + `mod(time)`; ResizeObserver size cache; lazy GL init; track/cancel capture rAF on endSession |
 | Mount gate | `GridView.vue` | `v-if="cyberpunkThemeOn && inject present"` — do **not** keep GL layer mounted on other themes |
 | Intensity gate | `GridView.vue` `glitchLayerActive` | `cpGlitchActive && intensity > 0` on `:active` only — **not** inside `cpFxActive` |
 
@@ -44,6 +44,8 @@ last_updated: 2026-07-26
 - Use `fract(sin(dot)*43758)` style hash under **mediump** (overflows ±2^14 → frozen/NaN grain)
 - Call `getBoundingClientRect` every paint frame (use ResizeObserver cache)
 - Per-frame canvas `shadowBlur` / `createLinearGradient` for ambient rain/particles (bake sprites)
+- `seedField(true)` on every ResizeObserver tick (use `seedField(false)` — only rebuild when count thresholds change)
+- Leave untracked capture rAF from `beginSession` (store id; cancel in `endSession`)
 
 ## Design docs
 - Spec: `docs/superpowers/specs/2026-07-26-cyberpunk-idle-glitch-design.md` (incl. WebGL1 port + mediump notes)

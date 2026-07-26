@@ -355,5 +355,7 @@ Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useI
 | 🟠 **P1** | Ambient per-frame `shadowBlur` / gradients | Shipped: sprite bake in `CyberpunkBackground` |
 | 🟠 **P1** | Per-frame `getBoundingClientRect` in paint | Shipped: ResizeObserver cache (glitch + vortex) |
 | 🟠 **P1** | Dual always-mounted WebGL layers | Shipped: GridView theme-gated `v-if` + lazy GL init |
+| 🟡 **P2** | Ambient `seedField(true)` on every resize → rain jump | Shipped: `seedField(false)` (`1aa0a59`) |
+| ⚪ **P2** | Untracked capture rAF on rapid active toggle | Shipped: `captureRaf` cancel in endSession (`1aa0a59`) |
 
-**R1 / R2 / R3** and **P0/P1** are landed in code (`130b33a` and prior FX commits).
+**R1 / R2 / R3** and **P0–P2** are landed in code (`130b33a`, `1aa0a59`, and prior FX commits).
