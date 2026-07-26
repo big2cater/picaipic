@@ -65,6 +65,23 @@ cyberpunkThemeOn
 
 If any of the six non-theme gates are omitted, glitch can fire during library switch, modal `inputStack`, background tab, or reduced-motion users.
 
+**Intensity is not part of `cpFxActive`.** Keep the seven-way computed pure (theme + maximize + idle + rm + hidden + inputStack + library). Apply intensity at the **layer mount / `:active` binding** in `GridView` (or equivalent):
+
+```ts
+// provide stays pure:
+provide('cpGlitchActive', cpFxActive)
+
+// GridView — read intensity *inside* computed (pinia/settings reactivity):
+const glitchLayerActive = computed(() => {
+  const intensity = Number(config.settings.dynamicThemeIntensity)
+  return !!unref(cpGlitchActive) && Number.isFinite(intensity) && intensity > 0
+})
+// <PhotoGlitchLayer :active="glitchLayerActive" ... />
+// v-if can stay on inject presence; :active carries intensity 0 skip
+```
+
+This preserves §2.1 as a BH mirror and still enforces §4.3 / §8 “intensity 0 → no glitch layer / no freeze”.
+
 ---
 
 ## 3. Architecture
@@ -119,16 +136,34 @@ THEME_ID = {
 
 ## 4. PhotoGlitchLayer
 
-### 4.1 Lifecycle (mirror PhotoVortex)
+### 4.1 Lifecycle (mirror PhotoVortex, with one intentional divergence)
 
 | Event | Action |
 |-------|--------|
-| `active` false → true | `requestAnimationFrame` then `captureSource(sourceEl)` → upload texture → `emit('captured')` → start paint loop |
+| `active` false → true | `requestAnimationFrame` then `captureSource(sourceEl)` → **if null, stop (no emit)** → else upload texture → `emit('captured')` → start paint loop |
 | paint loop | continuous; no `u_progress` absorb; time-driven glitch only |
 | `active` true → false | cancel rAF, delete texture, `emit('cleared')` |
 | unmount | same as clear |
 
-Capture implementation: **copy the proven path from `PhotoVortexLayer.captureSource`** (draw decoded `<img>` rects into 2D canvas, DPR clamp ≤1.5, skip incomplete/cross-origin). Optional tiny shared helper only if duplication hurts; **not** a required refactor for v1.
+**Capture:** copy the drawing path from `PhotoVortexLayer.captureSource` (decoded `<img>` rects → 2D canvas, DPR clamp ≤1.5, skip incomplete/cross-origin) **with one required change vs vortex:**
+
+```ts
+// PhotoVortex today (do NOT copy this branch as-is):
+if (drawn === 0) {
+  console.warn(...);
+  return out; // solid dark canvas — still emits captured / hides grid
+}
+
+// PhotoGlitchLayer MUST instead:
+if (drawn === 0) {
+  console.warn('PhotoGlitchLayer: no thumbnails drawn into capture');
+  return null; // beginSession aborts: no upload, no emit('captured'), grid stays visible
+}
+```
+
+Rationale: glitch without photo content is a frozen black plate that incorrectly hides the live grid (§8). Vortex’s “dark fallback is better than crash” does **not** apply here.
+
+Optional shared helper later is fine; **not** required for v1. If shared, glitch path still needs the `drawn === 0 → null` policy (parameter or wrapper).
 
 ### 4.2 Shader (WebGL1 only — prototype is often WebGL2)
 
@@ -186,7 +221,7 @@ void main() {
 | `u_res` | `2f` | `drawingBufferWidth/Height` |
 | `u_time` | `1f` | seconds (`ts * 0.001` or elapsed) |
 | `u_tex` | `1i` | texture unit 0 |
-| `u_intensity` | `1f` | `Number(configStore.settings.dynamicThemeIntensity) \|\| 1` |
+| `u_intensity` | `1f` | `Number(config.settings.dynamicThemeIntensity)` — **do not** use `\|\| 1` (`Number(0)\|\|1 === 1` would mis-map intentional zero; layer already unmounted when intensity is 0, so the uniform is only bound for &gt;0 values) |
 
 Prototype has **no** `u_intensity`: add `getUniformLocation(program, 'u_intensity')` + `uniform1f` on the paint path; in GLSL multiply line/block displace, CA, and grain by `u_intensity` (and optionally ease invert rarity).
 
@@ -302,3 +337,6 @@ Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useI
 | 🟡 | Prototype lacks `u_intensity` | §4.2 JS bind + GLSL multiply; §4.3 skip at 0 |
 | 🟢 | Prefer `v_uv` over raw `gl_FragCoord` | §4.2 |
 | 🟢 | No new `cyberpunkMode` flag | §3 dual-pin only |
+| 🟠 | §4.1 “copy captureSource” vs §8 zero-draw abort conflict (vortex returns dark canvas) | §4.1: glitch **must** `return null` when `drawn===0` |
+| 🟡 | intensity 0 gate vs “byte-for-byte” cpFxActive | §2.1: intensity on GridView `:active`, not inside provide |
+| ⚪ | `Number(x) \|\| 1` maps 0→1 | §4.2: bind raw `Number(...)` only |
