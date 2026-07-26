@@ -50,10 +50,22 @@
   transition: opacity 120ms ease-out;
 }
 
-/* cyberpunk neon chrome accents */
+/* cyberpunk neon chrome accents (backdrop paints the city; shell is glass) */
 .cp-shell {
   --cp-magenta: #ff2bd6;
   --cp-cyan: #00e5ff;
+  --cp-violet: #6b21ff;
+  color-scheme: dark;
+}
+
+/* Selected sidebar / primary chips read neon under cyberpunk */
+.cp-shell .btn-primary,
+.cp-shell .bg-primary {
+  --fallback-p: #ff2bd6;
+}
+
+.cp-shell .text-primary {
+  color: color-mix(in srgb, var(--cp-cyan) 75%, white);
 }
 
 html, body {

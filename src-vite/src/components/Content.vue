@@ -27,7 +27,18 @@
       class="absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between z-30 overflow-hidden"
       :class="isFxChrome ? '' : 'bg-base-300/80 backdrop-blur-md'"
       :style="isFxChrome
-        ? { background: 'rgba(6, 8, 18, 0.16)', backdropFilter: 'blur(2px)', WebkitBackdropFilter: 'blur(2px)' }
+        ? (isCyberpunkChrome
+          ? {
+              background: 'rgba(6, 4, 14, 0.38)',
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+              boxShadow: 'inset 0 -1px 0 0 rgba(255, 43, 214, 0.25)',
+            }
+          : {
+              background: 'rgba(6, 8, 18, 0.16)',
+              backdropFilter: 'blur(2px)',
+              WebkitBackdropFilter: 'blur(2px)',
+            })
         : undefined"
       data-tauri-drag-region
     >
@@ -820,6 +831,13 @@ const isFxChrome = computed(() => {
   return isBlackHoleTheme(appearance, lightTheme, darkTheme)
     || isCyberpunkTheme(appearance, lightTheme, darkTheme);
 });
+const isCyberpunkChrome = computed(() =>
+  isCyberpunkTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
 
 const contentTitle = ref("");
 

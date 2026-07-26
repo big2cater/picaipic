@@ -195,10 +195,17 @@ const containerClass = computed(() => {
 
 const containerStyle = computed(() => {
   if (!isFxTheme.value) return undefined;
+  // Slightly stronger glass + cyan edge under cyberpunk so city grid reads through
+  const cyber = isCyberpunkTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  );
   return {
-    background: 'rgba(6, 8, 18, 0.16)',
-    backdropFilter: 'blur(2px)',
-    WebkitBackdropFilter: 'blur(2px)',
+    background: cyber ? 'rgba(6, 4, 14, 0.38)' : 'rgba(6, 8, 18, 0.16)',
+    backdropFilter: cyber ? 'blur(8px)' : 'blur(2px)',
+    WebkitBackdropFilter: cyber ? 'blur(8px)' : 'blur(2px)',
+    boxShadow: cyber ? 'inset 0 1px 0 0 rgba(0, 229, 255, 0.28)' : undefined,
   };
 });
 </script>

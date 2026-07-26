@@ -3,8 +3,8 @@
   <div
     :class="[
       'w-screen h-screen flex flex-col overflow-hidden select-none text-base-content/70',
-      // Solid shell normally; transparent under black hole so cosmos canvas shows through chrome
-      showBlackHole ? 'bg-transparent' : 'bg-base-300',
+      // Transparent under BH/CP so ambient backdrop reads through chrome
+      showFxShell ? 'bg-transparent' : 'bg-base-300',
       showCyberpunkChrome ? 'cp-shell' : '',
     ]"
   >
@@ -23,6 +23,12 @@
       :effective-elapsed-sec="effectiveElapsedSec"
       :appearance="blackHoleThemeOn ? 1 : Number(config.settings.appearance)"
       @radii="onHoleRadii"
+    />
+
+    <!-- Always-on cyberpunk city-grid ambient (idle glitch is PhotoGlitchLayer) -->
+    <CyberpunkBackground
+      v-if="showCyberpunkBackdrop"
+      :animate="!reducedMotion"
     />
 
     <!-- Title Bar: relative z-50 so it sits above BlackHoleBackground (fixed z-0) -->
@@ -54,7 +60,7 @@
           <div
             class="absolute inset-y-0 left-0 rounded-box"
             :class="[
-              showBlackHole ? '' : 'bg-base-200',
+              showFxShell ? '' : 'bg-base-200',
               isDraggingSplitter ? '' : 'transition-[width] duration-200 ease-in-out',
             ]"
             :style="{
@@ -68,8 +74,12 @@
                 : {}),
               ...(showCyberpunkChrome && !showBlackHole
                 ? {
-                    background: 'rgba(8, 6, 14, 0.88)',
-                    boxShadow: 'inset 0 0 0 1px rgba(255, 43, 214, 0.35)',
+                    // Glass over neon grid — magenta edge reads against city backdrop
+                    background: 'rgba(8, 4, 16, 0.42)',
+                    boxShadow:
+                      'inset 0 0 0 1px rgba(255, 43, 214, 0.45), 0 0 24px rgba(255, 43, 214, 0.12)',
+                    backdropFilter: 'blur(10px)',
+                    WebkitBackdropFilter: 'blur(10px)',
                   }
                 : {}),
             }"
@@ -225,6 +235,7 @@ import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex, setImportAiPrompts } from '@/common/api';
 import { useIdle } from '@/composables/useIdle';
 import { isBlackHoleTheme, isCyberpunkTheme } from '@/common/utils';
+import CyberpunkBackground from '@/components/CyberpunkBackground.vue';
 
 // vue components
 import TitleBar from '@/components/TitleBar.vue';
@@ -345,12 +356,15 @@ const showBlackHole = computed(
 );
 
 const showCyberpunkChrome = computed(() => cyberpunkThemeOn.value);
+/** Ambient cyber backdrop even when reduced-motion (static); glitch still gated off */
+const showCyberpunkBackdrop = computed(() => cyberpunkThemeOn.value);
+const showFxShell = computed(() => showBlackHole.value || showCyberpunkBackdrop.value);
 
-// Boot script paints a solid html background (#1d232a / white). Under black hole
-// that plate sits under the glass chrome and kills the cosmos read-through.
+// Boot script paints a solid html background (#1d232a / white). Under BH/CP
+// that plate sits under glass chrome and kills backdrop read-through.
 let savedHtmlBg = '';
 let savedBodyBg = '';
-function applyBlackHoleShellBg(on: boolean) {
+function applyFxShellBg(on: boolean) {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
   const body = document.body;
@@ -367,7 +381,7 @@ function applyBlackHoleShellBg(on: boolean) {
   }
 }
 
-watch(showBlackHole, (on) => applyBlackHoleShellBg(on), { immediate: true });
+watch(showFxShell, (on) => applyFxShellBg(on), { immediate: true });
 
 function onHoleRadii(payload: { R_event: number; R_inf: number }) {
   // BlackHoleBackground already thresholds; still skip no-op writes if parent re-emits.
@@ -647,7 +661,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  applyBlackHoleShellBg(false);
+  applyFxShellBg(false);
   clearLeftPanelAnimationTimer();
   window.removeEventListener('keydown', handleHomeKeyDown);
   unlistenOpenPreferences?.();
