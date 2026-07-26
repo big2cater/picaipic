@@ -52,10 +52,18 @@
               <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.general.appearance') }}</div>
               </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.appearance">
+              <select
+                class="select select-bordered select-sm min-w-32"
+                v-model="config.settings.appearance"
+                :disabled="isBlackHole"
+                :class="{ 'opacity-50 cursor-not-allowed': isBlackHole }"
+              >
                 <option v-for="(item, index) in appearanceOptions" :key="index" :value="item.value">{{ item.label }}</option>
               </select>
             </div>
+            <span v-if="isBlackHole" class="block px-1 text-xs text-base-content/30 leading-5">
+              {{ $t('settings.general.black_hole_appearance_locked') }}
+            </span>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.general.theme') }}</div>
@@ -69,6 +77,15 @@
               class="px-1 text-xs text-base-content/30 leading-5"
             >
               {{ $t('settings.general.black_hole_theme_hint') }}
+            </div>
+            <!-- dynamic theme intensity (v1.5) -->
+            <div v-if="isDynamicTheme" class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.general.dynamic_theme_intensity') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model.number="config.settings.dynamicThemeIntensity">
+                <option v-for="(item, index) in intensityOptions" :key="index" :value="item.value">{{ item.label }}</option>
+              </select>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
@@ -1664,6 +1681,7 @@
 <script setup lang="ts">
 
 import { ref, watch, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { useEventListener } from '@/composables/useEventListener';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit } from '@tauri-apps/api/event';
@@ -1724,7 +1742,7 @@ import {
   listRevokedKeys,
   setImportAiPrompts,
 } from '@/common/api';
-import { formatFileSize, isLinux, isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { formatFileSize, isLinux, isMac, setTheme, isBlackHoleTheme, THEME_ID, SCALE_VALUES } from '@/common/utils';
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
 import { usePluginStore } from '@/stores/pluginStore';
@@ -1807,6 +1825,9 @@ const aiPluginInvokeLoading = ref<Record<string, boolean>>({});
 const aiPluginTaskLoading = ref<Record<string, boolean>>({});
 const aiPluginProfileActionLoading = ref<Record<string, boolean>>({});
 const aiPluginSetupRunningFor = ref<{ pluginId: string; profileId: string } | null>(null);
+/** Cleared in finally + onUnmounted so navigating away cannot leak the poll interval. */
+let aiPluginSetupPollInterval: ReturnType<typeof setInterval> | null = null;
+let aiPluginSetupPollStop = false;
 const uninstallModeDialog = ref({ show: false, plugin: '', path: '' });
 let uninstallModeResolver: ((mode: 'code_only' | 'code_and_data' | 'cancel') => void) | null = null;
 const aiPluginProfileSmokeResults = ref<Record<string, AiPluginSmokeTestResult>>({});
@@ -2224,9 +2245,36 @@ const currentTheme = computed({
   get() {
     return config.settings.appearance === 0 ? config.settings.lightTheme : config.settings.darkTheme;
   },
-  set(value) {
-    config.settings.appearance === 0 ? config.settings.lightTheme = value : config.settings.darkTheme = value;
+  set(value: number) {
+    // v1.5: dual-pin + clear residual slot on black hole
+    if (value === THEME_ID.BLACK_HOLE) {
+      config.settings.lightTheme = THEME_ID.BLACK_HOLE;
+      config.settings.darkTheme = THEME_ID.BLACK_HOLE;
+    } else {
+      if (config.settings.appearance === 0) {
+        config.settings.lightTheme = value;
+        if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
+      } else {
+        config.settings.darkTheme = value;
+        if (config.settings.lightTheme === THEME_ID.BLACK_HOLE) config.settings.lightTheme = value;
+      }
+    }
   }
+});
+
+// v1.5: black hole detection + dynamic theme gating
+const isBlackHole = computed(() => isBlackHoleTheme(
+  Number(config.settings.appearance),
+  Number(config.settings.lightTheme),
+  Number(config.settings.darkTheme),
+));
+const isDynamicTheme = isBlackHole;
+
+// v1.5: dynamic theme intensity options (0/0.5/1/1.5)
+const intensityOptions = computed(() => {
+  const labels: string[] = localeMsg.value.settings.general.intensity_options || ['Off', 'Subtle', 'Standard', 'Intense'];
+  const values = [0, 0.5, 1, 1.5];
+  return labels.map((label: string, i: number) => ({ label, value: values[i] ?? 0 }));
 });
 
 const scaleOptions = computed(() => {
@@ -4458,9 +4506,13 @@ async function runAiPluginProfileSetup(plugin: AiPluginSummary, profile: AiPlugi
     if (!confirmed) return;
 
     // Start a polling loop to refresh setup job state while the command runs
-    let pollStop = false;
-    const pollInterval = setInterval(async () => {
-      if (pollStop) return;
+    aiPluginSetupPollStop = false;
+    if (aiPluginSetupPollInterval != null) {
+      clearInterval(aiPluginSetupPollInterval);
+      aiPluginSetupPollInterval = null;
+    }
+    aiPluginSetupPollInterval = setInterval(async () => {
+      if (aiPluginSetupPollStop) return;
       await loadAiPluginPanel(false, true);
     }, 2000);
 
@@ -4494,8 +4546,11 @@ async function runAiPluginProfileSetup(plugin: AiPluginSummary, profile: AiPlugi
       }
       await loadAiPluginPanel(false, true);
     } finally {
-      pollStop = true;
-      clearInterval(pollInterval);
+      aiPluginSetupPollStop = true;
+      if (aiPluginSetupPollInterval != null) {
+        clearInterval(aiPluginSetupPollInterval);
+        aiPluginSetupPollInterval = null;
+      }
       aiPluginSetupRunningFor.value = null;
       await loadAiPluginPanel(false, true);
     }
@@ -5404,8 +5459,10 @@ function splitMacShortcutLabel(label: string): string[] {
   return keys;
 }
 
+// Auto-cleaned on unmount via useEventListener
+useEventListener(window, 'keydown', handleKeyDown as EventListener);
+
 onMounted(async () => {
-  window.addEventListener('keydown', handleKeyDown);
   if (typeof config.settings.tabIndex !== 'number' || config.settings.tabIndex < 0 || config.settings.tabIndex >= settingsTabs.length) {
     config.settings.tabIndex = 0;
   }
@@ -5450,6 +5507,11 @@ onMounted(async () => {
 
 onUnmounted(() => {
   settingsHydrating.value = true;
+  aiPluginSetupPollStop = true;
+  if (aiPluginSetupPollInterval != null) {
+    clearInterval(aiPluginSetupPollInterval);
+    aiPluginSetupPollInterval = null;
+  }
   if (isDownloadingMultilingualModel.value) {
     void cancelMultilingualImageSearchModelDownload();
   }
@@ -5462,7 +5524,6 @@ onUnmounted(() => {
     unlistenImageSearchModelDownloadProgress = null;
   }
   document.documentElement.style.fontSize = '';
-  window.removeEventListener('keydown', handleKeyDown);
 });
 
 // general settings — emitSettings is gated until after mount hydrate

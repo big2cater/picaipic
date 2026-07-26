@@ -1,13 +1,24 @@
 <template>
   <div
     ref="containerRef"
-    class="w-full h-full" 
+    class="relative w-full h-full" 
     :class="{ 
       'pointer-events-none': uiStore.inputStack.length > 0,
     }"
     @wheel="onWheel"
     @dragstart.capture.prevent
   >
+    <!-- FragCoord-style photo-area vortex (WebGL UV warp). CSS card warp disabled while this is primary. -->
+    <PhotoVortexLayer
+      v-if="vortexEnabled"
+      class="z-20"
+      :active="vortexActive"
+      :source-el="containerRef"
+      :primary-rgb="vortexPrimaryRgb"
+      @captured="onVortexCaptured"
+      @cleared="onVortexCleared"
+    />
+
     <VirtualScroll
       v-if="fileList.length > 0"
       ref="scroller"
@@ -16,6 +27,8 @@
         'pt-12': !config.settings.grid.showFilmStrip,
         'pb-8': !config.settings.grid.showFilmStrip && config.settings.showStatusBar,
         'pb-1': !config.settings.grid.showFilmStrip && !config.settings.showStatusBar,
+        // Hide live grid after freeze-frame capture so only the warped layer shows
+        'opacity-0 pointer-events-none': vortexHidesGrid,
       }"
       :items="renderItems"
       :direction="config.settings.grid.showFilmStrip && config.settings.grid.previewPosition < 2 ? 'horizontal' : 'vertical'"
@@ -103,16 +116,19 @@
 
 <script setup lang="ts">
 
-import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick, inject, type Ref, type ComputedRef } from 'vue';
+import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick, inject, unref, type Ref, type ComputedRef } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
 import { formatDate } from '@/common/utils';
 import Thumbnail from '@/components/Thumbnail.vue';
 import VirtualScroll from '@/components/VirtualScroll.vue';
+import PhotoVortexLayer from '@/components/PhotoVortexLayer.vue';
 import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColumnLayout, calculateMasonryLayout, type Geometry } from '@/common/layout';
 import { IconCalendarDay, IconCalendarMonth, IconSearch } from '@/common/icons';
-import { useGravityWarp, type RadiiValue } from '@/composables/useGravityWarp';
+import { readPrimaryColor, type RadiiValue } from '@/common/blackHoleMath';
+// CSS per-card warp kept available but NOT driven while WebGL vortex is primary
+// import { useGravityWarp } from '@/composables/useGravityWarp';
 
 const props = withDefaults(defineProps<{
   selectedItemIndex: number;
@@ -167,12 +183,51 @@ const bhGravityActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('bhGr
 const bhRadii = inject<Ref<RadiiValue> | ComputedRef<RadiiValue> | null>('bhRadii', null);
 const gravityActiveFallback = ref(false);
 const radiiFallback = ref<RadiiValue>({ R_event: 0, R_inf: 0 });
-// useGravityWarp needs Ref-like; if inject null (shouldn't under Home), use fallbacks
-useGravityWarp({
-  rootEl: containerRef,
-  gravityActive: (bhGravityActive ?? gravityActiveFallback) as Ref<boolean> | ComputedRef<boolean>,
-  radii: (bhRadii ?? radiiFallback) as Ref<RadiiValue> | ComputedRef<RadiiValue>,
+
+// WebGL FragCoord-style vortex (photo area only). CSS card warp disabled as primary path.
+const vortexEnabled = computed(() => bhGravityActive != null);
+const vortexActive = computed(() => !!unref(bhGravityActive));
+const vortexHidesGrid = ref(false);
+const vortexPrimaryRgb = ref<[number, number, number]>([180, 80, 200]);
+
+function parsePrimaryRgb(): [number, number, number] {
+  const raw = readPrimaryColor();
+  // DaisyUI may expose "r g b" components or a css color; try both
+  const parts = raw.split(/[\s,]+/).map(Number).filter((n) => Number.isFinite(n));
+  if (parts.length >= 3) return [parts[0], parts[1], parts[2]];
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = 1;
+    const ctx = c.getContext('2d');
+    if (!ctx) return [180, 80, 200];
+    ctx.fillStyle = '#000';
+    ctx.fillStyle = raw.startsWith('#') || raw.includes('(') ? raw : `rgb(${raw})`;
+    ctx.fillRect(0, 0, 1, 1);
+    const d = ctx.getImageData(0, 0, 1, 1).data;
+    return [d[0], d[1], d[2]];
+  } catch {
+    return [180, 80, 200];
+  }
+}
+
+function onVortexCaptured() {
+  vortexHidesGrid.value = true;
+}
+
+function onVortexCleared() {
+  vortexHidesGrid.value = false;
+}
+
+watch(vortexActive, (on) => {
+  if (on) vortexPrimaryRgb.value = parsePrimaryRgb();
+  else vortexHidesGrid.value = false;
 });
+
+// Silence unused inject fallbacks (kept for future CSS-warp toggle)
+void gravityActiveFallback;
+void radiiFallback;
+void bhRadii;
+
 const scroller = ref<any>(null);
 const columnCount = ref(4);
 const containerWidth = ref(0);
@@ -321,7 +376,10 @@ const sectionHeaderEnabled = computed(() => {
 /** True when renderItems uses header + file wrappers (date groups or search section). */
 const hasHeaderItems = computed(() => dateGroupingEnabled.value || sectionHeaderEnabled.value);
 
-const renderItems = computed(() => {
+/** Build header+file list and fileIndex→displayIndex in one pass (B3/B4). */
+const renderLayout = computed(() => {
+  const fileIndexMap = new Map<number, number>();
+
   // Single section header for AI / similar / filename search result sets.
   if (sectionHeaderEnabled.value) {
     const label = String(props.sectionLabel || '').trim();
@@ -335,6 +393,7 @@ const renderItems = computed(() => {
       endIndex: props.fileList.length,
     }];
     props.fileList.forEach((file, fileIndex) => {
+      fileIndexMap.set(fileIndex, items.length);
       items.push({
         id: `section-file-${file?.id ?? fileIndex}-${fileIndex}`,
         isDateFile: true,
@@ -342,10 +401,12 @@ const renderItems = computed(() => {
         fileIndex,
       });
     });
-    return items;
+    return { items, fileIndexMap };
   }
 
-  if (!dateGroupingEnabled.value) return props.fileList;
+  if (!dateGroupingEnabled.value) {
+    return { items: props.fileList, fileIndexMap };
+  }
 
   const markersByPosition = new Map<number, any[]>();
   dateGroupMarkers.value.forEach(marker => {
@@ -372,6 +433,7 @@ const renderItems = computed(() => {
         endIndex: markerEndIndex.get(marker.key) ?? props.fileList.length,
       });
     });
+    fileIndexMap.set(fileIndex, items.length);
     items.push({
       id: `date-file-${file?.id ?? fileIndex}-${fileIndex}`,
       isDateFile: true,
@@ -380,15 +442,37 @@ const renderItems = computed(() => {
     });
   });
 
-  return items;
+  return { items, fileIndexMap };
 });
 
-const fileIndexToDisplayIndex = computed(() => {
-  const map = new Map<number, number>();
-  if (!dateGroupingEnabled.value && !sectionHeaderEnabled.value) return map;
-  renderItems.value.forEach((item, displayIndex) => {
-    if (item?.isDateFile) map.set(item.fileIndex, displayIndex);
-  });
+const renderItems = computed(() => renderLayout.value.items);
+
+const fileIndexToDisplayIndex = computed(() => renderLayout.value.fileIndexMap);
+
+/** Precomputed selection state per date-header key — avoids O(group) scans in template. */
+const dateGroupSelectionState = computed(() => {
+  const map = new Map<string, { allSelected: boolean; partialSelected: boolean }>();
+  if (!props.selectMode || !hasHeaderItems.value) return map;
+
+  for (const item of renderItems.value) {
+    if (!item?.isDateHeader || item.isSectionHeader) continue;
+    const key = String(item.id ?? item.label ?? '');
+    const startIndex = Number(item.startIndex ?? 0);
+    const endIndex = Number(item.endIndex ?? startIndex);
+    const fileCount = Math.max(0, endIndex - startIndex);
+    if (fileCount === 0) {
+      map.set(key, { allSelected: false, partialSelected: false });
+      continue;
+    }
+    let selectedCount = 0;
+    for (let index = startIndex; index < endIndex; index++) {
+      if (props.fileList[index]?.isSelected) selectedCount++;
+    }
+    map.set(key, {
+      allSelected: selectedCount === fileCount,
+      partialSelected: selectedCount > 0 && selectedCount < fileCount,
+    });
+  }
   return map;
 });
 
@@ -812,8 +896,8 @@ function scrollToItem(index: number, center = false) {
     
     if (!isFullyVisible) {
       if (itemTop < viewportTop) {
-        // Item is above viewport, scroll to show it at the top
-        el.scrollTop = itemTop;
+        // Item is above viewport: align under the pt-12 chrome padding
+        el.scrollTop = Math.max(0, itemTop - topPadding);
       } else if (itemBottom > viewportBottom) {
         // Item is below viewport, scroll to show it at the bottom (accounting for bottom padding)
         el.scrollTop = itemBottom - clientHeight + (topPadding + bottomPadding);
@@ -951,6 +1035,10 @@ function getNearestFileIndexFromDisplayIndex(displayIndex: number) {
 }
 
 function getDateGroupSelectionState(item: any) {
+  const key = String(item?.id ?? item?.label ?? '');
+  const cached = dateGroupSelectionState.value.get(key);
+  if (cached) return cached;
+  // Fallback for callers outside selectMode / missing key
   const startIndex = Number(item?.startIndex ?? 0);
   const endIndex = Number(item?.endIndex ?? startIndex);
   const fileCount = Math.max(0, endIndex - startIndex);
@@ -959,8 +1047,7 @@ function getDateGroupSelectionState(item: any) {
   }
   let selectedCount = 0;
   for (let index = startIndex; index < endIndex; index++) {
-    const file = props.fileList[index];
-    if (file?.isSelected) selectedCount++;
+    if (props.fileList[index]?.isSelected) selectedCount++;
   }
   return {
     allSelected: selectedCount === fileCount,

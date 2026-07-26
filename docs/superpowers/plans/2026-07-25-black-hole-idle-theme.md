@@ -1,5 +1,12 @@
 # Black Hole Idle Theme Implementation Plan
 
+> ## ⚠️ [SUPERSEDED] — 不要再按本计划实现
+>
+> 本计划基线为 **v1.3**（依赖 `configStore.settings.blackHoleMode` 布尔开关）。但 v1.4 设计已**删除该开关**（改用主题菜单 `themeId===3` / 双钉 `lightTheme=darkTheme=3`），相关代码也已落地 v1.4。
+> **照本计划新增 `configStore.settings.blackHoleMode` 持久字段，会直接撞上 `utils.ts` / `main.js` 的遗留迁移逻辑**（`migrateThemeSettings` 会把老 `blackHoleMode:true` 迁成 `themeId=3` 再清零），产生与 v1.4 主题-id 模型冲突的代码。
+> 黑洞扭曲增强 + 配色解耦（**v1.5**）的 task-by-task 实施计划见：**`docs/superpowers/plans/2026-07-25-black-hole-distortion-decouple-impl.md`**（基线 v1.4）。
+> 本文件仅保留作历史记录与 git 链接，不再作为实现依据。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship an opt-in “black hole theme”: centered ambient canvas on the main Home window; when the **main** window is system-maximized and the user is idle 15s, slowly grow the hole and gravity-warp **only GridView** thumbnail outer roots (`.bh-card`), with instant clear/rebound on input or exit conditions.

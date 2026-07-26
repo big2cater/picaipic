@@ -1,9 +1,10 @@
 # 黑洞主题扭曲增强 + 配色解耦 设计稿
 
-> 状态：设计稿 v1（待评审）
-> 范围：纯前端（`src-vite`），不触及 Rust / Tauri / DB / AI
-> 分支：`feat/black-hole-idle-theme`（基于 v1.4 已落地的主题菜单 + 宇宙背景 + CSS warp）
-> 目标：①把照片预览的引力扭曲从「刚体位移」升级为「撕裂+色散+径向模糊+透镜环」多层视觉；②让「黑洞」特效主题不受配色模式影响，配色模式（明亮/暗黑）只对默认/复古/CMYK 生效；③新增「动态主题强度」调节，为未来更多动态主题预留扩展。
+> 状态：设计稿 v1（CSS 多层 warp + 强度/配色）；**2026-07-26 产品引力主路径 = PhotoVortex WebGL**，本稿 CSS 层作算法/强度参考与可选回退
+> 范围：纯前端（`src-vite`）；扫描/RAW 见 `docs/guide/目前的开发情况.md`
+> 分支：`feat/black-hole-idle-theme`
+> 目标：①（历史）CSS 多层扭曲；②黑洞不受配色模式影响；③动态主题强度
+> **现状：** 空闲 **6s**；照片区 **`PhotoVortexLayer`**；GridView **不驱动** `useGravityWarp`
 
 ---
 
@@ -13,9 +14,21 @@
 |---|---|
 | 卡片 warp = `translate+rotate+scale+blur` 刚体 | 6 层叠加：位移旋转 / 各向异性拉伸 / 径向模糊 / 色散错位 / 横向撕裂切片 / 透镜环光（CSS filter + 伪元素） |
 | shader `u_appearance` 跟随 `settings.appearance` 调色 | 黑洞主题下 `u_appearance` 恒为 1（暗）；shader 源码不改，只改上游传值 |
-| `isBlackHoleTheme` 读 appearance 查活动槽（v1.4 现状） | **保持不变**（不改签名）；黑洞持久靠 §3.3 双钉两槽=3 + §3.4 appearance 置灰，不靠「任一=3」检测 |
+| `isBlackHoleTheme` 读 appearance 查活动槽（v1.4 现状） | **沿用 v1.4 实际三参数签名** `(appearance, lightTheme, darkTheme)`（v1.4 design §3.3.3 曾以 `(settings)` 简写，语义等价）；黑洞持久靠 §3.3 双钉两槽=3 + §3.4 appearance 置灰，不靠「任一=3」检测 |
 | 黑洞主题下 appearance 仍可切换且影响 chrome | appearance select 在黑洞主题下 `disabled` + 灰色 + hint；`setTheme` 黑洞时钉 `data-theme=dark` |
 | 无强度调节 | 新增 `settings.dynamicThemeIntensity`（0/0.5/1/1.5，select），仅动态主题显示，影响扭曲层不影响黑洞本体 |
+
+---
+
+## 0.1 本期相对 v1.4 修正的关键问题
+
+| 编号 | 症状 | root cause | 修复位置 |
+|---|---|---|---|
+| Bug 1（残留槽复活） | 选黑洞（双钉两槽=3）→ 切默认只写活动槽 → 非活动槽 darkTheme 残留 3 → 用户在默认下翻 appearance 到 dark → 活动槽读到残留 3 → 黑洞「复活」关不掉 | 选黑洞时只清活动槽、未清非活动槽残留的 3 | §3.3 setter else 分支清非活动槽残留 3 |
+| Bug 2（各向异性拉伸方向反） | `lerp(1,1.8,s)*I` 在 I=0.5 时值域全 <1（径向被压缩而非拉伸），I=1.5 时 stretchY=1.05>1（本该压扁反而膨胀） | `I` 外乘在 lerp 结果上，弱档把整段压到 1 以下 | §2.2 L2 / §2.3：将 `I` 放进 lerp 第二参数并钳 `[0,1]` |
+| Bug 3（I=0 卡片仍旋转） | 旧 `rotDeg` 的 orbit 项 `(a2-angle)` 未乘 `I`，I=0 时卡片仍在转，违背「I=0 不动」 | orbit 项未纳入 `I` 缩放 | §2.3：整段 `rotDeg` 乘 `I` |
+
+> 注：这三个编号仅用于本稿内自测回溯（见 §7 case 7 / 10b / 10c），非线上 issue tracker 编号。
 
 ---
 
@@ -26,7 +39,7 @@
    ├─ setTheme: data-theme 钉为 'dark' (UI chrome 统一暗底座)
    ├─ Settings: appearance select disabled + 灰色 + hint
    │           dynamic_theme_intensity select 显示 (仅动态主题)
-   ├─ isBlackHoleTheme: 保持 v1.4 签名 (读 appearance 查活动槽)；黑洞持久靠双钉两槽=3 + appearance 置灰
+   ├─ isBlackHoleTheme: 沿用 v1.4 实际三参数签名 (appearance, lightTheme, darkTheme)；黑洞持久靠双钉两槽=3 + appearance 置灰
    └─ Home.vue 挂 BlackHoleBackground:
         ├─ shader u_appearance 恒为 1 (dark) — 宇宙调色固定
         ├─ useGravityWarp (强度 I = dynamicThemeIntensity):
@@ -34,18 +47,18 @@
         │      L1 transform  位移旋转缩放
         │      L2 transform  各向异性拉伸 (转径向轴→拉伸→转回)
         │      L3 filter      径向模糊 blur
-        │      L4 filter      多层 drop-shadow 色散 (t>0.5 才上)
+        │      L4 filter      色散+色相偏移 (drop-shadow 仅 t>0.5；hue-rotate 随 blur 常驻扭曲区)
         │      L5 ::before    横向撕裂切片 (t>0.35 才上)
         │      L6 ::after     透镜环光扭曲
         │    每层强度乘 I；I=0 仅背景、卡片不动
-        └─ reduced-motion: 整关 (与现有一致)
+        └─ reduced-motion: 整关 = BlackHoleBackground 组件不挂载（零开销），无宇宙层、无扭曲（区别于 I=0 的「挂载但仅背景慢转」）
 ```
 
 ### 数据流改动点
 
 | 文件 | 改动 |
 |---|---|
-| `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **签名不变**（沿用 v1.4 读 appearance 查活动槽） |
+| `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **沿用 v1.4 三参数签名** `(appearance, lightTheme, darkTheme)` |
 | `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展 6 层字段；`computeCardWarp` 加 `intensity` + `swirl` 参数；`cardWarpCss` 返回 struct `{transform, filter, vars}`；新增 `readPrimaryColor()` |
 | `src-vite/src/composables/useGravityWarp.ts` | 写 transform/filter + CSS 变量（`--bh-tear` 等）；性能开关（L4/L5 阈值、>80 张降级） |
 | `src-vite/src/components/BlackHoleBackground.vue` | 不改 shader；`appearance` prop 由 Home 在黑洞时恒传 1 |
@@ -79,7 +92,7 @@ I        = dynamicThemeIntensity  (0 / 0.5 / 1 / 1.5)
 | L1 位移旋转 | 灯丝拉伸方向感 | `translate(tx,ty) rotate(rotDeg) scale(scale)` | `tx,ty` 乘 I；`scale = lerp(1,0.5,clamp(s*I,0,1))`；`rotDeg` 整段乘 I |
 | L2 各向异性拉伸 | 灯丝拉伸+延展 | transform 追加 `rotate(radialAxis) scale(stretchX,stretchY) rotate(-radialAxis)` | `stretchX = lerp(1, 1.8, clamp(s*I,0,1))`；`stretchY = lerp(1, 0.7, clamp(s*I,0,1))`（I 放进 lerp 第二参数，非外乘） |
 | L3 径向模糊 | 径向模糊+延展 | `filter: blur(radialBlur)` | `radialBlur = lerp(0, 4, s) * I` |
-| L4 色散错位 | 灯丝拉伸+色散错位 | filter 追加多层 `drop-shadow(±dispPx,0,red/cyan)` | `dispPx = lerp(0, 6, s) * I`；仅 `t > 0.5` 启用 |
+| L4 色散错位+色相偏移 | 灯丝拉伸+色散+色相微偏 | filter 追加 `hue-rotate(hueShift)`（随 blur 常驻扭曲区）+ 多层 `drop-shadow(±dispPx,0,red/cyan)`（仅 `t > 0.5` 启用） | `dispPx = lerp(0, 6, s) * I`；`hueShift = lerp(0, 20, s) * I`；drop-shadow 仅 `t > 0.5` |
 | L5 横向撕裂叠层 | 横向碎片撕裂（近似） | `.bh-card::before`：`repeating-linear-gradient` scanline 纹理 + **整体** `translateX(tearOffset)`（单伪元素无法逐带独立平移，此为近似 scanline 位移，非真·逐带撕裂） | `tearOffset = lerp(0, 8, s) * I`；仅 `t > 0.35` 启用 |
 | L6 透镜环光扭曲 | 透镜环状光扭曲 | `.bh-card::after`：`box-shadow: 0 0 calc(var(--bh-ring)*20px) var(--bh-primary)` | `ringGlow = lerp(0, 0.6, s) * I` |
 
@@ -90,16 +103,16 @@ I        = dynamicThemeIntensity  (0 / 0.5 / 1 / 1.5)
 
 ```ts
 // L1 基础位移旋转缩放（乘 I；I=0 时输出空 transform，卡片不动但仍属动态主题）
-// 注：所有 s*I 都钳到 [0,1]，防未来 I 放开后 lerp 越界（建议 8）
+// 注：所有 s*I 都钳到 [0,1]，防未来 I 放开后 lerp 越界
 // 注：基类 scale=lerp(1,0.45,t) 用线性 t；本节改用 s=smoothstep(t) 作观感增强，最小 0.5 vs 0.45，眼校即可
 const k = clamp(s * I, 0, 1);
 const tx = (nx - cx) * I;
 const ty = (ny - cy) * I;
 const scale = lerp(1, 0.5, k);
-// rotDeg 整段乘 I（含 orbit 项 a2-angle 与 swirl 项）——否则 I=0 时 orbit 仍在转（Bug 3）
+// rotDeg 整段乘 I（含 orbit 项 a2-angle 与 swirl 项）——否则 I=0 时 orbit 仍在转（I=0 时 orbit 项也归零，避免卡片仍在转）
 const rotDeg = (((a2 - angle) * 180) / Math.PI + swirl * s) * I;
 
-// L2 各向异性拉伸（径向轴）——I 放进 lerp 第二参数并钳 [0,1]（Bug 2）
+// L2 各向异性拉伸（径向轴）——I 放进 lerp 第二参数并钳 [0,1]（避免弱档反向压缩）
 // 旧写法 lerp(1,1.8,s)*I 在 I=0.5 时值域 [0.5,0.9] 全<1（压缩非拉伸）、I=1.5 时 stretchY=1.05>1（膨胀）
 const stretchX = lerp(1, 1.8, k);
 const stretchY = lerp(1, 0.7, k);
@@ -113,7 +126,7 @@ const transform = `translate(${tx}px,${ty}px) rotate(${rotDeg}deg) scale(${scale
 const radialBlur = lerp(0, 4, s) * I;     // I=0 → 0
 const dispPx = lerp(0, 6, s) * I;
 const hueShift = lerp(0, 20, s) * I;
-// L4 启用条件：t>0.5 且 I>0；I>=1.5 时也降档（建议 7）——近黑洞卡多时 drop-shadow 开销大
+// L4 启用条件：t>0.5 且 I>0；I>=1.5 时也降档（强档错位大、近黑洞卡多时 drop-shadow 开销重）
 // visibleCardCount 由 useGravityWarp 每轮传入（≈ 网格 .bh-card 总数，非"可见数"，作上限保护）
 const useDispersion = t > 0.5 && I > 0 && !(I >= 1.5 && visibleCardCount > 40);
 const filter = `blur(${radialBlur}px) hue-rotate(${hueShift}deg)`
@@ -126,7 +139,8 @@ const filter = `blur(${radialBlur}px) hue-rotate(${hueShift}deg)`
 const vars = {
   '--bh-tear': `${lerp(0, 8, s) * I}px`,
   '--bh-tear-op': t > 0.35 && I > 0 ? String(s * I) : '0',
-  '--bh-ring': String(lerp(0, 0.6, s) * I),
+  '--bh-ring': String(lerp(0, 0.6, s) * I),                   // box-shadow 尺寸系数（最大 0.6*20=12px）
+  '--bh-ring-op': String(clamp(lerp(0, 1, s) * I, 0, 1)), // 透明度，独立 0..1（最大 100%）
   // --bh-primary 是颜色，由 useGravityWarp 从 readPrimaryColor() 取后单独写入（不在此 struct 内，因与卡片无关、全局同值）
 };
 
@@ -176,7 +190,7 @@ const vars = {
   z-index: 2;
   border-radius: inherit;
   box-shadow: 0 0 calc(var(--bh-ring, 0) * 20px) var(--bh-primary, transparent);
-  opacity: var(--bh-ring, 0);
+  opacity: var(--bh-ring-op, 0);
   transition: opacity 120ms ease-out;
 }
 ```
@@ -187,7 +201,7 @@ const vars = {
 |---|---|
 | L4 阈值 | `t > 0.5` 才上色散 drop-shadow（远区只 L1+L2+L3+L6）；**强档降级**：`I >= 1.5 且 visibleCardCount > 40` 时也跳过 L4（drop-shadow 在强档错位大、近黑洞卡多时开销重） |
 | L5 阈值 | `t > 0.35` 才上 `::before` 撕裂切片 |
-| 可见卡上限 | 每轮 `querySelectorAll('.bh-card')` 若 >80 张（异常），跳过 L4/L5，只做 L1+L2 |
+| 可见卡上限 | 每轮 `querySelectorAll('.bh-card')` 若 >80 张跳过 L4/L5，只做 L1+L2。注：GridView 为虚拟滚动，仅渲染视口内卡、实测通常 <60；>80 为异常缩放/超小缩略图/巨屏的安全上限，非库规模指标（100k+ 文件库下视口卡仍远小于 80） |
 | 节流 | 仍 120ms/轮；帧间靠 CSS `transition`（与 Thumbnail 现有 transition 协调） |
 | will-change | gravity 期间 `will-change: transform, filter`；clear 移除 |
 | 滚动 | wheel/scroll → idle=false → 整表 clear（沿用 §6.3） |
@@ -205,10 +219,10 @@ const vars = {
 
 ## 3. 配色与特效解耦
 
-### 3.1 `isBlackHoleTheme` 保持 v1.4 现状（不改签名）
+### 3.1 `isBlackHoleTheme` 沿用 v1.4 实际三参数签名（不改参数）
 
 ```ts
-// 保持 v1.4：读 appearance 查活动槽（utils.ts:46-53 现有逻辑不动）
+// 沿用 v1.4 实际实现的三参数签名（utils.ts:46-53 现有逻辑不动；v1.4 design §3.3.3 曾以 (settings) 简写，语义等价）
 export function isBlackHoleTheme(
   appearance: number,
   lightTheme: number,
@@ -264,7 +278,7 @@ const currentTheme = computed({
       config.settings.lightTheme = THEME_ID.BLACK_HOLE;
       config.settings.darkTheme = THEME_ID.BLACK_HOLE;
     } else {
-      // 写活动槽；若非活动槽残留 3（曾选黑洞），一并清掉，防翻转 appearance 复活
+      // 写活动槽；非活动槽若残留 3 一并清掉（防 appearance 翻转复活，见下「为何必做」）
       if (config.settings.appearance === 0) {
         config.settings.lightTheme = value;
         if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
@@ -283,7 +297,7 @@ const currentTheme = computed({
 
 ### 3.4 Settings UI：appearance 置灰
 
-`isBlackHoleTheme` 是 `utils.ts` 的**函数**，Settings 模板里不能直接当布尔用，需 `computed` 包装（建议 6）：
+`isBlackHoleTheme` 是 `utils.ts` 的**函数**，Settings 模板里不能直接当布尔用，需 `computed` 包装：
 
 ```ts
 // Settings.vue <script setup>
@@ -293,7 +307,8 @@ const isBlackHole = computed(() => isBlackHoleTheme(
   Number(config.settings.lightTheme),
   Number(config.settings.darkTheme),
 ));
-// 本期动态主题 === 黑洞主题（未来加 || isAuroraTheme || ...）
+// 本期仅「黑洞」是动态主题（现在就是别名，尚未实现多主题）；未来扩展点：
+//   const isDynamicTheme = computed(() => isBlackHole || isAuroraTheme || isCyberpunkTheme)
 const isDynamicTheme = isBlackHole;
 ```
 
@@ -404,7 +419,7 @@ settings.general.intensity_options
 
 | 文件 | 改动 |
 |---|---|
-| `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **签名不变**（沿用 v1.4 读 appearance 查活动槽） |
+| `src-vite/src/common/utils.ts` | `setTheme` 黑洞钉 `data-theme=dark`；`isBlackHoleTheme` **沿用 v1.4 三参数签名** `(appearance, lightTheme, darkTheme)` |
 | `src-vite/src/common/blackHoleMath.ts` | `CardWarp` 扩展 6 层字段；`computeCardWarp(cx,cy,HX,HY,R_event,R_inf,orbitPhase,swirl=12,intensity)`（Issue C：补 swirl 参数）；`cardWarpCss` 返回 struct `{ transform, filter, vars }`（Issue B：CSS 变量由 useGravityWarp 写入元素，非字符串内带）；新增 `readPrimaryColor()` 导出 |
 | `src-vite/src/composables/useGravityWarp.ts` | 消费 `intensity`；写 CSS 变量；L4/L5 阈值开关；>80 张降级 |
 | `src-vite/src/components/BlackHoleBackground.vue` | 不改 shader；props 不变（appearance 由 Home 控） |
@@ -441,18 +456,18 @@ settings.general.intensity_options
 |---|---|---|
 | 1 | 主题=默认/复古/CMYK | 无宇宙层、无扭曲、appearance 正常切换 chrome |
 | 2 | 选黑洞 | appearance select 置灰 + hint；data-theme=dark；宇宙+黑洞 |
-| 3 | 黑洞下切 appearance（若强制启用） | UI chrome 不变、宇宙调色不变、特效不消失 |
-| 4 | 黑洞+最大化静止 ≥15s, I=1 | 卡片朝黑洞方向拉伸+色散+撕裂切片+透镜环；opacity 1 |
+| 3 | 黑洞下切 appearance（若强制启用） | UI chrome 不变、宇宙调色不变、特效不消失 _(替代 v1.4 §11 case 3b：v1.4 允许黑洞下切换 appearance，v1.5 已把 appearance select 在黑洞下 `disabled`，不再允许切换——属有意行为变更)_ |
+| 4 | 黑洞+最大化静止 ≥6s, I=1 | **产品：** PhotoVortex；**若重开 CSS warp：** 拉伸+色散+撕裂+透镜环 |
 | 5 | 同上, I=0 | 卡片不动（含不旋转、不位移、不拉伸）；宇宙背景在 |
 | 6 | 同上, I=1.5 | 撕裂/色散明显更强 |
 | 7 | 同上, I=0.5 | 温和扭曲（拉伸>1 非<1，确认无「压缩」回归） |
 | 8 | 引力中输入 | 立即回弹（transform/filter/CSS 变量全清） |
 | 9 | 引力中切强度 | 实时生效（下一轮 120ms） |
 | 10 | 切回默认/复古/CMYK | 立即卸宇宙 + clear warp + appearance 解禁 |
-| 10b | 选黑洞→切「默认」(appearance=0) | lightTheme=0、darkTheme 被清成 0（不残留 3）；isBlackHole=false；黑洞彻底关（Bug 1 回归） |
+| 10b | 选黑洞→切「默认」(appearance=0) | lightTheme=0、darkTheme 被清成 0（不残留 3）；isBlackHole=false；黑洞彻底关（残留槽已清，复活路径堵死） |
 | 10c | 选黑洞→切默认→翻 appearance 到 dark | isBlackHole 仍 false、宇宙不重载、特效不复活（验证残留槽已清，复活路径堵死） |
 | 11 | 卡片可见数 >80（异常） | L4/L5 跳过，只 L1+L2，不卡顿 |
-| 12 | reduced-motion | 无宇宙动效层、无扭曲 |
+| 12 | reduced-motion | BlackHoleBackground 不挂载（零开销），无宇宙层、无扭曲（与 I 取值无关；区别于 case 5/6「I=0 但组件仍挂载、宇宙背景在」） |
 | 13 | 旧配置无 dynamicThemeIntensity | hydrate 填 1，不报错 |
 | 14 | 切换主题后 appearance 值 | 仍保留原值（黑洞期间冻结不丢失） |
 

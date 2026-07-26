@@ -1111,8 +1111,11 @@
         "Large",
         "Larger"
       ],
-      "black_hole_theme_hint": "Cosmic ambient background; ~15s idle while maximized enables gravity (always reversible)",
+      "black_hole_theme_hint": "Cosmic ambient background; ~6s idle while maximized enables gravity (always reversible)",
       "black_hole_theme_reduced_motion": "Reduced motion is on; cosmic motion stays off",
+      "black_hole_appearance_locked": "Color mode is locked under Black hole theme",
+      "dynamic_theme_intensity": "Dynamic theme intensity",
+      "intensity_options": ["Off", "Subtle", "Standard", "Intense"],
       "show_button_text": "Show sidebar labels",
       "show_tool_tip": "Show button tips",
       "show_status_bar": "Show status bar",

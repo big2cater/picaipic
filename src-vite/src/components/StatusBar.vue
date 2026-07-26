@@ -1,5 +1,5 @@
 <template>
-  <div :class="containerClass">
+  <div :class="containerClass" :style="containerStyle">
     <div
       v-if="hasData"
       class="flex gap-4 items-center flex-1 min-w-0 overflow-hidden whitespace-nowrap text-base-content/70"
@@ -67,12 +67,14 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { config } from '@/common/config';
 import {
   formatFileSize,
   shortenFilename,
   formatDimensionText,
   formatCaptureSettings,
   formatTimestamp,
+  isBlackHoleTheme,
 } from '@/common/utils';
 import {
   IconCheckAll,
@@ -174,9 +176,28 @@ const hasRealSelectedFile = computed(() => {
   const file = currentFile.value;
   return !!file && !file.isPlaceholder;
 });
+const isBlackHoleChrome = computed(() =>
+  isBlackHoleTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
+
 const containerClass = computed(() => {
-  const base = 'px-2 h-8 flex items-center justify-between text-sm cursor-default bg-base-300/80 backdrop-blur-md';
+  const base = isBlackHoleChrome.value
+    ? 'px-2 h-8 flex items-center justify-between text-sm cursor-default'
+    : 'px-2 h-8 flex items-center justify-between text-sm cursor-default bg-base-300/80 backdrop-blur-md';
   if (props.isEmbedded) return base;
   return `${base} absolute bottom-0 left-0 right-0 z-30`;
+});
+
+const containerStyle = computed(() => {
+  if (!isBlackHoleChrome.value) return undefined;
+  return {
+    background: 'rgba(6, 8, 18, 0.16)',
+    backdropFilter: 'blur(2px)',
+    WebkitBackdropFilter: 'blur(2px)',
+  };
 });
 </script>

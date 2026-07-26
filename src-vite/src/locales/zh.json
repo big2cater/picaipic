@@ -1111,8 +1111,11 @@
         "大",
         "更大"
       ],
-      "black_hole_theme_hint": "宇宙氛围背景；窗口最大化后发呆约 15 秒释放引力（可随时回弹）",
+      "black_hole_theme_hint": "宇宙氛围背景；窗口最大化后发呆约 6 秒释放引力（可随时回弹）",
       "black_hole_theme_reduced_motion": "系统已开启「减少动态效果」，宇宙动效不会运行",
+      "black_hole_appearance_locked": "黑洞主题下配色模式不生效",
+      "dynamic_theme_intensity": "动态主题强度",
+      "intensity_options": ["关", "弱", "标准", "强"],
       "show_button_text": "显示侧边栏标签",
       "show_tool_tip": "显示按钮提示",
       "show_status_bar": "显示状态栏",

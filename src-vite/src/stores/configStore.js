@@ -143,6 +143,8 @@ export const useConfigStore = defineStore('configStore', {
       // Theme index (v1.4): 0 default, 1 retro, 2 cmyk, 3 black hole — see setTheme / isBlackHoleTheme
       lightTheme: 0,
       darkTheme: 0,
+      // v1.5: dynamic theme distortion intensity (0=off 0.5=subtle 1=standard 1.5=intense)
+      dynamicThemeIntensity: 1,
       scale: 1,                   // root font-size scale
       showButtonText: true,       // show button text
       showToolTip: true,          // show button tooltip

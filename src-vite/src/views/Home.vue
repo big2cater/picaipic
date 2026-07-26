@@ -1,6 +1,12 @@
 <template>
   
-  <div class="w-screen h-screen flex flex-col overflow-hidden select-none bg-base-300 text-base-content/70">
+  <div
+    :class="[
+      'w-screen h-screen flex flex-col overflow-hidden select-none text-base-content/70',
+      // Solid shell normally; transparent under black hole so cosmos canvas shows through chrome
+      showBlackHole ? 'bg-transparent' : 'bg-base-300',
+    ]"
+  >
     <transition name="fade">
       <div
         v-if="isSwitchingLibrary"
@@ -14,39 +20,58 @@
       v-if="showBlackHole"
       :gravity-active="gravityActive"
       :effective-elapsed-sec="effectiveElapsedSec"
-      :appearance="Number(config.settings.appearance)"
+      :appearance="blackHoleThemeOn ? 1 : Number(config.settings.appearance)"
       @radii="onHoleRadii"
     />
 
-    <!-- Title Bar -->
-    <TitleBar v-if="showDesktopTitleBar" titlebar="PicAiPic" viewName="Home" :icon="iconLogo"/>
+    <!-- Title Bar: relative z-50 so it sits above BlackHoleBackground (fixed z-0) -->
+    <TitleBar
+      v-if="showDesktopTitleBar"
+      titlebar="PicAiPic"
+      viewName="Home"
+      :icon="iconLogo"
+      class="relative z-50 shrink-0"
+    />
 
     <!-- Main Content -->
-    <div class="flex-1 flex overflow-hidden">
+    <div class="relative z-10 flex-1 flex overflow-hidden">
 
-      <!-- left pane -->
+      <!-- left pane: z-20 keeps chrome above photo vortex (cards use low z-index inside content) -->
       <div
         v-if="config.leftPanel.show && !uiStore.isFullScreen"
         ref="leftPanelRootRef"
         tabindex="-1"
         :class="[
-          'relative flex my-1 ml-1 z-10 select-none outline-none',
+          'relative flex my-1 ml-1 z-20 select-none outline-none',
           !leftPanelLayoutExpanded && isMac ? 'mt-12 mb-8': '',
         ]"
         :style="{ width: leftPanelLayoutExpanded ? config.leftPanel.width + 'px' : '64px' }"
         data-tauri-drag-region
         @focus="uiStore.setActivePane('left-sidebar')"
       >
+          <!-- Under black hole: very light glass so starfield remains visible through chrome -->
           <div
-            class="absolute inset-y-0 left-0 bg-base-200 rounded-box"
-            :class="isDraggingSplitter ? '' : 'transition-[width] duration-200 ease-in-out'"
-            :style="{ width: leftPanelVisualExpanded ? config.leftPanel.width + 'px' : '64px' }"
+            class="absolute inset-y-0 left-0 rounded-box"
+            :class="[
+              showBlackHole ? '' : 'bg-base-200',
+              isDraggingSplitter ? '' : 'transition-[width] duration-200 ease-in-out',
+            ]"
+            :style="{
+              width: leftPanelVisualExpanded ? config.leftPanel.width + 'px' : '64px',
+              ...(showBlackHole
+                ? {
+                    // Avoid DaisyUI oklch + Tailwind opacity; plain rgba always composites
+                    background: 'rgba(6, 8, 18, 0.22)',
+                    boxShadow: 'inset 0 0 0 1px rgba(255, 255, 255, 0.04)',
+                  }
+                : {}),
+            }"
           ></div>
 
           <!-- side bar -->
           <div 
             :class="[
-              'fixed top-14 min-w-16 bottom-10 z-10 flex flex-col items-center',
+              'fixed top-14 min-w-16 bottom-10 z-20 flex flex-col items-center',
               config.settings.showButtonText ? 'space-y-3' : 'space-y-1' 
             ]" 
             data-tauri-drag-region
@@ -150,10 +175,10 @@
         @mouseup="stopDraggingSplitter"
       ></div>
        
-      <!-- content area -->
+      <!-- content area: isolate so card z-index never escapes above left chrome -->
       <div 
         :class="[
-          'flex-1 flex relative',
+          'flex-1 flex relative z-0 isolate overflow-hidden',
           showDesktopTitleBar ? 'rounded-tl-box' : '',
         ]"
       >
@@ -261,7 +286,7 @@ const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const uiStore = useUIStore();
 
-const { idle } = useIdle(15000);
+const { idle } = useIdle(6000);
 const reducedMotion = ref(false);
 const docHidden = ref(typeof document !== 'undefined' ? document.hidden : false);
 const effectiveElapsedSec = ref(0);
@@ -293,7 +318,38 @@ const showBlackHole = computed(
   () => blackHoleThemeOn.value && !reducedMotion.value,
 );
 
+// Boot script paints a solid html background (#1d232a / white). Under black hole
+// that plate sits under the glass chrome and kills the cosmos read-through.
+let savedHtmlBg = '';
+let savedBodyBg = '';
+function applyBlackHoleShellBg(on: boolean) {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  const body = document.body;
+  if (on) {
+    if (!savedHtmlBg) savedHtmlBg = root.style.backgroundColor || '';
+    if (!savedBodyBg) savedBodyBg = body.style.backgroundColor || '';
+    root.style.backgroundColor = 'transparent';
+    body.style.backgroundColor = 'transparent';
+  } else {
+    root.style.backgroundColor = savedHtmlBg || '';
+    body.style.backgroundColor = savedBodyBg || '';
+    savedHtmlBg = '';
+    savedBodyBg = '';
+  }
+}
+
+watch(showBlackHole, (on) => applyBlackHoleShellBg(on), { immediate: true });
+
 function onHoleRadii(payload: { R_event: number; R_inf: number }) {
+  // BlackHoleBackground already thresholds; still skip no-op writes if parent re-emits.
+  const prev = holeRadii.value;
+  if (
+    Math.abs(prev.R_event - payload.R_event) < 0.5
+    && Math.abs(prev.R_inf - payload.R_inf) < 0.5
+  ) {
+    return;
+  }
   holeRadii.value = payload;
 }
 
@@ -562,6 +618,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  applyBlackHoleShellBg(false);
   clearLeftPanelAnimationTimer();
   window.removeEventListener('keydown', handleHomeKeyDown);
   unlistenOpenPreferences?.();

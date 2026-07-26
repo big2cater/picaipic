@@ -1,10 +1,21 @@
 # 黑洞主题（Black Hole Idle Theme）设计文档
 
-> 状态：设计稿 **v1.4**（主题菜单并入 + 宇宙背景 + WebGL 档，待实现）
-> 范围：纯前端（`src-vite`），不触及 Rust / Tauri 命令 / Track C 模型栈
-> 目标：在 **设置 → 主题** 中选择「黑洞」后启用宇宙+黑洞氛围；主窗最大化且空闲 15 秒后，引力把主网格可见照片拉向事件视界并环绕（不消失、可回弹）。
-> 背景渲染：**宇宙场景 + 中心黑洞**（WebGL 解析近似着色器默认 + Canvas2D 降级）；照片聚拢仍为 CSS transform。
-> **无独立「黑洞主题」开关**；主题列表精简为 **默认 / 复古 / CMYK / 黑洞**。
+> 状态：设计稿 **v1.4** 为基线；**2026-07-26 产品实现已收敛**（见下方「现状」）。手动 QA 仍建议过一遍。
+> 范围：纯前端（`src-vite`）；扫描/RAW 相关性能修复在 Rust，见 `docs/guide/目前的开发情况.md` 2026-07-26。
+> 目标（v1.4）：设置主题选「黑洞」启用宇宙氛围；主窗最大化且空闲后启动照片区引力特效。
+> 背景渲染：**宇宙场景 + 中心黑洞**（WebGL 解析近似 + Canvas2D 降级）。
+> **无独立「黑洞主题」开关**；主题列表：**默认 / 复古 / CMYK / 黑洞**。
+>
+> ### 2026-07-26 现状（以代码为准，覆盖文内部分 v1.4 表述）
+>
+> | 项 | v1.4 原稿 | 当前实现 |
+> |---|---|---|
+> | 空闲触发 | 15s | **6s**（`Home.vue` `useIdle(6000)`） |
+> | 照片特效主路径 | CSS `useGravityWarp` 刚体/多层 warp | **`PhotoVortexLayer` WebGL UV 透镜**（FragCoord 风格）；仅照片区；冻结可见缩略图纹理 |
+> | 卡片是否消失 | 不消失、可回弹 | 漩涡层可把纹理吸进视界；**退出 idle/最大化立即恢复网格** |
+> | CSS warp | 主路径 | 代码保留，GridView **未驱动** |
+> | 配色/强度 | v1.5：appearance 锁定 + `dynamicThemeIntensity` | 已落地 |
+> | Chrome | 未强调半透明 | TitleBar z-50；侧栏/顶栏玻璃；内容区 isolate |
 
 ---
 
@@ -48,7 +59,7 @@
 | 黑洞行为 | **禁止静止增长**：引力触发后缓慢变大（半径/引力范围随有效空闲时长扩张） |
 | 照片结局 | 弯折聚拢在事件视界边缘**环绕**（不消失，`opacity` 保持 1） |
 | 回弹 | 任意输入 / 退出最大化 / 阻塞 UI / **换离黑洞主题** → 立即清除 transform |
-| 引力生效 | **当前主题为黑洞** 且 **系统窗口最大化** 且 **空闲 15s** 且 网格可玩（见 §4） |
+| 引力生效 | **当前主题为黑洞** 且 **系统窗口最大化** 且 **空闲 6s** 且 网格可玩（见 §4） |
 | 平时（黑洞主题但未最大化/未空闲） | 宇宙+黑洞氛围慢转，不增长、不拉照片 |
 | 背景画质 | **默认 WebGL 解析近似**；失败/弱 GPU → **Canvas2D 宇宙+盘降级**；照片仍 CSS warp |
 | 阻塞 UI 时 | **不启引力**；宇宙背景仍可显示 |
@@ -83,7 +94,7 @@ graph TD
 | `uiStore.isMaximized` | **主窗**系统最大化真相源 | 特效；其它窗口最大化 |
 | `TitleBar`（共享） | **仅** `viewName==='Home'` 时同步 `uiStore.isMaximized` | Settings / ImageEditor 写 store |
 | `setTheme` / `app.css` themes | 精简菜单对应的 Daisy 名；黑洞用约定 base chrome | 画宇宙 |
-| `useIdle` | 全局 15s 空闲（Home 生命周期） | 是否最大化 |
+| `useIdle` | 全局 **6s** 空闲（Home 生命周期；原 15s） | 是否最大化 |
 | `BlackHoleBackground` | **宇宙 + 黑洞** WebGL/Canvas2D；读 appearance 调色；半径增长 | 改卡片 DOM |
 | `useGravityWarp` | 消费 `gravityActive` + 半径；节流写 `.bh-card` | 拼 inputStack / isSwitchingLibrary |
 | `GridView` | warp 查询根 | 组装全局 UI 条件 |
@@ -179,8 +190,14 @@ state: () => ({
 
 ```ts
 // Home / Settings / background 共用
-function isBlackHoleTheme(settings): boolean {
-  const id = settings.appearance === 0 ? settings.lightTheme : settings.darkTheme;
+// 注：v1.5 已把本伪代码精化为三参数签名，与 utils.ts:46-53 真实实现一致
+// （v1.4 此处曾以 (settings) 简写表示，语义等价）
+function isBlackHoleTheme(
+  appearance: number,
+  lightTheme: number,
+  darkTheme: number,
+): boolean {
+  const id = appearance === 0 ? lightTheme : darkTheme;
   return Number(id) === 3;
 }
 ```
@@ -200,10 +217,10 @@ function isBlackHoleTheme(settings): boolean {
 
 ### 4.1 `useIdle.ts`
 
-全局监听 `mousemove` / `keydown` / `scroll` / `wheel` / `touchstart`（`passive: true`），任意活动重置 15s 定时器。
+全局监听 `mousemove` / `keydown` / `scroll` / `wheel` / `touchstart`（`passive: true`），任意活动重置 **6s** 定时器（实现：`useIdle(6000)`）。
 
 ```ts
-export function useIdle(ms = 15000) {
+export function useIdle(ms = 6000) {
   const idle = ref(false);
   // reset → idle=false; timeout → idle=true
   // onMounted 注册; onUnmounted 清理
@@ -435,8 +452,8 @@ settings.general.theme_options_light / theme_options_dark:
 
 ```text
 settings.general.black_hole_theme_hint
-  zh: 宇宙氛围背景；窗口最大化后发呆约 15 秒释放引力（可随时回弹）
-  en: Cosmic ambient background; ~15s idle while maximized enables gravity (always reversible)
+  zh: 宇宙氛围背景；窗口最大化后发呆约 6 秒释放引力（可随时回弹）
+  en: Cosmic ambient background; ~6s idle while maximized enables gravity (always reversible)
 
 settings.general.black_hole_theme_reduced_motion
   zh: 系统已开启「减少动态效果」，宇宙动效不会运行
@@ -466,10 +483,10 @@ settings.general.black_hole_theme_reduced_motion
 | 1 | 主题=默认 | 无宇宙层、无 transform |
 | 2 | 主题菜单仅 4 项 | 默认/复古/CMYK/黑洞 |
 | 3 | 选黑洞，非最大化 | 宇宙+中心黑洞慢转；照片不动 |
-| 3b | 黑洞 + 切换明亮/暗黑 | UI chrome 与宇宙调色都变；仍可读 |
+| 3b | 黑洞 + 切换明亮/暗黑 | UI chrome 与宇宙调色都变；仍可读 _(已被 v1.5 替代：v1.5 把 appearance select 在黑洞下 `disabled`，不再允许切换)_ |
 | 3c | WebGL 失败 | Canvas2D 宇宙降级，不崩 |
 | 4 | 黑洞+最大化后立即操作 | 仅氛围，无引力 |
-| 5 | 黑洞+最大化静止 ≥15s | 增长+卡片环绕；opacity 1 |
+| 5 | 黑洞+最大化静止 ≥6s | 照片区 WebGL 漩涡（PhotoVortex）；动鼠标回弹网格 |
 | 6 | 引力中输入 | 立即回弹 |
 | 7 | 引力中还原窗口 | 回弹；氛围保留 |
 | 7b | Settings 窗最大化 | 不污染主窗 `isMaximized` |
@@ -487,7 +504,7 @@ settings.general.black_hole_theme_reduced_motion
 
 - 逐像素测地线积分 raytracer（GARGANTUA 那种全透镜，性能重）；本期仅用解析近似着色器
 - SVG `feDisplacementMap` 真透镜 / three.js
-- **对照片做 WebGL 真透镜扭曲**（照片聚拢保持 §6 CSS transform）
+- ~~对照片做 WebGL 真透镜扭曲~~ **（2026-07-26 已用 PhotoVortexLayer 落地简化 UV 透镜；非测地线 raytracer）**
 - 黑洞跟随鼠标或多位置
 - 吸侧栏、地图、非 GridView 的 Thumbnail
 - 改 Rust / IPC / DB / AI / 包体模型

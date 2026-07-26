@@ -1,8 +1,9 @@
 import { ref, onMounted, onUnmounted, type Ref } from 'vue';
+import { useEventListener } from '@/composables/useEventListener';
 
 const ACTIVITY_EVENTS = ['mousemove', 'keydown', 'scroll', 'wheel', 'touchstart'] as const;
 
-export function useIdle(ms = 15000): { idle: Ref<boolean> } {
+export function useIdle(ms = 6000): { idle: Ref<boolean> } {
   const idle = ref(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -21,18 +22,16 @@ export function useIdle(ms = 15000): { idle: Ref<boolean> } {
     }, ms);
   };
 
+  for (const e of ACTIVITY_EVENTS) {
+    useEventListener(window, e, reset, { passive: true });
+  }
+
   onMounted(() => {
-    for (const e of ACTIVITY_EVENTS) {
-      window.addEventListener(e, reset, { passive: true });
-    }
     reset();
   });
 
   onUnmounted(() => {
     clearTimer();
-    for (const e of ACTIVITY_EVENTS) {
-      window.removeEventListener(e, reset);
-    }
   });
 
   return { idle };
