@@ -5,6 +5,7 @@
       'w-screen h-screen flex flex-col overflow-hidden select-none text-base-content/70',
       // Solid shell normally; transparent under black hole so cosmos canvas shows through chrome
       showBlackHole ? 'bg-transparent' : 'bg-base-300',
+      showCyberpunkChrome ? 'cp-shell' : '',
     ]"
   >
     <transition name="fade">
@@ -63,6 +64,12 @@
                     // Avoid DaisyUI oklch + Tailwind opacity; plain rgba always composites
                     background: 'rgba(6, 8, 18, 0.22)',
                     boxShadow: 'inset 0 0 0 1px rgba(255, 255, 255, 0.04)',
+                  }
+                : {}),
+              ...(showCyberpunkChrome && !showBlackHole
+                ? {
+                    background: 'rgba(8, 6, 14, 0.88)',
+                    boxShadow: 'inset 0 0 0 1px rgba(255, 43, 214, 0.35)',
                   }
                 : {}),
             }"
@@ -217,7 +224,7 @@ import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex, setImportAiPrompts } from '@/common/api';
 import { useIdle } from '@/composables/useIdle';
-import { isBlackHoleTheme } from '@/common/utils';
+import { isBlackHoleTheme, isCyberpunkTheme } from '@/common/utils';
 
 // vue components
 import TitleBar from '@/components/TitleBar.vue';
@@ -304,8 +311,27 @@ const blackHoleThemeOn = computed(() =>
   ),
 );
 
+const cyberpunkThemeOn = computed(() =>
+  isCyberpunkTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
+
 const gravityActive = computed(() =>
   blackHoleThemeOn.value
+  && !!uiStore.isMaximized
+  && idle.value
+  && !reducedMotion.value
+  && !docHidden.value
+  && uiStore.inputStack.length === 0
+  && !isSwitchingLibrary.value
+);
+
+// cpFxActive: byte-for-byte gravityActive with cyberpunkThemeOn
+const cpFxActive = computed(() =>
+  cyberpunkThemeOn.value
   && !!uiStore.isMaximized
   && idle.value
   && !reducedMotion.value
@@ -317,6 +343,8 @@ const gravityActive = computed(() =>
 const showBlackHole = computed(
   () => blackHoleThemeOn.value && !reducedMotion.value,
 );
+
+const showCyberpunkChrome = computed(() => cyberpunkThemeOn.value);
 
 // Boot script paints a solid html background (#1d232a / white). Under black hole
 // that plate sits under the glass chrome and kills the cosmos read-through.
@@ -353,6 +381,7 @@ function onHoleRadii(payload: { R_event: number; R_inf: number }) {
   holeRadii.value = payload;
 }
 
+provide('cpGlitchActive', cpFxActive);
 provide('bhGravityActive', gravityActive);
 provide('bhRadii', holeRadii);
 
