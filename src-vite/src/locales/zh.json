@@ -1094,13 +1094,15 @@
         "默认",
         "复古",
         "CMYK",
-        "黑洞"
+        "黑洞",
+        "赛博朋克"
       ],
       "theme_options_dark": [
         "默认",
         "复古",
         "CMYK",
-        "黑洞"
+        "黑洞",
+        "赛博朋克"
       ],
       "select_language": "选择语言",
       "font_size": "字体大小",
@@ -1114,6 +1116,9 @@
       "black_hole_theme_hint": "宇宙氛围背景；窗口最大化后发呆约 6 秒释放引力（可随时回弹）",
       "black_hole_theme_reduced_motion": "系统已开启「减少动态效果」，宇宙动效不会运行",
       "black_hole_appearance_locked": "黑洞主题下配色模式不生效",
+      "cyberpunk_theme_hint": "霓虹点缀界面；窗口最大化后发呆约 6 秒触发照片故障特效（可随时回弹）",
+      "cyberpunk_theme_reduced_motion": "系统已开启「减少动态效果」，故障特效不会运行",
+      "cyberpunk_appearance_locked": "赛博朋克主题下配色模式不生效",
       "dynamic_theme_intensity": "动态主题强度",
       "intensity_options": ["关", "弱", "标准", "强"],
       "show_button_text": "显示侧边栏标签",

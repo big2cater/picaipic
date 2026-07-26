@@ -1094,13 +1094,15 @@
         "Default",
         "Retro",
         "CMYK",
-        "Black hole"
+        "Black hole",
+        "Cyberpunk"
       ],
       "theme_options_dark": [
         "Default",
         "Retro",
         "CMYK",
-        "Black hole"
+        "Black hole",
+        "Cyberpunk"
       ],
       "select_language": "Select language",
       "font_size": "Font size",
@@ -1114,6 +1116,9 @@
       "black_hole_theme_hint": "Cosmic ambient background; ~6s idle while maximized enables gravity (always reversible)",
       "black_hole_theme_reduced_motion": "Reduced motion is on; cosmic motion stays off",
       "black_hole_appearance_locked": "Color mode is locked under Black hole theme",
+      "cyberpunk_theme_hint": "Neon chrome accents; ~6s idle while maximized enables photo glitch (always reversible)",
+      "cyberpunk_theme_reduced_motion": "Reduced motion is on; glitch effect stays off",
+      "cyberpunk_appearance_locked": "Color mode is locked under Cyberpunk theme",
       "dynamic_theme_intensity": "Dynamic theme intensity",
       "intensity_options": ["Off", "Subtle", "Standard", "Intense"],
       "show_button_text": "Show sidebar labels",

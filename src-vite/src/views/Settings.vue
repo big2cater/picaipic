@@ -55,14 +55,14 @@
               <select
                 class="select select-bordered select-sm min-w-32"
                 v-model="config.settings.appearance"
-                :disabled="isBlackHole"
-                :class="{ 'opacity-50 cursor-not-allowed': isBlackHole }"
+                :disabled="isFxTheme"
+                :class="{ 'opacity-50 cursor-not-allowed': isFxTheme }"
               >
                 <option v-for="(item, index) in appearanceOptions" :key="index" :value="item.value">{{ item.label }}</option>
               </select>
             </div>
-            <span v-if="isBlackHole" class="block px-1 text-xs text-base-content/30 leading-5">
-              {{ $t('settings.general.black_hole_appearance_locked') }}
+            <span v-if="isFxTheme" class="block px-1 text-xs text-base-content/30 leading-5">
+              {{ isBlackHole ? $t('settings.general.black_hole_appearance_locked') : $t('settings.general.cyberpunk_appearance_locked') }}
             </span>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
@@ -73,10 +73,16 @@
               </select>
             </div>
             <div
-              v-if="currentTheme === 3"
+              v-if="currentTheme === THEME_ID.BLACK_HOLE"
               class="px-1 text-xs text-base-content/30 leading-5"
             >
               {{ $t('settings.general.black_hole_theme_hint') }}
+            </div>
+            <div
+              v-else-if="currentTheme === THEME_ID.CYBERPUNK"
+              class="px-1 text-xs text-base-content/30 leading-5"
+            >
+              {{ $t('settings.general.cyberpunk_theme_hint') }}
             </div>
             <!-- dynamic theme intensity (v1.5) -->
             <div v-if="isDynamicTheme" class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -1742,7 +1748,7 @@ import {
   listRevokedKeys,
   setImportAiPrompts,
 } from '@/common/api';
-import { formatFileSize, isLinux, isMac, setTheme, isBlackHoleTheme, THEME_ID, SCALE_VALUES } from '@/common/utils';
+import { formatFileSize, isLinux, isMac, setTheme, isBlackHoleTheme, isCyberpunkTheme, THEME_ID, SCALE_VALUES } from '@/common/utils';
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
 import { usePluginStore } from '@/stores/pluginStore';
@@ -2246,29 +2252,37 @@ const currentTheme = computed({
     return config.settings.appearance === 0 ? config.settings.lightTheme : config.settings.darkTheme;
   },
   set(value: number) {
-    // v1.5: dual-pin + clear residual slot on black hole
-    if (value === THEME_ID.BLACK_HOLE) {
-      config.settings.lightTheme = THEME_ID.BLACK_HOLE;
-      config.settings.darkTheme = THEME_ID.BLACK_HOLE;
+    const v = Number(value);
+    if (v === THEME_ID.BLACK_HOLE || v === THEME_ID.CYBERPUNK) {
+      config.settings.lightTheme = v;
+      config.settings.darkTheme = v;
+      return;
+    }
+    const special = (id: number) =>
+      id === THEME_ID.BLACK_HOLE || id === THEME_ID.CYBERPUNK;
+    if (config.settings.appearance === 0) {
+      config.settings.lightTheme = v;
+      if (special(Number(config.settings.darkTheme))) config.settings.darkTheme = v;
     } else {
-      if (config.settings.appearance === 0) {
-        config.settings.lightTheme = value;
-        if (config.settings.darkTheme === THEME_ID.BLACK_HOLE) config.settings.darkTheme = value;
-      } else {
-        config.settings.darkTheme = value;
-        if (config.settings.lightTheme === THEME_ID.BLACK_HOLE) config.settings.lightTheme = value;
-      }
+      config.settings.darkTheme = v;
+      if (special(Number(config.settings.lightTheme))) config.settings.lightTheme = v;
     }
   }
 });
 
-// v1.5: black hole detection + dynamic theme gating
+// v1.5: black hole / cyberpunk detection + dynamic theme gating
 const isBlackHole = computed(() => isBlackHoleTheme(
   Number(config.settings.appearance),
   Number(config.settings.lightTheme),
   Number(config.settings.darkTheme),
 ));
-const isDynamicTheme = isBlackHole;
+const isCyberpunk = computed(() => isCyberpunkTheme(
+  Number(config.settings.appearance),
+  Number(config.settings.lightTheme),
+  Number(config.settings.darkTheme),
+));
+const isFxTheme = computed(() => isBlackHole.value || isCyberpunk.value);
+const isDynamicTheme = isFxTheme; // was isBlackHole only — intensity under BH and CP
 
 // v1.5: dynamic theme intensity options (0/0.5/1/1.5)
 const intensityOptions = computed(() => {
