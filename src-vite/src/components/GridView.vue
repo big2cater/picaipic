@@ -18,6 +18,15 @@
       @captured="onVortexCaptured"
       @cleared="onVortexCleared"
     />
+    <PhotoGlitchLayer
+      v-if="glitchEnabled"
+      class="z-20"
+      :active="glitchLayerActive"
+      :source-el="containerRef"
+      :intensity="glitchIntensity"
+      @captured="onGlitchCaptured"
+      @cleared="onGlitchCleared"
+    />
 
     <VirtualScroll
       v-if="fileList.length > 0"
@@ -28,7 +37,7 @@
         'pb-8': !config.settings.grid.showFilmStrip && config.settings.showStatusBar,
         'pb-1': !config.settings.grid.showFilmStrip && !config.settings.showStatusBar,
         // Hide live grid after freeze-frame capture so only the warped layer shows
-        'opacity-0 pointer-events-none': vortexHidesGrid,
+        'opacity-0 pointer-events-none': vortexHidesGrid || glitchHidesGrid,
       }"
       :items="renderItems"
       :direction="config.settings.grid.showFilmStrip && config.settings.grid.previewPosition < 2 ? 'horizontal' : 'vertical'"
@@ -124,6 +133,7 @@ import { formatDate } from '@/common/utils';
 import Thumbnail from '@/components/Thumbnail.vue';
 import VirtualScroll from '@/components/VirtualScroll.vue';
 import PhotoVortexLayer from '@/components/PhotoVortexLayer.vue';
+import PhotoGlitchLayer from '@/components/PhotoGlitchLayer.vue';
 import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColumnLayout, calculateMasonryLayout, type Geometry } from '@/common/layout';
 import { IconCalendarDay, IconCalendarMonth, IconSearch } from '@/common/icons';
 import { readPrimaryColor, type RadiiValue } from '@/common/blackHoleMath';
@@ -180,6 +190,7 @@ const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const containerRef = ref<HTMLElement | null>(null);
 const bhGravityActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('bhGravityActive', null);
+const cpGlitchActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('cpGlitchActive', null);
 const bhRadii = inject<Ref<RadiiValue> | ComputedRef<RadiiValue> | null>('bhRadii', null);
 const gravityActiveFallback = ref(false);
 const radiiFallback = ref<RadiiValue>({ R_event: 0, R_inf: 0 });
@@ -189,6 +200,18 @@ const vortexEnabled = computed(() => bhGravityActive != null);
 const vortexActive = computed(() => !!unref(bhGravityActive));
 const vortexHidesGrid = ref(false);
 const vortexPrimaryRgb = ref<[number, number, number]>([180, 80, 200]);
+
+// Cyberpunk continuous glitch layer (photo area only)
+const glitchEnabled = cpGlitchActive != null;
+const glitchHidesGrid = ref(false);
+const glitchLayerActive = computed(() => {
+  const intensity = Number(config.settings.dynamicThemeIntensity);
+  return !!unref(cpGlitchActive) && Number.isFinite(intensity) && intensity > 0;
+});
+const glitchIntensity = computed(() => {
+  const n = Number(config.settings.dynamicThemeIntensity);
+  return Number.isFinite(n) ? n : 1;
+});
 
 function parsePrimaryRgb(): [number, number, number] {
   const raw = readPrimaryColor();
@@ -218,9 +241,21 @@ function onVortexCleared() {
   vortexHidesGrid.value = false;
 }
 
+function onGlitchCaptured() {
+  glitchHidesGrid.value = true;
+}
+
+function onGlitchCleared() {
+  glitchHidesGrid.value = false;
+}
+
 watch(vortexActive, (on) => {
   if (on) vortexPrimaryRgb.value = parsePrimaryRgb();
   else vortexHidesGrid.value = false;
+});
+
+watch(glitchLayerActive, (on) => {
+  if (!on) glitchHidesGrid.value = false;
 });
 
 // Silence unused inject fallbacks (kept for future CSS-warp toggle)
