@@ -1,7 +1,7 @@
 ---
 name: fix-library-scan-selection
-description: Concurrent scan duplicate afiles (#190), post-delete/move selection+timeline refresh, and Live Photo recount/repair after move.
-last_updated: 2026-07-19
+description: Concurrent scan duplicate afiles (#190), post-delete/move selection+timeline refresh, Live Photo recount/repair after move, scan preview progress stuck, RAW thumb speed.
+last_updated: 2026-07-26
 ---
 
 # Fix scan duplicates, stale selection, Live Photo move counts
@@ -10,6 +10,8 @@ last_updated: 2026-07-19
 - Concurrent album scan / folder-sync creates duplicate rows
 - Move/delete leaves wrong selection, date-group headers, or stale search names
 - Cross-album move leaves wrong sidebar totals or Live Photo pairing
+- Scan UI stuck on「正在生成预览… N/(N+k)」 forever
+- RAW (RW2/CR2/…) grid thumbs very slow during import/rescan
 
 ## Fixes shipped (2026-07-19)
 
@@ -105,8 +107,35 @@ last_updated: 2026-07-19
 - Manual: JPG/RAW capture labels share unit spacing; legacy JPEG after reindex; mpg/ts probe does not hang; FileInfo video zoom; remount album panel without flicker; multi-select external open mixed/>100
 - Manual: select mode right-click shared menu; SelectionPanel external open; open mpg in viewer → error + external button
 - Manual: open AVI/WMV/MKV → compatibility overlay + optional external; multi-select image plugin entry runs on focused image
+- Manual (2026-07-26): import JPG+RW2 album — preview phase should not stick at N-2; terminal may log thumb/embed timeouts; RAW grid should appear much faster after embedded-JPEG path
 
 ## Notes
 - Schema pattern: append-only migration versions (v8 here; v7 remains collections).
 - Repair path also calls `migrate_unique_album_files` so unique index is enforced even if `user_version` was already advanced.
 - Full lap `Video.vue` player-epoch/request-id plumbing is **not** ported; UX + strategy + cancel-on-external are.
+
+## 2026-07-26 — Scan preview stuck + RAW thumb speed
+
+### Symptom
+- Status bar: `正在生成预览… 216/218` for a long time; album queue never finishes.
+- Large JPG+RW2 libraries feel much slower than JPEG-only.
+
+### Root causes
+| Issue | Mechanism |
+|-------|-----------|
+| Progress never reaches `total` | `process_thumbnail_task` only incremented `processed` on **successful** thumbs; failures only bumped `failed` then returned → phase stuck in `preparing_previews` |
+| RAW heavy | `file_type==3` always `is_heavy` (1–2 concurrent); old `get_raw_thumbnail` **demosaiced first** (half_size `dcraw_process`), embedded JPEG only on failure |
+
+### Fixes
+| Layer | Change |
+|-------|--------|
+| `t_utils.rs` `process_thumbnail_task` | Always advance `processed` after preview attempt (ok or fail); thumb timeout 45s normal / 120s heavy; embed timeout 60s |
+| `t_libraw.rs` `get_raw_thumbnail` | **Prefer embedded JPEG** (pick best ≥ target size); demosaic half_size only if no usable embed |
+
+### Phase semantics (unchanged but easy to misread)
+1. `discovering` — walk FS + DB rows  
+2. `preparing_previews` — UI thumbs (`processed`)  
+3. `preparing_search` — CLIP embeddings (`search_ready`, embed semaphore 1)  
+4. `complete` — `index_finished`  
+
+Album “done” still waits for preview **and** search index phases unless product later splits them.

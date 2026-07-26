@@ -2,11 +2,13 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-24 (smart albums UX + smart tags 6-bucket people/pets prompts + default High thr)._
+_Last reviewed: 2026-07-26 (black-hole PhotoVortex + 6s idle; scan preview progress; RAW embedded thumbs)._
 
 | Pattern | Use when |
 |---------|----------|
 | [add-tauri-command.md](add-tauri-command.md) | Adding or changing frontend-to-Rust IPC, events, or cancellation |
+| [change-black-hole-theme.md](change-black-hole-theme.md) | Black-hole theme, cosmos WebGL, idle PhotoVortex, chrome glass, intensity |
+| [fix-library-scan-selection.md](fix-library-scan-selection.md) | Scan/import: dup afiles, selection, Live move counts, **preview stuck N-2**, RAW thumb speed |
 | [change-ai-plugin.md](change-ai-plugin.md) | Adding/changing a plugin, manifest, capability, runtime, permission, task, or package contract |
 | [change-database-schema.md](change-database-schema.md) | Changing SQLite schema, migrations, database storage, backup, or restore |
 | [change-live-photo.md](change-live-photo.md) | Apple Live Photo / Google Motion Photo detection, pairing, or long-press preview |
@@ -28,7 +30,6 @@ _Last reviewed: 2026-07-24 (smart albums UX + smart tags 6-bucket people/pets pr
 | [change-collections.md](change-collections.md) | Collections tray, membership DB, or collection Content source |
 | [change-smart-albums.md](change-smart-albums.md) | Smart Albums rule engine, editor, or smart Content source |
 | [change-library-shortcuts.md](change-library-shortcuts.md) | Library panel All/Favorites/Today shortcuts or view-adaptive date grouping |
-| [fix-library-scan-selection.md](fix-library-scan-selection.md) | Concurrent scan duplicate afiles, post-delete selection/timeline, Live Photo move recount |
 | [change-ai-prompt-import.md](change-ai-prompt-import.md) | AI PNG/JPEG prompt import into empty comments during scan |
 | [change-media-badges.md](change-media-badges.md) | Configurable thumbnail media-info badges (format/ISO/shutter/…) |
 | [settings-cross-window-sync.md](settings-cross-window-sync.md) | Main↔settings Pinia emit/listen hydrate gate and object equal-noop setters |

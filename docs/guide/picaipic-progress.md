@@ -1,11 +1,15 @@
 # PicAiPic Progress
 
-Updated: 2026-07-24
+Updated: 2026-07-26
 
-## Status board (2026-07-24)
+## Status board (2026-07-26)
 
 | Track | Status |
 |-------|--------|
+| Black-hole theme + cosmos WebGL | **Shipped** (branch `feat/black-hole-idle-theme`) — menu Default/Retro/CMYK/Black hole |
+| Photo gravity | **PhotoVortexLayer** (FragCoord UV lens, photo area only); idle **6s**; CSS card warp not driven |
+| Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
+| RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |
 | Photo frame / 相框 G-Frame-1 + G2 (blur float/sink + logo) | **Shipped** (2026-07-22) |
 | Batch import to library (G2) | Shipped |
@@ -41,7 +45,7 @@ Updated: 2026-07-24
 	| Smart Albums UX pack (size ops, pickers, sort, local-day dates, empty load) | **Shipped** (2026-07-24) — `change-smart-albums.md` |
 	| Smart tags 6-bucket + default High thr + thr re-run | **Shipped** (2026-07-24) — people/pets prompts owner-tuned — `change-smart-tags.md` |
 	
-	Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`.
+	Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`. Patterns: `change-black-hole-theme.md`, `fix-library-scan-selection.md`.
 	
 	## 2026-07-24 Smart Albums UX + smart tags product set
 	

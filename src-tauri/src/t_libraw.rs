@@ -520,12 +520,57 @@ pub fn get_raw_preview_image(file_path: &str) -> Result<Option<Vec<u8>>, String>
     }
 }
 
+fn encode_embedded_jpeg_thumb(
+    data: &[u8],
+    thumbnail_size: u32,
+) -> Result<Vec<u8>, String> {
+    let orient = jpeg_exif_orientation(data);
+    let image = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode embedded RAW JPEG preview: {}", e))?;
+    let image = orient_image(image, orient);
+    let thumbnail = image.thumbnail(u32::MAX, thumbnail_size.max(1));
+    encode_as_jpeg(&thumbnail)
+}
+
+/// UI / scan thumbnails: prefer camera-embedded JPEG previews (fast).
+/// Only fall back to half_size demosaic when no usable embedded JPEG exists.
+///
+/// Rationale: albums often import JPG+RAW pairs (e.g. Panasonic RW2). Full/half
+/// demosaic for every RAW during scan is the main reason "generating previews"
+/// crawls. Embedded previews are camera-processed and good enough for grid UI.
 pub fn get_raw_thumbnail(file_path: &str, thumbnail_size: u32) -> Result<Option<Vec<u8>>, String> {
-    // Always use dcraw_process with half_size for thumbnails.
-    // - Guaranteed correct rotation (LibRaw auto-rotates)
-    // - Guaranteed correct colors (full WB pipeline)
-    // - 4x faster than full decode (half_size=1)
-    // Embedded thumbnails have unreliable rotation across camera brands.
+    // --- Fast path: embedded JPEG(s) ---
+    // Open once, list thumbs, pick best JPEG without demosaic.
+    {
+        let mut raw = RawHandle::open(file_path)?;
+        let thumbs = raw.extract_thumbnails();
+        let target = thumbnail_size.max(1);
+
+        // Prefer a JPEG whose max edge is at least the requested thumb size;
+        // among those, larger is better. If none are large enough, take the
+        // largest available JPEG (still far cheaper than demosaic).
+        let best = thumbs
+            .iter()
+            .filter(|thumb| thumb.format == LIBRAW_THUMBNAIL_JPEG && !thumb.data.is_empty())
+            .max_by_key(|thumb| {
+                let max_edge = thumb.width.max(thumb.height).max(1);
+                (max_edge >= target, max_edge, thumb.data.len())
+            });
+
+        if let Some(thumb) = best {
+            match encode_embedded_jpeg_thumb(&thumb.data, target) {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(e) => {
+                    eprintln!(
+                        "Embedded RAW JPEG thumb decode failed for {} ({}); trying demosaic",
+                        file_path, e
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Slow path: half_size demosaic (correct WB/rotation, much heavier) ---
     let raw = RawHandle::open(file_path)?;
     let mut out = LapLibRawImage {
         data: std::ptr::null_mut(),
@@ -540,12 +585,9 @@ pub fn get_raw_thumbnail(file_path: &str, thumbnail_size: u32) -> Result<Option<
 
     let ret = unsafe { lap_libraw_render_preview(raw.raw, 1, 1, &mut out) };
     if ret == 0 && !out.data.is_null() && out.len > 0 {
-        // Copy C buffer into Rust Vec, then free the C allocation immediately.
         let data = unsafe { std::slice::from_raw_parts(out.data, out.len as usize).to_vec() };
         unsafe { lap_libraw_free_buffer(out.data) };
 
-        // data is now owned by blob (Vec<u8>); if decode_processed_image fails
-        // below, blob is dropped and the Vec is freed automatically — no leak.
         let blob = RawImageBlob {
             format: out.format,
             width: out.width as u32,
@@ -557,43 +599,22 @@ pub fn get_raw_thumbnail(file_path: &str, thumbnail_size: u32) -> Result<Option<
         };
 
         if let Ok(image) = decode_processed_image(&blob) {
-            let thumbnail = image.thumbnail(u32::MAX, thumbnail_size);
+            let thumbnail = image.thumbnail(u32::MAX, thumbnail_size.max(1));
             return encode_as_jpeg(&thumbnail).map(Some);
-        } else {
-            eprintln!(
-                "LibRaw decode_processed_image failed for {}, falling back to embedded thumbnail",
-                file_path
-            );
         }
+
+        eprintln!(
+            "LibRaw decode_processed_image failed for {} after embedded-thumb miss",
+            file_path
+        );
     } else {
         if !out.data.is_null() {
             unsafe { lap_libraw_free_buffer(out.data) };
         }
         eprintln!(
-            "LibRaw dcraw_process failed for {} (likely HE/HE* NEF), falling back to embedded thumbnail",
+            "LibRaw dcraw_process failed for {} after embedded-thumb miss",
             file_path
         );
-    }
-
-    // Reopen the file for thumbnail extraction — the handle used for
-    // render_preview may be in an undefined state after a data error.
-    let mut raw = RawHandle::open(file_path)?;
-    let thumbs = raw.extract_thumbnails();
-    let best = thumbs
-        .iter()
-        .filter(|thumb| thumb.format == LIBRAW_THUMBNAIL_JPEG && !thumb.data.is_empty())
-        .max_by_key(|thumb| {
-            let max_edge = thumb.width.max(thumb.height);
-            (max_edge >= thumbnail_size, max_edge)
-        });
-
-    if let Some(thumb) = best {
-        let orient = jpeg_exif_orientation(&thumb.data);
-        if let Ok(image) = image::load_from_memory(&thumb.data) {
-            let image = orient_image(image, orient);
-            let thumbnail = image.thumbnail(u32::MAX, thumbnail_size);
-            return encode_as_jpeg(&thumbnail).map(Some);
-        }
     }
 
     Ok(None)

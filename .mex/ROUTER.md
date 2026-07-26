@@ -16,7 +16,7 @@ edges:
     condition: when touching AI plugins, manifests, runtimes, permissions, tasks, packaging, or sandboxing
   - target: patterns/INDEX.md
     condition: before any implementation or diagnosis task
-last_updated: 2026-07-25
+last_updated: 2026-07-26
 ---
 
 
@@ -28,7 +28,16 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 ## Current Project State
 
 **Working:**
-- **Black hole idle theme (2026-07-25, branch `feat/black-hole-idle-theme`, design v1.4):** theme menu only **Default / Retro / CMYK / Black hole** (`coffee` dark retro, `cmyk` both modes); no separate toggle — `themeId===3` enables cosmos+black-hole layer (WebGL analytical shader, Canvas2D fallback, appearance-tinted); Home-only; maximize via `uiStore.isMaximized` (TitleBar Home only); idle 15s CSS gravity on GridView `.bh-card`. Design `docs/guide/black-hole-idle-theme-design.md`; plan `docs/superpowers/plans/2026-07-25-black-hole-idle-theme.md`. Manual QA still needed.
+- **Black hole idle theme (2026-07-25, branch `feat/black-hole-idle-theme`, design v1.4):** theme menu only **Default / Retro / CMYK / Black hole** (`coffee` dark retro, `cmyk` both modes); no separate toggle — `themeId===3` enables cosmos+black-hole layer (WebGL analytical shader, Canvas2D fallback, appearance-tinted); Home-only; maximize via `uiStore.isMaximized` (TitleBar Home only); idle 6s gravity / photo vortex on GridView. Design `docs/guide/black-hole-idle-theme-design.md`; plan `docs/superpowers/plans/2026-07-25-black-hole-idle-theme.md` (**[SUPERSEDED]** — v1.3 baseline, do not implement). Manual QA still needed.
+- **Black hole chrome stacking fix (2026-07-25):** Home `TitleBar` now `relative z-50` so app icon + window controls sit above `BlackHoleBackground` (`fixed z-0`); left panel glass + transparent shell/html boot bg so cosmos shows through 智能标签 / left menu (`Home.vue`).
+- **Black hole visual quality pass (2026-07-25):** `BlackHoleBackground` was half-res (`INTERNAL_SCALE=0.5`) + weak disk/stars → mushy purple fog. Now full internal scale, 30fps, multi-layer stars + fbm nebula + spiral Doppler disk + photon ring; Canvas2D fallback denser too.
+- **Black hole photo warp fix (2026-07-25):** root cause = `getBoundingClientRect()` included prior transform → feedback drift/jitter; v1.5 L2–L6 overcooked. Now layout via last-tx subtract (no clear-transform flicker).
+- **Black hole photo vortex WebGL (2026-07-26, owner-approved FragCoord path):** photo-area only. On gravity (max+idle 6s): freeze visible thumbs into texture → `PhotoVortexLayer` UV rotation lens (`c = twist/(d-r)`, growing r, purple ring) cinematic slow absorb (~τ=12s). Live grid hidden after capture; CSS `useGravityWarp` not driven. Files: `PhotoVortexLayer.vue`, `GridView.vue`.
+- **Black hole distortion+color-decouple (v1.5 math/settings, 2026-07-25):** `dynamicThemeIntensity` (0/0.5/1/1.5); appearance disabled under black hole; `setTheme` pins `data-theme=dark`. CSS 6-layer warp implemented in `blackHoleMath`/`useGravityWarp` but **not the live gravity path** (PhotoVortex is). Spec: `docs/superpowers/specs/2026-07-25-black-hole-distortion-and-color-decouple-design.md`.
+- **Scan preview progress + RAW thumbs (2026-07-26):** thumb fail/timeout still advances `processed` (fixes stuck `preparing_previews N-2`); timeouts 45s/120s thumb, 60s embed; RAW UI thumbs prefer **embedded JPEG** then demosaic (`t_libraw.rs`). Pattern `fix-library-scan-selection.md`.
+- **Audit ROI pack (2026-07-26):** `import_url` 30s timeout + 100MiB cap + chunked body; black-hole `radii` emit threshold 0.5px; gravity-warp anchor cleanup via Set; embed-matrix **warm** on `create_db` (disk ANN serde still deferred); VirtualScroll scroll rAF coalesce; `useEventListener` + Settings setup-poll unmount clear; calendar date range docs = local day (no UTC flip); `formatFileSize` shows B for &lt;1KiB.
+- **Audit B pack (2026-07-26):** copy→index orphan cleanup (`remove_untracked_file` + frontend + `import_file` DB-fail rollback); GridView `scrollToItem` topPadding; date-group selection Map + single-pass `renderLayout`; `lock_mutex` poison recovery in `t_cmds`; `index_album` no-op when `album_scan_active`.
+- **Review doc follow-up (2026-07-26):** `docs/review/code-review-2026-07-26.md` corrected (B9 not live-db overwrite). Shipped B8 `is_path_inside` lexical harden + tests; B9 restore `write_file_atomic` + config-fail cleanup.
 - Tauri 2/Rust desktop host with Vue 3 frontend for Windows and Linux.
 - **v1.1.0** app/docs versions aligned; tag `v1.1.0` has a **private draft** multi-arch release (Linux deb/AppImage + Windows x64/arm64 MSI + updater latest JSON on the Release assets). Not published; keep private until the owner decides.
 - Release CI publishes installers to **GitHub Release assets** (not Actions artifact storage) after quota failures; PR builds use best-effort artifact upload — see `patterns/release-build.md`.
@@ -144,6 +153,8 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 | Add/tune CLIP smart tags (prompts; thr follows settings slider) | `patterns/change-smart-tags.md` |
 | Image-search model (CLIP B/32 vision + bilingual text default; Track B/C) | `patterns/change-image-search-model.md` + `docs/guide/altclip-phase0-probe.md` + `docs/guide/siglip2-phase0-probe.md` |
 | Change traditional color match / 追色 / host style `.cube` | `patterns/change-color-match.md` |
+| Change black hole theme, cosmos, idle vortex, chrome glass, intensity | `patterns/change-black-hole-theme.md` then `docs/guide/black-hole-idle-theme-design.md` (+ CSS warp spec if re-enabling card warp) |
+| Scan stuck on preview progress, RAW thumb slow, concurrent scan dups | `patterns/fix-library-scan-selection.md` |
 | Plan or implement built-in crop presets, collage, batch, print layout, color match / style LUT, photo style, or photo frame / 相框 | `docs/guide/builtin-tools-roadmap.md` then `patterns/change-crop-presets.md` / `patterns/change-collage.md` / `patterns/change-batch-process.md` / `patterns/change-print-layout.md` / `patterns/change-color-match.md` / `patterns/change-photo-style.md` / `patterns/change-photo-frame.md` |
 | Change EXIF photo frame / 相框 (classic, float/sink blur, logo) | `patterns/change-photo-frame.md` + roadmap Phase G |
 | Build/release installers or plugin packages | `patterns/release-build.md` |

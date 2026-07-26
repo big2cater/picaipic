@@ -16,7 +16,7 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-24
+last_updated: 2026-07-26
 ---
 
 
@@ -24,6 +24,13 @@ last_updated: 2026-07-24
 # Decisions
 
 ## Decision Log
+
+### Audit ROI: harden import_url; warm embed matrix; keep local calendar days
+**Date:** 2026-07-26  
+**Status:** Active (shipped partial)  
+**Decision:** (1) URL import uses shared reqwest client with **30s total / 10s connect** timeout, **100 MiB** Content-Length + accumulated chunk cap, chunked read (not unbounded `bytes()`). (2) Semantic-search matrix **warms in background** after successful `create_db`; do **not** add full disk ANN serde in this pass. (3) Calendar/filter date ranges stay **local midnight unix** — EXIF `meta_date_to_timestamp` is Local and SQL uses `strftime(..., 'localtime')`; do not flip to UTC without a coordinated migration.  
+**Reasoning:** Code review claimed import DoS risk (confirmed), first-search ANN block (already background; warm matrix is the real cold-start fix), and timezone bugs (false positive against intentional local-day contract).  
+**Consequences:** Oversized/hung URL downloads fail with explicit errors; first AI search after open still may hit exact matrix if warm incomplete; disk matrix/ANN cache remains future work under `change-library-perf.md`.  
 
 ### Ship bilingual int8 as only bundled text tower (Track C option C)
 **Date:** 2026-07-24  
@@ -288,3 +295,19 @@ last_updated: 2026-07-24
 **Reasoning:** The UI treats a failed rename as no-op, but an unreverted disk rename leaves `afiles.name` / virtual `file_path` pointing at a missing path and breaks open/thumbnail/reindex. `move_file` already rolled back disk on DB failure; rename must match that invariant.
 **Alternatives considered:** Returning success after disk rename while logging DB failure was rejected because the list would show the old name and subsequent operations would target the wrong path. Leaving the new disk name and repairing only DB was rejected because the command already returned failure to the client.
 **Consequences:** `rename_file` and `rename_folder` call `t_utils::rename_*` again with the original basename on DB error. If rollback itself fails, log a critical message; full two-phase rename transactions remain a future hardening option.
+
+### Black-hole gravity uses photo-area WebGL vortex (not CSS cards as primary)
+**Date:** 2026-07-26
+**Status:** Active
+**Decision:** Live gravity path freezes the photo-area visible thumbnails into a texture and runs `PhotoVortexLayer` (FragCoord-style UV rotation lens). CSS `useGravityWarp` remains in-tree but is not driven from GridView. Idle threshold is **6s** (was 15s). Effect is photo-region only; chrome stays interactive.
+**Reasoning:** Owner wanted continuous space-warping absorb like shader demos, not rigid floating cards; CSS transforms could not match that look and caused flicker/menu stacking bugs.
+**Alternatives considered:** Keep refining CSS 6-layer warp; full geodesic raytrace (deferred for cost).
+**Consequences:** Design docs that still describe CSS-only absorb are historical for card math; product QA follows PhotoVortex. Pattern: `change-black-hole-theme.md`.
+
+### RAW grid thumbs prefer embedded JPEG before demosaic
+**Date:** 2026-07-26
+**Status:** Active
+**Decision:** `get_raw_thumbnail` tries camera-embedded JPEG first (best max-edge ≥ target), then half_size demosaic only if needed. Scan thumb failures/timeouts always advance `processed` so preview phase cannot stick at N-2.
+**Reasoning:** JPG+RW2 libraries spent most scan time demosaicing every RAW under heavy concurrency 1–2; embedded previews are good enough for grid UI.
+**Alternatives considered:** Always demosaic for color fidelity (too slow); pair-display only JPEG and hide RAW (product still wants both visible).
+**Consequences:** Occasional orientation/WB differences vs demosaic; terminal may log timeouts. Pattern: `fix-library-scan-selection.md`.
