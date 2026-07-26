@@ -2,12 +2,13 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-26 (black-hole PhotoVortex + 6s idle; scan preview progress; RAW embedded thumbs)._
+_Last reviewed: 2026-07-26 (black-hole PhotoVortex; cyberpunk night-city + glitch; audit harden; scan/RAW)._
 
 | Pattern | Use when |
 |---------|----------|
 | [add-tauri-command.md](add-tauri-command.md) | Adding or changing frontend-to-Rust IPC, events, or cancellation |
 | [change-black-hole-theme.md](change-black-hole-theme.md) | Black-hole theme, cosmos WebGL, idle PhotoVortex, chrome glass, intensity |
+| [change-cyberpunk-theme.md](change-cyberpunk-theme.md) | Cyberpunk theme, night-city ambient, idle PhotoGlitchLayer, intensity gate |
 | [fix-library-scan-selection.md](fix-library-scan-selection.md) | Scan/import: dup afiles, selection, Live move counts, **preview stuck N-2**, RAW thumb speed |
 | [change-ai-plugin.md](change-ai-plugin.md) | Adding/changing a plugin, manifest, capability, runtime, permission, task, or package contract |
 | [change-database-schema.md](change-database-schema.md) | Changing SQLite schema, migrations, database storage, backup, or restore |

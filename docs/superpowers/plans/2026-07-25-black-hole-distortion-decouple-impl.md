@@ -4,9 +4,11 @@
 
 **基线：** 分支 `feat/black-hole-idle-theme`，v1.4 已落地（主题菜单 `themeId===3` 模型，无 `blackHoleMode` 布尔开关）。
 **Spec：** `docs/superpowers/specs/2026-07-25-black-hole-distortion-and-color-decouple-design.md` (v1.5)。
-**关联（已废弃）：** `docs/superpowers/plans/2026-07-25-black-hole-idle-theme.md` 为 v1.3 基线，**[SUPERSEDED]**，不要按它实现。
+**关联：** 旧 v1.3 idle 计划（`blackHoleMode` 布尔）已从仓库删除。产品 idle 照片主路径为 **`PhotoVortexLayer`**（2026-07-26），**不是**本计划的 CSS 六层 warp。
 
-**Goal：** 在 v1.4 黑洞主题之上，新增 6 层 CSS/滤镜卡片扭曲（位移旋转 / 各向异性拉伸 / 径向模糊 / 色散错位 / 横向撕裂切片 / 透镜环光），由新增的 `dynamicThemeIntensity`（0/0.5/1/1.5）控制强度；并把「配色模式」与「黑洞特效」解耦——黑洞主题下 appearance select `disabled` + hint、`setTheme` 钉 `data-theme=dark`、shader 不改仅上游传 `appearance=1`。
+**本计划定位（2026-07-26）：** intensity + appearance 锁定 + `blackHoleMath`/`useGravityWarp` **代码层**仍有效；**GridView 不驱动 CSS warp**。仅在重新启用卡片 CSS 引力时参考。赛博朋克主题见 `docs/superpowers/plans/2026-07-26-cyberpunk-idle-glitch-impl.md`。
+
+**Goal（历史）：** 在 v1.4 之上做 6 层 CSS 卡片扭曲与配色解耦。**Live gravity 用 PhotoVortex。**
 
 **Tech Stack：** Vue 3 + Pinia + 现有 `blackHoleMath.ts` / `useGravityWarp.ts`。无 Rust / 无新依赖。
 

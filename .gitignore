@@ -19,6 +19,9 @@ src-tauri/picaipic-local/
 # Skills cache
 skills/
 
+# Local brainstorm / visual companion sessions
+.superpowers/
+
 # OS
 .DS_Store
 
