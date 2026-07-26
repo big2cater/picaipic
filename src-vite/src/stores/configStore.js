@@ -140,7 +140,7 @@ export const useConfigStore = defineStore('configStore', {
       // general settings
       language: 'en',             // default language
       appearance: 1,              // appearance (0: light; 1: dark)
-      // Theme index (v1.4): 0 default, 1 retro, 2 cmyk, 3 black hole — see setTheme / isBlackHoleTheme
+      // Theme index: 0 default, 1 retro, 2 cmyk, 3 black hole, 4 cyberpunk — see setTheme / isBlackHoleTheme / isCyberpunkTheme
       lightTheme: 0,
       darkTheme: 0,
       // v1.5: dynamic theme distortion intensity (0=off 0.5=subtle 1=standard 1.5=intense)
@@ -246,11 +246,13 @@ export const useConfigStore = defineStore('configStore', {
     },
     setLightTheme(lightTheme) {
       const n = Number(lightTheme);
-      this.settings.lightTheme = (Number.isFinite(n) && n >= 0 && n <= 3) ? Math.floor(n) : 0;
+      // cyberpunk id 4
+      this.settings.lightTheme = (Number.isFinite(n) && n >= 0 && n <= 4) ? Math.floor(n) : 0;
     },
     setDarkTheme(darkTheme) {
       const n = Number(darkTheme);
-      this.settings.darkTheme = (Number.isFinite(n) && n >= 0 && n <= 3) ? Math.floor(n) : 0;
+      // cyberpunk id 4
+      this.settings.darkTheme = (Number.isFinite(n) && n >= 0 && n <= 4) ? Math.floor(n) : 0;
     },
     setScale(scale) {
       this.settings.scale = scale;

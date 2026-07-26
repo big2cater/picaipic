@@ -26,12 +26,13 @@ export const separator = isWin ? '\\' : '/';
 // scale values for window size and font size
 export const SCALE_VALUES = [0.8, 0.9, 1, 1.1, 1.2];
 
-/** Theme menu ids (v1.4): Default / Retro / CMYK / Black hole */
+/** Theme menu ids: Default / Retro / CMYK / Black hole / Cyberpunk */
 export const THEME_ID = {
   DEFAULT: 0,
   RETRO: 1,
   CMYK: 2,
   BLACK_HOLE: 3,
+  CYBERPUNK: 4,
 } as const;
 
 const LIGHT_THEMES = ['light', 'retro', 'cmyk', 'light'] as const;
@@ -39,7 +40,7 @@ const DARK_THEMES = ['dark', 'coffee', 'cmyk', 'dark'] as const;
 
 export function clampThemeId(themeId: number | undefined | null): number {
   const n = Number(themeId);
-  if (!Number.isFinite(n) || n < 0 || n > THEME_ID.BLACK_HOLE) return THEME_ID.DEFAULT;
+  if (!Number.isFinite(n) || n < 0 || n > THEME_ID.CYBERPUNK) return THEME_ID.DEFAULT;
   return Math.floor(n);
 }
 
@@ -50,6 +51,15 @@ export function isBlackHoleTheme(
 ): boolean {
   const id = appearance === 0 ? lightTheme : darkTheme;
   return clampThemeId(id) === THEME_ID.BLACK_HOLE;
+}
+
+export function isCyberpunkTheme(
+  appearance: number,
+  lightTheme: number,
+  darkTheme: number,
+): boolean {
+  const id = appearance === 0 ? lightTheme : darkTheme;
+  return clampThemeId(id) === THEME_ID.CYBERPUNK;
 }
 
 /**
@@ -75,10 +85,12 @@ export function migrateThemeSettings(settings: {
   settings.darkTheme = clampThemeId(settings.darkTheme);
 }
 
-/// set the theme (v1.5: black hole always forces data-theme=dark)
+// migrateThemeSettings: keep blackHoleMode migration; clamp already uses new max
+
 export function setTheme(appearance: number, themeId: number) {
   const id = clampThemeId(themeId);
-  if (id === THEME_ID.BLACK_HOLE) {
+  // BH + CP: force dark; do NOT index LIGHT/DARK arrays (length 4 only)
+  if (id === THEME_ID.BLACK_HOLE || id === THEME_ID.CYBERPUNK) {
     document.documentElement.setAttribute('data-theme', 'dark');
     return;
   }
@@ -86,7 +98,6 @@ export function setTheme(appearance: number, themeId: number) {
     appearance === 0
       ? LIGHT_THEMES[id] || 'light'
       : DARK_THEMES[id] || 'dark';
-
   document.documentElement.setAttribute('data-theme', theme);
 }
 
