@@ -1,7 +1,7 @@
 ---
 name: change-library-perf
 description: Large-library viewport loading and similar/semantic search performance.
-last_updated: 2026-07-24
+last_updated: 2026-07-26
 ---
 
 
@@ -27,6 +27,7 @@ last_updated: 2026-07-24
 - **Embed matrix cache (2026-07-24):** process-local row-major f32 matrix + per-row L2 norms, keyed by normalized DB path + generation. First search may load all embeds; subsequent searches score in RAM (`matrix=1` in host log). Exact cosine only (ANN is R2). Soft skip if data would exceed ~512 MiB.
 - **Rayon scoring (2026-07-24 R1):** `score_embed_matrix` uses serial for N < 256; otherwise `par_iter` fold/reduce of local (scores, max, band_gt) — no shared counters. Unit test: serial ≡ parallel.
 - **Image-search ANN (2026-07-24 R2 + polish):** when N ≥ `IMAGE_SEARCH_ANN_MIN_N` (8000), **background** HNSW build on L2-normalized rows (`instant-distance`); first queries use exact matrix until `embed_ann ready` log. Query pulls ~500 candidates then exact cosine (`matrix=2`). Failed builds cached until generation bump (no rebuild thrash). Small N / fail / building → exact (`matrix=1`).
+- **Matrix warm (2026-07-26):** `create_db()` success path spawns `warm_embed_matrix_cache` so library open/switch preloads matrix + schedules ANN **off the first-search path**. Full disk persistence of matrix/ANN still deferred (versioned artifact + memory tradeoff).
 - Invalidate matrix on embed write/clear and on `clear_conn_pool` (library switch / storage migrate).
 - MVP: matrix includes search-folder exclusions; **file-type filter (`search_file_type != 0`) falls back to SQL blob path**.
 - Cosine fallback: precompute query norm; stream LE f32 from blob (`cosine_similarity_blob`) — no per-candidate `Vec<f32>`.

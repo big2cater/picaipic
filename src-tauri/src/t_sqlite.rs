@@ -2198,6 +2198,23 @@ impl AFile {
             .ok_or_else(|| format!("Inserted file missing from DB: {}", file_path))
     }
 
+    /// True when `file_path` is already indexed (folder path + basename match).
+    pub fn exists_by_path(file_path: &str) -> Result<bool, String> {
+        let path = Path::new(file_path);
+        let parent = path
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("Invalid file path: {}", file_path))?;
+        let Some(folder) = AFolder::fetch(parent)? else {
+            return Ok(false);
+        };
+        let Some(folder_id) = folder.id else {
+            return Ok(false);
+        };
+        Ok(Self::fetch(folder_id, file_path)?.is_some())
+    }
+
     /// get a file info from db by file_id
     pub fn get_file_info(file_id: i64) -> Result<Option<Self>, String> {
         let conn = open_conn()?;
@@ -3655,6 +3672,36 @@ pub(crate) fn clear_embed_matrix_cache() {
             *g = g.saturating_add(1);
         }
     }
+}
+
+/// Preload the in-memory embed matrix (+ schedule ANN) off the first-search path.
+/// Disk persistence of the full matrix is deferred (large, versioned artifact);
+/// warming after library open/switch removes most first-query cold-start cost.
+pub fn warm_embed_matrix_cache() {
+    std::thread::Builder::new()
+        .name("embed-matrix-warm".into())
+        .spawn(|| {
+            let Ok(conn) = open_conn() else {
+                return;
+            };
+            match get_or_load_embed_matrix(&conn) {
+                Ok(Some(matrix)) => {
+                    // Kick ANN build so later searches can use it without waiting.
+                    let _ = get_or_build_embed_ann(&matrix);
+                    println!(
+                        "embed_matrix warm ready db={} n={} dim={}",
+                        matrix.db_key,
+                        matrix.ids.len(),
+                        matrix.dim
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("embed_matrix warm failed: {e}");
+                }
+            }
+        })
+        .ok();
 }
 
 fn load_embed_matrix(
@@ -7659,7 +7706,7 @@ pub(crate) fn open_conn_for_library(library_id: &str) -> Result<PooledConn, Stri
 
 /// create all tables if not exists
 pub fn create_db() -> Result<(), String> {
-    match create_db_internal() {
+    let result = match create_db_internal() {
         Ok(_) => Ok(()),
         Err(err) => {
             if !should_recover_db(&err) {
@@ -7670,7 +7717,12 @@ pub fn create_db() -> Result<(), String> {
             recover_current_db_file()?;
             create_db_internal().map_err(|e| format!("Database recovery retry failed: {}", e))
         }
+    };
+    if result.is_ok() {
+        // Best-effort: warm semantic-search matrix so first query is not the cold load.
+        warm_embed_matrix_cache();
     }
+    result
 }
 
 fn create_db_internal() -> Result<(), String> {

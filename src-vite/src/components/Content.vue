@@ -21,10 +21,14 @@
       </div>
     </transition>
 
-    <!-- title bar -->
+    <!-- title bar: under black hole use light glass so cosmos reads through -->
     <div
       v-if="!showWelcomeContent"
-      class="absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between bg-base-300/80 backdrop-blur-md z-30 overflow-hidden"
+      class="absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between z-30 overflow-hidden"
+      :class="isBlackHoleChrome ? '' : 'bg-base-300/80 backdrop-blur-md'"
+      :style="isBlackHoleChrome
+        ? { background: 'rgba(6, 8, 18, 0.16)', backdropFilter: 'blur(2px)', WebkitBackdropFilter: 'blur(2px)' }
+        : undefined"
       data-tauri-drag-region
     >
       <!-- title -->
@@ -700,7 +704,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          copyImages, renameFile, moveFile, moveFileOutsideLibrary, copyFile, deleteFile, deleteFilePermanently, batchDeleteFiles, editFileComment, getFileThumb, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          revealPath, getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover,
-         updateFileInfo, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
+         updateFileInfo, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, removeUntrackedFile, checkFileExists, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
          openFileWithApp, openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDeleteSelected, getQueryFilePosition, getFolderSearchExcluded,
          startAiPlugin, invokeAiPluginCapability, getAiPluginTask, getAiPluginDiagnostics, getAiPluginLogs, getAiPluginHostEnvironment, grantAiPluginPermissions } from '@/common/api';
@@ -708,7 +712,7 @@ import { config, libConfig } from '@/common/config';
 import { getShortcutLabel, matchesShortcut, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { getSmartTagById } from '@/common/smartTags';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
-import { isWin, isMac, isLinux, setTheme, separator,
+import { isWin, isMac, isLinux, setTheme, separator, isBlackHoleTheme,
          formatFileSize, formatDate, getCalendarDateRange, formatFolderBreadcrumb, getThumbnailDataUrl, getAssetSrc, getPreviewUrl,
          getCachedThumbnailDataUrl,
          clearCachedThumbnailDataUrl,
@@ -807,6 +811,15 @@ const props = defineProps({
 const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
+
+// Match Home black-hole chrome: translucent top bar so cosmos shows through
+const isBlackHoleChrome = computed(() =>
+  isBlackHoleTheme(
+    Number(config.settings.appearance),
+    Number(config.settings.lightTheme),
+    Number(config.settings.darkTheme),
+  ),
+);
 
 const contentTitle = ref("");
 
@@ -949,7 +962,22 @@ function clearSelectionForFileListUpdate() {
   keyboardSelectionAnchorIndex.value = -1;
 }
 
-class CopyIndexError extends Error {}
+class CopyIndexError extends Error {
+  path?: string;
+  constructor(message: string, path?: string) {
+    super(message);
+    this.path = path;
+  }
+}
+
+async function cleanupCopyIndexOrphan(copiedPath: string | null | undefined) {
+  if (!copiedPath) return;
+  try {
+    await removeUntrackedFile(copiedPath);
+  } catch (e) {
+    console.warn('Failed to clean orphan after copy index error:', copiedPath, e);
+  }
+}
 
 async function confirmLargeBatch(count: number) {
   if (count <= LARGE_BATCH_CONFIRM_THRESHOLD) return true;
@@ -2110,6 +2138,7 @@ async function clearContentInternalDrag(event?: PointerEvent) {
               done++;
             } else {
               indexFailureCount++;
+              await cleanupCopyIndexOrphan(copiedPath);
             }
           }
         } else {
@@ -6637,7 +6666,8 @@ const onCopyToFolder = async () => {
       if (libraryDestination) {
         const indexedFile = await addFileToDb(libraryDestination.folderId, copiedFile);
         if (!indexedFile) {
-          throw new CopyIndexError(`Copied but failed to index ${copiedFile}`);
+          await cleanupCopyIndexOrphan(copiedFile);
+          throw new CopyIndexError(`Copied but failed to index ${copiedFile}`, copiedFile);
         }
       }
       return { file, copiedFile };

@@ -1315,10 +1315,44 @@ pub fn reset_ai_plugin_store_dir() -> Result<AiPluginStoreInfo, String> {
     plugin_store_info()
 }
 
+/// Lexically collapse `.` / `..` without touching the filesystem.
+/// Used when `canonicalize` is unavailable (path does not exist yet).
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Do not climb above a root/prefix-only path.
+                if matches!(
+                    out.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    out.pop();
+                }
+            }
+            std::path::Component::Normal(seg) => out.push(seg),
+        }
+    }
+    out
+}
+
+/// True when `path` is inside `root` (inclusive of equality).
+/// Prefer real `canonicalize` when both paths exist so symlinks resolve.
+/// When either path is missing, fall back to lexical `..` collapse — never
+/// treat raw `root/../evil` as inside `root` via unnormalized `starts_with`.
 fn is_path_inside(path: &Path, root: &Path) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    path.starts_with(root)
+    if let (Ok(path_c), Ok(root_c)) = (path.canonicalize(), root.canonicalize()) {
+        return path_c.starts_with(&root_c);
+    }
+    let path_n = normalize_path_lexically(path);
+    let root_n = normalize_path_lexically(root);
+    if root_n.as_os_str().is_empty() {
+        return false;
+    }
+    path_n.starts_with(&root_n)
 }
 
 /// True when `path` is inside any of the allow-listed roots (after canonicalize).
@@ -9565,6 +9599,40 @@ pub async fn get_ai_plugin_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_path_inside_rejects_parent_dir_escape_when_missing() {
+        let root = std::env::temp_dir().join(format!("picaipic-path-root-{}", Uuid::new_v4()));
+        // Intentionally do not create `root` — exercise lexical fallback.
+        let nested = root.join("plugin-a").join("backend");
+        assert!(
+            is_path_inside(&nested, &root),
+            "nested path under missing root must still count as inside"
+        );
+        let escape = root.join("..").join("outside-payload");
+        assert!(
+            !is_path_inside(&escape, &root),
+            "root/../outside must not pass containment"
+        );
+        let sibling_escape = root
+            .join("plugin-a")
+            .join("..")
+            .join("..")
+            .join("outside-payload");
+        assert!(
+            !is_path_inside(&sibling_escape, &root),
+            "deep .. climb must not pass containment"
+        );
+    }
+
+    #[test]
+    fn is_path_inside_accepts_equal_and_child_when_present() {
+        let root = std::env::temp_dir().join(format!("picaipic-path-exist-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("child")).unwrap();
+        assert!(is_path_inside(&root, &root));
+        assert!(is_path_inside(&root.join("child"), &root));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn app_version_comparison_handles_common_versions() {

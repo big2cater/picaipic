@@ -1191,6 +1191,17 @@ export async function addFileToDb(folderId, filePath) {
   return null;
 }
 
+/// Remove a library-folder file that is not tracked in afiles (copy-index orphan cleanup).
+export async function removeUntrackedFile(filePath) {
+  try {
+    await invoke('remove_untracked_file', { filePath });
+    return true;
+  } catch (error) {
+    console.warn('removeUntrackedFile failed:', error);
+  }
+  return false;
+}
+
 // check if file exists
 export async function checkFileExists(filePath) {
   try {

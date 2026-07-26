@@ -458,6 +458,7 @@ pub fn restore_databases(
     }
 
     let mut restored_names = Vec::new();
+    let mut written_db_paths: Vec<PathBuf> = Vec::new();
     let mut existing_names: std::collections::HashSet<String> =
         config.libraries.iter().map(|l| l.name.clone()).collect();
 
@@ -489,23 +490,67 @@ pub fn restore_databases(
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory for library: {}", e))?;
         }
-        fs::write(db_path_obj, &db_content).map_err(|e| {
-            format!(
+        // New library id → new path. Still write via temp+rename so a crash
+        // cannot leave a half-written .db that later looks openable.
+        if let Err(e) = write_file_atomic(db_path_obj, &db_content) {
+            cleanup_restored_db_files(&written_db_paths);
+            return Err(format!(
                 "Failed to write database file for '{}': {}",
                 final_lib_name, e
-            )
-        })?;
+            ));
+        }
+        written_db_paths.push(db_path_obj.to_path_buf());
 
         config.libraries.push(new_lib);
         existing_names.insert(final_lib_name.clone());
         restored_names.push(final_lib_name);
     }
 
-    t_config::save_app_config(&config)?;
+    if let Err(e) = t_config::save_app_config(&config) {
+        // Config never recorded the new libraries — drop orphan db files.
+        cleanup_restored_db_files(&written_db_paths);
+        return Err(e);
+    }
     Ok(RestoreResult {
         restored_count: restored_names.len(),
         restored_names,
     })
+}
+
+/// Write `bytes` to `path` via a sibling temp file + rename (crash-safe create).
+/// Refuses to replace an existing destination — restore always targets a new library id.
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "Refusing to overwrite existing database path: {}",
+            path.display()
+        ));
+    }
+    let tmp = path.with_extension("picaipic-restore.tmp");
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
+    fs::write(&tmp, bytes)
+        .map_err(|e| format!("Failed to write temp database '{}': {}", tmp.display(), e))?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(format!(
+                "Failed to finalize database '{}': {}",
+                path.display(),
+                e
+            ))
+        }
+    }
+}
+
+fn cleanup_restored_db_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+        let tmp = path.with_extension("picaipic-restore.tmp");
+        let _ = fs::remove_file(tmp);
+    }
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -533,4 +578,32 @@ fn resolve_unique_name(name: &str, existing: &std::collections::HashSet<String>)
         }
     }
     format!("{} ({})", name, rand::random::<u16>())
+}
+
+#[cfg(test)]
+mod restore_write_tests {
+    use super::*;
+
+    #[test]
+    fn write_file_atomic_creates_target_without_tmp_left_behind() {
+        let dir = std::env::temp_dir().join(format!("picaipic-restore-atom-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("lib.db");
+        write_file_atomic(&target, b"sqlite-bytes").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"sqlite-bytes");
+        assert!(!target.with_extension("picaipic-restore.tmp").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_file_atomic_refuses_existing_destination() {
+        let dir = std::env::temp_dir().join(format!("picaipic-restore-exist-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("lib.db");
+        fs::write(&target, b"old").unwrap();
+        let err = write_file_atomic(&target, b"new").unwrap_err();
+        assert!(err.contains("Refusing to overwrite"), "{err}");
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        let _ = fs::remove_dir_all(dir);
+    }
 }

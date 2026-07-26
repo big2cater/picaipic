@@ -329,6 +329,7 @@ async fn main() {
             t_cmds::get_file_info,
             t_cmds::update_file_info,
             t_cmds::add_file_to_db,
+            t_cmds::remove_untracked_file,
             t_cmds::check_file_exists,
             t_cmds::set_file_rotate,
             t_cmds::get_file_has_tags,

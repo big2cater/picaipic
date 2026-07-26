@@ -21,11 +21,16 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tauri::{AppHandle, State};
 
 // cancellation token for indexing
 pub struct IndexCancellation(pub Arc<Mutex<HashMap<i64, bool>>>);
+
+/// Recover from mutex poisoning instead of panicking subsequent commands.
+fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,7 +87,7 @@ fn ensure_db_storage_change_allowed(
         );
     }
 
-    if *status_state.0.lock().unwrap() {
+    if *lock_mutex(&status_state.0) {
         return Err("Cannot change database storage while face indexing is running.".to_string());
     }
 
@@ -288,8 +293,12 @@ pub fn index_album(
     thumbnail_size: u32,
     skip_file_path: Option<String>,
 ) -> Result<(), String> {
+    // Worker also guards via AlbumScanGuard; skip spawn when already active.
+    if t_utils::album_scan_active(album_id) {
+        return Ok(());
+    }
     // Reset cancellation flag
-    state.0.lock().unwrap().insert(album_id, false);
+    lock_mutex(&state.0).insert(album_id, false);
     let cancellation_token = state.0.clone();
 
     tauri::async_runtime::spawn(async move {
@@ -302,7 +311,10 @@ pub fn index_album(
         )
         .await
         {
-            eprintln!("Error indexing album {}: {}", album_id, e);
+            // Duplicate start races still hit the guard — quiet that case.
+            if !e.contains("already being scanned") {
+                eprintln!("Error indexing album {}: {}", album_id, e);
+            }
         }
     });
     Ok(())
@@ -311,7 +323,7 @@ pub fn index_album(
 /// cancel indexing
 #[tauri::command]
 pub fn cancel_indexing(state: State<IndexCancellation>, album_id: i64) -> Result<(), String> {
-    state.0.lock().unwrap().insert(album_id, true);
+    lock_mutex(&state.0).insert(album_id, true);
     Ok(())
 }
 
@@ -1011,8 +1023,14 @@ pub fn import_file(
         format!("Unsupported file type after copy: {}", new_path)
     })?;
     let now = chrono::Utc::now().timestamp_millis();
-    let (file, _) = AFile::add_to_db(folder_id, &new_path, file_type, now)?;
-    Ok(Some(file))
+    match AFile::add_to_db(folder_id, &new_path, file_type, now) {
+        Ok((file, _)) => Ok(Some(file)),
+        Err(e) => {
+            // Copy already landed; drop the orphan so disk and DB stay aligned.
+            let _ = std::fs::remove_file(&new_path);
+            Err(e)
+        }
+    }
 }
 
 /// import an image from a URL into a folder preserving the original file name when possible
@@ -1052,12 +1070,33 @@ pub fn get_drag_payload() -> DragPayload {
     }
 }
 
+fn import_url_http_client() -> Result<&'static reqwest::Client, String> {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create download client: {}", e))?;
+    let _ = CLIENT.set(client);
+    CLIENT
+        .get()
+        .ok_or_else(|| "Download client unavailable".to_string())
+}
+
 async fn import_url_inner(
     url: &str,
     folder_id: i64,
     folder_path: String,
 ) -> Result<Option<AFile>, String> {
-    let response = reqwest::get(url)
+    let client = import_url_http_client()?;
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("Failed to download image: {}", e))?;
 
@@ -1091,10 +1130,40 @@ async fn import_url_inner(
         .or_else(|| filename_from_url(response.url().as_str()))
         .or_else(|| filename_from_url(url));
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+    // Cap download size up-front when Content-Length is present, then stream
+    // with a hard accumulated ceiling so missing/forged lengths still abort.
+    t_utils::check_download_content_length(
+        response.content_length(),
+        t_utils::IMPORT_URL_MAX_BYTES,
+    )?;
+
+    let mut bytes = Vec::new();
+    if let Some(len) = response.content_length() {
+        // Prefer reserve when the server is honest; still re-check while reading.
+        if len <= t_utils::IMPORT_URL_MAX_BYTES {
+            bytes.reserve(len as usize);
+        }
+    }
+    let mut response = response;
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let next = t_utils::check_download_accumulated(
+            bytes.len(),
+            chunk.len(),
+            t_utils::IMPORT_URL_MAX_BYTES,
+        )?;
+        bytes.extend_from_slice(&chunk);
+        debug_assert_eq!(bytes.len(), next);
+    }
+    if bytes.is_empty() {
+        return Err("Downloaded image is empty".to_string());
+    }
 
     let dest_folder = folder_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1683,6 +1752,29 @@ pub fn add_file_to_db(folder_id: i64, file_path: &str) -> Result<Option<AFile>, 
     Ok(Some(file))
 }
 
+/// Delete a library-folder file that is **not** tracked in `afiles`.
+/// Used after copy-then-index when indexing fails (orphan cleanup).
+/// Refuses paths that already have a DB row so we never delete managed media.
+#[tauri::command]
+pub fn remove_untracked_file(file_path: &str) -> Result<(), String> {
+    let path = file_path.trim();
+    if path.is_empty() {
+        return Err("Missing path".to_string());
+    }
+    if !Path::new(path).is_file() {
+        return Ok(());
+    }
+    // Safety: only remove if not already indexed in the current library.
+    if AFile::exists_by_path(path).unwrap_or(false) {
+        return Err(format!(
+            "Refusing to remove tracked library file: {}",
+            path
+        ));
+    }
+    std::fs::remove_file(path)
+        .map_err(|e| format!("Failed to remove untracked file {}: {}", path, e))
+}
+
 /// check if file exists
 #[tauri::command]
 pub fn check_file_exists(file_path: &str) -> bool {
@@ -1943,7 +2035,7 @@ pub fn get_image_search_model_status(
     app_handle: AppHandle,
     state: State<t_ai::AiState>,
 ) -> t_ai::ImageSearchModelStatus {
-    let ai_engine = state.0.lock().unwrap();
+    let ai_engine = lock_mutex(&state.0);
     ai_engine.model_status(&app_handle)
 }
 
@@ -1953,7 +2045,7 @@ pub fn set_image_search_model(
     state: State<t_ai::AiState>,
     model: i64,
 ) -> Result<t_ai::ImageSearchModelStatus, String> {
-    let mut ai_engine = state.0.lock().unwrap();
+    let mut ai_engine = lock_mutex(&state.0);
     ai_engine.set_text_model(&app_handle, t_ai::ImageSearchTextModel::from_i64(model))?;
     Ok(ai_engine.model_status(&app_handle))
 }
@@ -2027,7 +2119,7 @@ pub fn get_face_stats() -> Result<t_face::FaceStats, String> {
 /// cancel face indexing
 #[tauri::command]
 pub fn cancel_face_index(state: State<t_face::FaceIndexCancellation>) -> Result<(), String> {
-    *state.0.lock().unwrap() = true;
+    *lock_mutex(&state.0) = true;
 
     Ok(())
 }
@@ -2044,9 +2136,9 @@ pub fn is_face_indexing(
     status_state: State<t_face::FaceIndexingStatus>,
     progress_state: State<t_face::FaceIndexProgressState>,
 ) -> Result<(bool, Option<t_face::FaceIndexProgress>), String> {
-    let is_running = *status_state.0.lock().unwrap();
+    let is_running = *lock_mutex(&status_state.0);
     let progress = if is_running {
-        Some(progress_state.0.lock().unwrap().clone())
+        Some(lock_mutex(&progress_state.0).clone())
     } else {
         None
     };
@@ -2096,7 +2188,7 @@ pub fn dedup_start_scan(
 pub fn dedup_get_scan_status(
     state: tauri::State<'_, crate::t_dedup::DedupState>,
 ) -> Result<crate::t_dedup::DedupScanStatus, String> {
-    let mut status = state.status.lock().unwrap().clone();
+    let mut status = lock_mutex(&state.status).clone();
     status.is_scanning = state.is_scanning.load(std::sync::atomic::Ordering::SeqCst);
     Ok(status.clone())
 }

@@ -63,12 +63,71 @@ pub fn trash_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Max body size for `import_url` downloads (100 MiB).
+pub const IMPORT_URL_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Reject a Content-Length that already exceeds the import cap.
+pub fn check_download_content_length(
+    content_length: Option<u64>,
+    max_bytes: u64,
+) -> Result<(), String> {
+    if let Some(len) = content_length {
+        if len > max_bytes {
+            return Err(format!(
+                "Download too large: {} bytes (max {} bytes)",
+                len, max_bytes
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject when accumulated download size would exceed the import cap.
+pub fn check_download_accumulated(
+    current_len: usize,
+    chunk_len: usize,
+    max_bytes: u64,
+) -> Result<usize, String> {
+    let next = current_len.saturating_add(chunk_len);
+    if (next as u64) > max_bytes {
+        return Err(format!(
+            "Download exceeded size limit ({} bytes)",
+            max_bytes
+        ));
+    }
+    Ok(next)
+}
+
 #[cfg(test)]
 mod transfer_tests {
     use super::*;
 
     fn test_dir() -> PathBuf {
         std::env::temp_dir().join(format!("lap-transfer-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn download_content_length_rejects_oversize() {
+        assert!(check_download_content_length(Some(IMPORT_URL_MAX_BYTES), IMPORT_URL_MAX_BYTES).is_ok());
+        assert!(check_download_content_length(Some(IMPORT_URL_MAX_BYTES + 1), IMPORT_URL_MAX_BYTES).is_err());
+        assert!(check_download_content_length(None, IMPORT_URL_MAX_BYTES).is_ok());
+    }
+
+    #[test]
+    fn download_accumulated_rejects_when_chunk_crosses_cap() {
+        let max = 1024u64;
+        assert_eq!(check_download_accumulated(1000, 24, max).unwrap(), 1024);
+        assert!(check_download_accumulated(1000, 25, max).is_err());
+        assert!(check_download_accumulated(0, (max as usize) + 1, max).is_err());
+    }
+
+    #[test]
+    fn meta_date_to_timestamp_treats_exif_as_local() {
+        // EXIF has no zone; parser must not panic and should return a unix second.
+        let ts = meta_date_to_timestamp("2024:06:15 12:00:00");
+        assert!(ts.is_some());
+        let ts = ts.unwrap();
+        assert!(ts > 1_700_000_000 && ts < 2_000_000_000);
     }
 
     #[test]
@@ -1831,7 +1890,9 @@ struct AlbumScanGuard {
 
 impl AlbumScanGuard {
     fn acquire(album_id: i64) -> Result<Self, String> {
-        let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap();
+        let mut active = ACTIVE_ALBUM_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !active.insert(album_id) {
             return Err(format!("Album {} is already being scanned", album_id));
         }
@@ -1841,12 +1902,19 @@ impl AlbumScanGuard {
 
 impl Drop for AlbumScanGuard {
     fn drop(&mut self) {
-        ACTIVE_ALBUM_SCANS.lock().unwrap().remove(&self.album_id);
+        ACTIVE_ALBUM_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.album_id);
     }
 }
 
-fn album_scan_active(album_id: i64) -> bool {
-    ACTIVE_ALBUM_SCANS.lock().unwrap().contains(&album_id)
+/// True when an `index_album_worker` holds the per-album scan guard.
+pub fn album_scan_active(album_id: i64) -> bool {
+    ACTIVE_ALBUM_SCANS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&album_id)
 }
 
 fn sync_generation_valid(generation: u64) -> bool {
@@ -3018,6 +3086,12 @@ fn index_single_file(
     }
 }
 
+/// Preview generation timeout. Heavy RAW/video can be slow; still must not hang forever.
+const NORMAL_THUMB_TIMEOUT: Duration = Duration::from_secs(45);
+const HEAVY_THUMB_TIMEOUT: Duration = Duration::from_secs(120);
+/// Embedding is optional for browse UX; fail closed after this so scan can finish.
+const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn process_thumbnail_task(
     app_handle: tauri::AppHandle,
     task: ThumbnailTask,
@@ -3025,6 +3099,11 @@ async fn process_thumbnail_task(
     tracker: Arc<Mutex<ProgressTracker>>,
 ) -> Result<bool, String> {
     // --- Preview phase: hold thumb permit only while generating UI thumbnails ---
+    let thumb_timeout = if task.is_heavy {
+        HEAVY_THUMB_TIMEOUT
+    } else {
+        NORMAL_THUMB_TIMEOUT
+    };
     let thumb_ok = {
         let thumb_semaphore = if task.is_heavy {
             budget.heavy_thumb.clone()
@@ -3037,7 +3116,7 @@ async fn process_thumbnail_task(
             .map_err(|e| format!("Failed to acquire thumbnail permit: {}", e))?;
 
         let task_for_thumb = task.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        let join = tauri::async_runtime::spawn_blocking(move || {
             match crate::t_sqlite::AThumb::get_or_create_thumb(
                 task_for_thumb.file_id,
                 &task_for_thumb.file_path,
@@ -3059,18 +3138,51 @@ async fn process_thumbnail_task(
                     false
                 }
             }
-        })
-        .await
-        .map_err(|e| format!("Thumbnail task failed: {}", e))?
+        });
+
+        match tokio::time::timeout(thumb_timeout, join).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(e)) => {
+                eprintln!(
+                    "Thumbnail join failed for {} (file_id={}): {}",
+                    task.file_path, task.file_id, e
+                );
+                false
+            }
+            Err(_) => {
+                eprintln!(
+                    "Thumbnail timed out after {:?} for {} (file_id={}, heavy={})",
+                    thumb_timeout, task.file_path, task.file_id, task.is_heavy
+                );
+                // Task may still be running in the blocking pool; progress must advance.
+                false
+            }
+        }
     }; // thumb permit released here so other previews keep flowing during embed
 
-    if !thumb_ok {
+    // CRITICAL: always advance `processed` after the preview attempt (success OR fail).
+    // Previously failures only bumped `failed` and returned early, so progress could
+    // stick forever at e.g. 216/218 in phase preparing_previews.
+    if !task.processed_already_ready {
+        with_progress_tracker(&tracker, |tracker| {
+            tracker.modify(|snapshot| {
+                snapshot.processed += 1;
+                if !thumb_ok {
+                    snapshot.failed += 1;
+                }
+            });
+            tracker.maybe_emit();
+        });
+    } else if !thumb_ok {
         with_progress_tracker(&tracker, |tracker| {
             tracker.modify(|snapshot| {
                 snapshot.failed += 1;
             });
             tracker.maybe_emit();
         });
+    }
+
+    if !thumb_ok {
         return Ok(false);
     }
 
@@ -3081,15 +3193,6 @@ async fn process_thumbnail_task(
             file_ids: vec![task.file_id],
         },
     );
-
-    if !task.processed_already_ready {
-        with_progress_tracker(&tracker, |tracker| {
-            tracker.modify(|snapshot| {
-                snapshot.processed += 1;
-            });
-            tracker.maybe_emit();
-        });
-    }
 
     if !matches!(task.file_type, 1 | 3) {
         return Ok(true);
@@ -3105,7 +3208,7 @@ async fn process_thumbnail_task(
     let app_handle_for_embedding = app_handle.clone();
     let file_id = task.file_id;
     let file_path = task.file_path.clone();
-    let embedding_ok = tauri::async_runtime::spawn_blocking(move || {
+    let embed_join = tauri::async_runtime::spawn_blocking(move || {
         let ai_state: State<crate::t_ai::AiState> = app_handle_for_embedding.state();
         match crate::t_sqlite::AFile::generate_embedding(&ai_state, file_id) {
             Ok(_) => true,
@@ -3114,9 +3217,25 @@ async fn process_thumbnail_task(
                 false
             }
         }
-    })
-    .await
-    .map_err(|e| format!("Embedding task failed: {}", e))?;
+    });
+
+    let embedding_ok = match tokio::time::timeout(EMBED_TIMEOUT, embed_join).await {
+        Ok(Ok(ok)) => ok,
+        Ok(Err(e)) => {
+            eprintln!(
+                "Embedding join failed for {} (file_id={}): {}",
+                task.file_path, task.file_id, e
+            );
+            false
+        }
+        Err(_) => {
+            eprintln!(
+                "Embedding timed out after {:?} for {} (file_id={})",
+                EMBED_TIMEOUT, task.file_path, task.file_id
+            );
+            false
+        }
+    };
 
     if embedding_ok {
         with_progress_tracker(&tracker, |tracker| {

@@ -75,9 +75,13 @@ export function migrateThemeSettings(settings: {
   settings.darkTheme = clampThemeId(settings.darkTheme);
 }
 
-/// set the theme (v1.4 compact menu)
+/// set the theme (v1.5: black hole always forces data-theme=dark)
 export function setTheme(appearance: number, themeId: number) {
   const id = clampThemeId(themeId);
+  if (id === THEME_ID.BLACK_HOLE) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    return;
+  }
   const theme =
     appearance === 0
       ? LIGHT_THEMES[id] || 'light'
@@ -173,6 +177,12 @@ export function formatDate(year: number, month: number, date: number, formatStr:
 }
 
 /// get the date range of a month
+/**
+ * Local calendar-day range as unix seconds.
+ * Must stay local (not UTC): EXIF taken_date is stored as local wall-clock
+ * (`meta_date_to_timestamp` + Local), and SQL filters compare with
+ * `strftime(..., 'unixepoch', 'localtime')`.
+ */
 export function getCalendarDateRange(year: number, month: number, date: number) {
   let startDate = 0;
   let endDate = 0;
@@ -181,7 +191,7 @@ export function getCalendarDateRange(year: number, month: number, date: number) 
   const m = Number(month);
   const d = Number(date);
 
-  // Integer unix seconds — matches SQLite afiles.*_date i64 storage.
+  // Local midnight → unix seconds (aligned with SQLite localtime day compare).
   const toUnix = (yy: number, m0: number, dd: number) =>
     Math.floor(new Date(yy, m0, dd).getTime() / 1000);
 
@@ -202,8 +212,9 @@ export function getCalendarDateRange(year: number, month: number, date: number) 
 
 /// format file size to string
 export function formatFileSize(bytes: number): string {
-  if (bytes == null) return '';
-  if (bytes === 0) return '0 KB';
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
 
   const sizes = ['KB', 'MB', 'GB', 'TB'];
   const i = Math.max(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, 0);
@@ -350,12 +361,8 @@ export function formatCaptureSettings(focal_length: string, exposure_time: strin
   result += iso_speed ? `, ISO ${formatCaptureSettingValue(iso_speed)}` : '';
   result += exposure_bias ? `, ${formatCaptureSettingValue(exposure_bias)}` : '';
 
-  // remove the first ',' if it exists
-  if (result[0] === ',' && result.length > 1) {
-    result = result.substring(1);
-  }
-
-  return result;
+  // Drop leading ", " when the first field(s) were empty
+  return result.replace(/^,\s*/, '');
 }
 
 /// get full path

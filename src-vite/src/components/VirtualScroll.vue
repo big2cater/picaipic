@@ -339,14 +339,23 @@ watch(
   { flush: 'pre' },
 );
 
+let scrollRaf = 0;
 function onScroll(e: Event) {
   const target = e.target as HTMLElement;
-  scrollOffset.value = isVertical.value ? target.scrollTop : target.scrollLeft;
-  emit('scroll', e);
-  // Update event is handled by watcher on visibleRange
+  // Coalesce scroll samples to one layout-friendly update per frame
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    if (!scrollerRef.value) return;
+    scrollOffset.value = isVertical.value
+      ? scrollerRef.value.scrollTop
+      : scrollerRef.value.scrollLeft;
+    emit('scroll', e);
+  });
 }
 
 function updateContainerSize() {
+  // Prefer clientWidth/Height (no forced layout vs getBoundingClientRect).
   if (scrollerRef.value) {
     containerSize.value = isVertical.value 
       ? scrollerRef.value.clientHeight 
@@ -371,6 +380,10 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (scrollRaf) {
+    cancelAnimationFrame(scrollRaf);
+    scrollRaf = 0;
+  }
   resizeObserver?.disconnect();
   resizeObserver = null;
 });
