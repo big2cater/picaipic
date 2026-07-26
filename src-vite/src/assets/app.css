@@ -50,6 +50,12 @@
   transition: opacity 120ms ease-out;
 }
 
+/* cyberpunk neon chrome accents */
+.cp-shell {
+  --cp-magenta: #ff2bd6;
+  --cp-cyan: #00e5ff;
+}
+
 html, body {
   overscroll-behavior: none;
 }

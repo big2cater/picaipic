@@ -75,6 +75,7 @@ import {
   formatCaptureSettings,
   formatTimestamp,
   isBlackHoleTheme,
+  isCyberpunkTheme,
 } from '@/common/utils';
 import {
   IconCheckAll,
@@ -176,16 +177,16 @@ const hasRealSelectedFile = computed(() => {
   const file = currentFile.value;
   return !!file && !file.isPlaceholder;
 });
-const isBlackHoleChrome = computed(() =>
-  isBlackHoleTheme(
-    Number(config.settings.appearance),
-    Number(config.settings.lightTheme),
-    Number(config.settings.darkTheme),
-  ),
-);
+const isFxTheme = computed(() => {
+  const appearance = Number(config.settings.appearance);
+  const lightTheme = Number(config.settings.lightTheme);
+  const darkTheme = Number(config.settings.darkTheme);
+  return isBlackHoleTheme(appearance, lightTheme, darkTheme)
+    || isCyberpunkTheme(appearance, lightTheme, darkTheme);
+});
 
 const containerClass = computed(() => {
-  const base = isBlackHoleChrome.value
+  const base = isFxTheme.value
     ? 'px-2 h-8 flex items-center justify-between text-sm cursor-default'
     : 'px-2 h-8 flex items-center justify-between text-sm cursor-default bg-base-300/80 backdrop-blur-md';
   if (props.isEmbedded) return base;
@@ -193,7 +194,7 @@ const containerClass = computed(() => {
 });
 
 const containerStyle = computed(() => {
-  if (!isBlackHoleChrome.value) return undefined;
+  if (!isFxTheme.value) return undefined;
   return {
     background: 'rgba(6, 8, 18, 0.16)',
     backdropFilter: 'blur(2px)',

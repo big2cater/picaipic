@@ -21,12 +21,12 @@
       </div>
     </transition>
 
-    <!-- title bar: under black hole use light glass so cosmos reads through -->
+    <!-- title bar: under BH/CP use light glass so FX backdrop reads through -->
     <div
       v-if="!showWelcomeContent"
       class="absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between z-30 overflow-hidden"
-      :class="isBlackHoleChrome ? '' : 'bg-base-300/80 backdrop-blur-md'"
-      :style="isBlackHoleChrome
+      :class="isFxChrome ? '' : 'bg-base-300/80 backdrop-blur-md'"
+      :style="isFxChrome
         ? { background: 'rgba(6, 8, 18, 0.16)', backdropFilter: 'blur(2px)', WebkitBackdropFilter: 'blur(2px)' }
         : undefined"
       data-tauri-drag-region
@@ -712,7 +712,7 @@ import { config, libConfig } from '@/common/config';
 import { getShortcutLabel, matchesShortcut, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { getSmartTagById } from '@/common/smartTags';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
-import { isWin, isMac, isLinux, setTheme, separator, isBlackHoleTheme,
+import { isWin, isMac, isLinux, setTheme, separator, isBlackHoleTheme, isCyberpunkTheme,
          formatFileSize, formatDate, getCalendarDateRange, formatFolderBreadcrumb, getThumbnailDataUrl, getAssetSrc, getPreviewUrl,
          getCachedThumbnailDataUrl,
          clearCachedThumbnailDataUrl,
@@ -812,14 +812,14 @@ const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
-// Match Home black-hole chrome: translucent top bar so cosmos shows through
-const isBlackHoleChrome = computed(() =>
-  isBlackHoleTheme(
-    Number(config.settings.appearance),
-    Number(config.settings.lightTheme),
-    Number(config.settings.darkTheme),
-  ),
-);
+// Match Home BH/CP chrome: translucent top bar so FX backdrop shows through
+const isFxChrome = computed(() => {
+  const appearance = Number(config.settings.appearance);
+  const lightTheme = Number(config.settings.lightTheme);
+  const darkTheme = Number(config.settings.darkTheme);
+  return isBlackHoleTheme(appearance, lightTheme, darkTheme)
+    || isCyberpunkTheme(appearance, lightTheme, darkTheme);
+});
 
 const contentTitle = ref("");
 
