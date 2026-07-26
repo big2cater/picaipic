@@ -7,6 +7,7 @@ Updated: 2026-07-26
 | Track | Status |
 |-------|--------|
 | Black-hole theme + cosmos WebGL | **Shipped** (branch `feat/black-hole-idle-theme`) — menu Default/Retro/CMYK/Black hole |
+| Cyberpunk idle photo glitch | **Shipped path** — `THEME_ID=4`; maximize + 6s idle → `PhotoGlitchLayer`; intensity gate in GridView — `change-cyberpunk-theme.md` |
 | Photo gravity | **PhotoVortexLayer** (FragCoord UV lens, photo area only); idle **6s**; CSS card warp not driven |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
