@@ -173,7 +173,9 @@ function resize() {
   canvas.style.height = `${h}px`;
   ctx = canvas.getContext('2d');
   if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  seedField(true);
+  // force=false: only rebuild field when count thresholds change — avoids
+  // restarting/jumping rain during continuous ResizeObserver while dragging window
+  seedField(false);
 }
 
 function seedField(force = false) {
