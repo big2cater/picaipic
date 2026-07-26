@@ -148,20 +148,22 @@ THEME_ID = {
 **Capture:** copy the drawing path from `PhotoVortexLayer.captureSource` (decoded `<img>` rects → 2D canvas, DPR clamp ≤1.5, skip incomplete/cross-origin) **with one required change vs vortex:**
 
 ```ts
-// PhotoVortex today (do NOT copy this branch as-is):
+// PhotoVortex today (structure — do NOT copy the zero-draw policy as-is):
 if (drawn === 0) {
-  console.warn(...);
-  return out; // solid dark canvas — still emits captured / hides grid
+  console.warn('PhotoVortexLayer: no thumbnails drawn into capture');
+  // no return here — fall through
 }
+return out; // always non-null canvas (solid dark if nothing drawn) → still upload + emit captured / hide grid
 
-// PhotoGlitchLayer MUST instead:
+// PhotoGlitchLayer MUST instead early-abort on empty capture:
 if (drawn === 0) {
   console.warn('PhotoGlitchLayer: no thumbnails drawn into capture');
   return null; // beginSession aborts: no upload, no emit('captured'), grid stays visible
 }
+return out;
 ```
 
-Rationale: glitch without photo content is a frozen black plate that incorrectly hides the live grid (§8). Vortex’s “dark fallback is better than crash” does **not** apply here.
+Rationale: glitch without photo content is a frozen black plate that incorrectly hides the live grid (§8). Vortex’s “dark fallback is better than crash” (warn then still `return out`) does **not** apply here.
 
 Optional shared helper later is fine; **not** required for v1. If shared, glitch path still needs the `drawn === 0 → null` policy (parameter or wrapper).
 
@@ -327,16 +329,18 @@ No second analytical cosmos WebGL required for v1 (unlike BH). Optional subtle C
 
 ## 12. Spec errata (2026-07-26 review pass)
 
-Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useIdle.ts`, `Home.vue` `gravityActive`. All of the following are **in force** for implementation:
+Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useIdle.ts`, `Home.vue` `gravityActive`. All findings below are **already folded into the body** (not open TODOs).
 
-| Severity | Finding | Spec fix |
-|----------|---------|----------|
+| Severity | Finding | Spec fix (landed in body) |
+|----------|---------|---------------------------|
 | 🔴 | Prototype often WebGL2; app is WebGL1 — paste would fail compile | §4.2 port table + preamble |
 | 🟠 | `LIGHT_THEMES`/`DARK_THEMES` length 4 → id 4 OOB without early-return | §3 `setTheme` early-return with BH |
 | 🟠 | `useIdle` is input-only; other gates live in Home computed | §2.1 seven-way `cpFxActive` |
 | 🟡 | Prototype lacks `u_intensity` | §4.2 JS bind + GLSL multiply; §4.3 skip at 0 |
 | 🟢 | Prefer `v_uv` over raw `gl_FragCoord` | §4.2 |
 | 🟢 | No new `cyberpunkMode` flag | §3 dual-pin only |
-| 🟠 | §4.1 “copy captureSource” vs §8 zero-draw abort conflict (vortex returns dark canvas) | §4.1: glitch **must** `return null` when `drawn===0` |
-| 🟡 | intensity 0 gate vs “byte-for-byte” cpFxActive | §2.1: intensity on GridView `:active`, not inside provide |
-| ⚪ | `Number(x) \|\| 1` maps 0→1 | §4.2: bind raw `Number(...)` only |
+| 🟠 **R1** | §4.1 “copy captureSource” vs §8 zero-draw abort (vortex **warns then still** `return out`, not early-return) | §4.1: glitch **must** `return null` when `drawn===0`; vortex block shows fall-through |
+| 🟡 **R2** | intensity 0 gate vs “byte-for-byte” cpFxActive | §2.1: intensity on GridView `:active` computed, not inside provide |
+| ⚪ **R3** | `Number(x) \|\| 1` maps 0→1 | §4.2: bind raw `Number(...)` only |
+
+**R1 / R2 / R3** are fully applied in **§4.1 / §2.1 / §4.2** respectively; no further open action on those items.
