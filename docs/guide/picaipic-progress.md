@@ -6,10 +6,11 @@ Updated: 2026-07-26
 
 | Track | Status |
 |-------|--------|
-| Theme menu | **Default / Retro / CMYK / Black hole / Cyberpunk** (`THEME_ID` 0–4) — branch `feat/black-hole-idle-theme` |
-| Black-hole cosmos + PhotoVortex | **Shipped** — maximize + **6s** idle; photo-area UV lens; CSS card warp not driven — `change-black-hole-theme.md` |
-| Cyberpunk night-city ambient | **Shipped** — `CyberpunkBackground` (grid, neon, skyline, rain, particles, kana); glass chrome — `change-cyberpunk-theme.md` |
-| Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1 continuous glitch; intensity `>0` gate in GridView |
+| Theme menu | **Default / Retro / CMYK / Black hole / Cyberpunk** (`THEME_ID` 0–4) — branch `feat/black-hole-idle-theme` / PR #3 |
+| Black-hole cosmos + PhotoVortex | **Shipped** — maximize + **6s** idle; UV lens; RO size cache; theme-gated mount — `change-black-hole-theme.md` |
+| Cyberpunk night-city ambient | **Shipped** — `CyberpunkBackground` (sprite-baked rain/particles/kana) — `change-cyberpunk-theme.md` |
+| Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1; **mediump-safe** hash + mod time; intensity `>0` — `change-cyberpunk-theme.md` |
+| FX correctness/perf follow-up | **Shipped** — commit `130b33a` (hash, sprites, reflow, theme-gate GL) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |

@@ -11,7 +11,7 @@ last_updated: 2026-07-26
 - Neon chrome accents under cyberpunk (daily UI; no full-window glitch while working)
 - Idle photo-area glitch timing / capture / continuous WebGL1 loop
 - `dynamicThemeIntensity` or appearance lock under cyberpunk (shared FX-theme path with black hole)
-- Home `cpFxActive` / provide `cpGlitchActive` / GridView intensity gate
+- Home `cpFxActive` / provide `cpGlitchActive` / GridView intensity + **theme-gated mount**
 
 ## Current product path (2026-07-26)
 
@@ -22,10 +22,11 @@ last_updated: 2026-07-26
 | Settings dual-pin | `Settings.vue` | BH **or** CP dual-pins light+dark slots; appearance locked under FX themes |
 | Idle | `useIdle.ts` default **6000** ms; `Home.vue` `useIdle(6000)` | Shared with black hole |
 | FX gate | `Home.vue` `cpFxActive` | Byte-for-byte mirror of `gravityActive` with `cyberpunkThemeOn`; provide as `cpGlitchActive` |
-| Daily ambient | `CyberpunkBackground.vue` | Night-city: CSS grid/skyline/neon + canvas rain / particles / kana; static if reduced-motion |
+| Daily ambient | `CyberpunkBackground.vue` | Night-city CSS + canvas rain/particles/kana via **pre-baked sprites** (no per-frame `shadowBlur` / gradients); static if reduced-motion |
 | Chrome | `Home.vue` `cp-shell` + glass rails; `StatusBar` / `Content` FX glass | Magenta/cyan edges; TitleBar stays interactive |
-| **Photo effect** | `PhotoGlitchLayer.vue` + `GridView.vue` | Freeze visible thumbs → continuous FragCoord-style glitch (WebGL1); hide grid after capture |
-| Intensity gate | `GridView.vue` `glitchLayerActive` | `cpGlitchActive && intensity > 0` only on layer `:active` — **not** inside `cpFxActive` |
+| **Photo effect** | `PhotoGlitchLayer.vue` + `GridView.vue` | Freeze thumbs → continuous glitch; **mediump-safe** hash + `mod(time)`; ResizeObserver size cache; lazy GL init |
+| Mount gate | `GridView.vue` | `v-if="cyberpunkThemeOn && inject present"` — do **not** keep GL layer mounted on other themes |
+| Intensity gate | `GridView.vue` `glitchLayerActive` | `cpGlitchActive && intensity > 0` on `:active` only — **not** inside `cpFxActive` |
 
 ## Glitch UX contract
 1. Select theme **赛博朋克 / Cyberpunk**
@@ -40,16 +41,20 @@ last_updated: 2026-07-26
 - Hide grid on empty capture (no thumbs drawn → keep live grid)
 - Fold intensity into the seven-way `cpFxActive` computed (gate intensity only at GridView layer active)
 - Unify with `PhotoVortexLayer` in v1
+- Use `fract(sin(dot)*43758)` style hash under **mediump** (overflows ±2^14 → frozen/NaN grain)
+- Call `getBoundingClientRect` every paint frame (use ResizeObserver cache)
+- Per-frame canvas `shadowBlur` / `createLinearGradient` for ambient rain/particles (bake sprites)
 
 ## Design docs
-- Spec: `docs/superpowers/specs/2026-07-26-cyberpunk-idle-glitch-design.md`
+- Spec: `docs/superpowers/specs/2026-07-26-cyberpunk-idle-glitch-design.md` (incl. WebGL1 port + mediump notes)
 - Plan: `docs/superpowers/plans/2026-07-26-cyberpunk-idle-glitch-impl.md`
 - Sibling BH runbook: `patterns/change-black-hole-theme.md`
 
 ## Verify
 - `node scripts/check_theme_ids.mjs` → `check_theme_ids: ok`
-- Theme on: night-city ambient visible (rain/particles/kana when motion allowed)
-- Theme switch off cyberpunk: ambient + glitch unmount, grid visible, no residual FX
+- Theme on: night-city ambient visible (rain/particles/kana when motion allowed); no multi-second jank
+- Theme switch off cyberpunk: ambient + glitch **unmount**, grid visible, no residual FX
+- Long idle glitch (minutes): grain/scan still animate (mediump-safe hash + `mod(time)`)
 - Settings window maximize does not set main `uiStore.isMaximized`
 - Reduced motion: no glitch; ambient may stay static (no canvas loop)
 - Intensity `0`: idle gate may still be true; glitch layer stays inactive

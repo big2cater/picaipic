@@ -1,9 +1,9 @@
 # Cyberpunk idle glitch theme — design
 
 - **Date:** 2026-07-26  
-- **Status:** Draft for implementation (user-approved architecture + FX in brainstorm)  
-- **Branch context:** Parallel to black-hole idle theme on `feat/black-hole-idle-theme` lineage  
-- **Owner product choices:** trigger = maximize + 6s idle (same as BH); photo-area only; daily UI = dark + neon accents; continuous glitch until activity; approach = parallel `PhotoGlitchLayer` (not unified FX layer)
+- **Status:** **Shipped** on `feat/black-hole-idle-theme` (PR #3); follow-up correctness/perf landed (`130b33a`)  
+- **Branch context:** Parallel to black-hole idle theme  
+- **Owner product choices:** trigger = maximize + 6s idle (same as BH); photo-area only; daily UI = night-city ambient + neon glass; continuous glitch until activity; approach = parallel `PhotoGlitchLayer` (not unified FX layer)
 
 ---
 
@@ -342,5 +342,9 @@ Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useI
 | 🟠 **R1** | §4.1 “copy captureSource” vs §8 zero-draw abort (vortex **warns then still** `return out`, not early-return) | §4.1: glitch **must** `return null` when `drawn===0`; vortex block shows fall-through |
 | 🟡 **R2** | intensity 0 gate vs “byte-for-byte” cpFxActive | §2.1: intensity on GridView `:active` computed, not inside provide |
 | ⚪ **R3** | `Number(x) \|\| 1` maps 0→1 | §4.2: bind raw `Number(...)` only |
+| 🔴 **P0** | mediump overflow of classic `sin*43758` hash | Shipped: fract-hash + `mod(time)` in `PhotoGlitchLayer` |
+| 🟠 **P1** | Ambient per-frame `shadowBlur` / gradients | Shipped: sprite bake in `CyberpunkBackground` |
+| 🟠 **P1** | Per-frame `getBoundingClientRect` in paint | Shipped: ResizeObserver cache (glitch + vortex) |
+| 🟠 **P1** | Dual always-mounted WebGL layers | Shipped: GridView theme-gated `v-if` + lazy GL init |
 
-**R1 / R2 / R3** are fully applied in **§4.1 / §2.1 / §4.2** respectively; no further open action on those items.
+**R1 / R2 / R3** and **P0/P1** are landed in code (`130b33a` and prior FX commits).

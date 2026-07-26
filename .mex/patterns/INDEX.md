@@ -2,7 +2,7 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-26 (black-hole PhotoVortex; cyberpunk night-city + glitch; audit harden; scan/RAW)._
+_Last reviewed: 2026-07-26 (BH/CP FX + mediump/sprite/theme-gate perf; audit; scan/RAW)._
 
 | Pattern | Use when |
 |---------|----------|
