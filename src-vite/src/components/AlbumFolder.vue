@@ -381,7 +381,6 @@ const getMenuItemsForFolder = async (folder: any) => {
 
 /// click folder to select
 const clickFolder = async (albumIdVal: number, folder: Folder) => {
-  console.log('AlbumFolder.vue-clickFolder:', albumIdVal, folder);
   if (props.allowContextMenu) {
     uiStore.setActivePane('left-sidebar');
   }
@@ -551,7 +550,6 @@ const clickNewFolder = async (newFolderName: string) => {
 const clickRenameFolder = async (newFolderName: string) => {
   // verfify new folder name is valid
   if (!newFolderName || newFolderName.trim().length === 0 || !isValidFileName(newFolderName)) {
-    console.log('AlbumFolder.vue-clickRenameFolder: invalid folder name');
     return;
   }
   if (newFolderName === originalFolderName.value) {

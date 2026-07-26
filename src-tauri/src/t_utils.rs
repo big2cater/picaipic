@@ -2965,7 +2965,7 @@ fn with_progress_tracker<T, F>(tracker: &Arc<Mutex<ProgressTracker>>, update: F)
 where
     F: FnOnce(&mut ProgressTracker) -> T,
 {
-    let mut guard = tracker.lock().unwrap();
+    let mut guard = t_common::lock_mutex(tracker);
     update(&mut guard)
 }
 
@@ -3331,7 +3331,7 @@ pub async fn index_album_worker(
         .filter_entry(|e| !is_hidden(e))
     {
         // Check cancellation
-        if let Some(&true) = cancellation_token.lock().unwrap().get(&album_id) {
+        if let Some(&true) = t_common::lock_mutex(cancellation_token.as_ref()).get(&album_id) {
             println!("Indexing cancelled for album {}", album_id);
             is_cancelled = true;
             thumbnail_join_set.abort_all();

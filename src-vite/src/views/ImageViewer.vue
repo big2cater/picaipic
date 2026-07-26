@@ -501,7 +501,6 @@ onMounted(async() => {
 
   unlistenGridView = await listen('message-from-content', (event) => {
     const { message, fileId: targetFileId, changes } = event.payload as any;
-    console.log('message-from-content:', message, targetFileId);
     switch (message) {
       case 'rotate':
         if (targetFileId === fileId.value) {
@@ -934,7 +933,6 @@ watch(() => Number(config.settings.scale || 1), (newScale) => {
 
 // watch language
 watch(() => config.settings.language, (newLanguage) => {
-    console.log('Language changed to:', newLanguage);
     locale.value = newLanguage; // update locale based on config.settings.language
 });
 
@@ -960,7 +958,6 @@ watch(() => isFullScreen.value, async (newFullScreen) => {
 watch(() => fileId.value, async () => {
   fileInfo.value = await getFileInfo(fileId.value);
   iconRotate.value = fileInfo.value.rotate || 0;
-  console.log('fileInfo:', fileInfo.value);
   if (isSlideShow.value) {
     scheduleNextSlide();
   }

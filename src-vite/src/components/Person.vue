@@ -446,7 +446,6 @@ async function clickIndexFaces() {
     const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
     const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
     const clusterMode = face?.clusterMode ?? 'auto';
-    console.log('clusterEpsilon', clusterEpsilon, 'clusterMode', clusterMode);
     await indexFaces(clusterEpsilon, clusterMode);
     await loadPersons();
     await checkFaceStats();

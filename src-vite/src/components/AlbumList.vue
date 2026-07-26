@@ -813,7 +813,6 @@ const expandAlbum = async (album: any, forceRefresh = false) => {
 
 /// click folder to select
 const clickFolder = async (albumIdVal: number, folder: Folder) => {
-  console.log('AlbumList.vue-clickFolder:', folder);
   if (isMainPane.value) {
     uiStore.setActivePane('left-sidebar');
   }
@@ -904,7 +903,6 @@ const handleLocalAlbumListKeyDown = (event: KeyboardEvent) => {
 /// click the final sub-folder to select it
 const clickFinalSubFolder = async (albumIdVal: number, folderPathVal: string) => {
 
-  console.log('AlbumList.vue-clickFinalSubFolder:', albumIdVal, folderPathVal);
   let album = getAlbumById(albumIdVal);
   if(!album) {
     return;

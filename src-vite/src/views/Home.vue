@@ -878,14 +878,8 @@ async function clickSettings(tabIndex?: number) {
 
   // create a new settings window
   const newSettingsWindow = new WebviewWindow('settings', options);
-  
-  newSettingsWindow.once('tauri://created', () => {
-    console.log('settings window created');
-  });
-
   newSettingsWindow.once('tauri://close-requested', () => {
     newSettingsWindow.close();
-    console.log('settings window closed');
   });
 }
 

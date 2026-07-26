@@ -1,3 +1,4 @@
+use crate::t_common;
 use crate::t_sqlite::{AFile, AThumb, QueryParams};
 use crate::t_utils;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -90,7 +91,7 @@ pub fn start_scan(
 
     // Reset status
     {
-        let mut status = status_clone.lock().unwrap();
+        let mut status = t_common::lock_mutex(&status_clone);
         status.state = "running".to_string();
         status.processed = 0;
         status.total = 0;
@@ -105,7 +106,7 @@ pub fn start_scan(
             scan_and_hash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params)
         };
 
-        let mut final_status = status_clone.lock().unwrap();
+        let mut final_status = t_common::lock_mutex(&status_clone);
         match result {
             Ok(_) => {
                 if cancel_flag_clone.load(Ordering::SeqCst) {
@@ -168,11 +169,11 @@ fn scan_and_hash_files(
 
     let total_files = files_to_check.len() as u64;
     {
-        let mut status = status_mutex.lock().unwrap();
+        let mut status = t_common::lock_mutex(&status_mutex);
         status.total = total_files;
         status.processed = 0;
     }
-    let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+    let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
 
     // Step 3: Hash them
     let mut processed = 0;
@@ -215,10 +216,10 @@ fn scan_and_hash_files(
         processed += 1;
         if processed % 10 == 0 {
             {
-                let mut status = status_mutex.lock().unwrap();
+                let mut status = t_common::lock_mutex(&status_mutex);
                 status.processed = processed;
             }
-            let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+            let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
         }
     }
 
@@ -236,11 +237,11 @@ fn scan_and_hash_files(
             .unwrap_or(0);
 
         {
-            let mut status = status_mutex.lock().unwrap();
+            let mut status = t_common::lock_mutex(&status_mutex);
             status.processed = processed;
             status.groups = groups_count as u64;
         }
-        let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+        let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
     }
 
     Ok(())
@@ -559,11 +560,11 @@ fn scan_and_phash_files(
 
     let total_files = files_to_check.len() as u64;
     {
-        let mut status = status_mutex.lock().unwrap();
+        let mut status = t_common::lock_mutex(&status_mutex);
         status.total = total_files;
         status.processed = 0;
     }
-    let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+    let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
 
     let mut processed = 0u64;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -591,10 +592,10 @@ fn scan_and_phash_files(
         processed += 1;
         if processed % 10 == 0 {
             {
-                let mut status = status_mutex.lock().unwrap();
+                let mut status = t_common::lock_mutex(&status_mutex);
                 status.processed = processed;
             }
-            let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+            let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -609,11 +610,11 @@ fn scan_and_phash_files(
             )
             .unwrap_or(0);
         {
-            let mut status = status_mutex.lock().unwrap();
+            let mut status = t_common::lock_mutex(&status_mutex);
             status.processed = processed;
             status.groups = groups_count as u64;
         }
-        let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
+        let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
     }
     Ok(())
 }

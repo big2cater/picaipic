@@ -90,7 +90,6 @@ const clickDate = (year: number, month: number) => {
   libConfig.calendar.month = Number(month); // -1 means selecting a year
   libConfig.calendar.date = -1;   // -1 means selecting a month
 
-  console.log('clickDate:', libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date);
 };
 
 </script>

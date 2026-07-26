@@ -113,7 +113,6 @@ const syncMaximizedToStore = props.viewName === 'Home';
 let unlistenResize = null;
 
 watch(() => searchValue.value, (newValue) => { 
-  console.log('searchValue:', newValue);
   emit('message-from-titlebar', { message: 'search', search: searchValue.value });
 });
 

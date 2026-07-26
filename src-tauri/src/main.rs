@@ -135,7 +135,7 @@ async fn main() {
             // Initialize AI Engine
             let app_handle = _app.handle();
             let ai_state = _app.state::<t_ai::AiState>();
-            let mut ai_engine = ai_state.0.lock().unwrap();
+            let mut ai_engine = t_common::lock_mutex(&ai_state.0);
             match ai_engine.load_models(app_handle) {
                 Ok(_) => println!("AI Engine started successfully"),
                 Err(e) => {
@@ -151,7 +151,7 @@ async fn main() {
                             .args(["query", arch_key, "/v", "Installed"])
                             .stdout(std::process::Stdio::null())
                             .status();
-                        let installed = result.is_ok() && result.unwrap().success();
+                        let installed = result.as_ref().map(|s| s.success()).unwrap_or(false);
                         if !installed {
                             let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
                             let url = format!("https://aka.ms/vs/17/release/vc_redist.{}.exe", arch);

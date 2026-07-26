@@ -5440,9 +5440,6 @@ async function updateContent(force = false) {
                   libConfig.album.folderPath !== folderPath
                 ) return;
                 if (syncResult?.current_folder_synced) {
-                  console.log(
-                    `folder sync: ${syncResult.new_file_count} new, ${syncResult.updated_file_count} updated, ${syncResult.deleted_file_count} deleted, ${syncResult.rename_count || 0} renamed`
-                  );
                   const visibleRange = { ...lastVisibleRange };
                   const refreshRequestId = ++currentContentRequestId;
                   if (pendingInitialSelectedIndex < 0) {
@@ -6280,7 +6277,6 @@ const onRenameFile = async (newName: string) => {
     const fileName = combineFileName(newName, renamingFileName.value.ext ?? '');
     const newFilePath = await renameFile(file.id, file.file_path, fileName );
     if(newFilePath) {
-      console.log('onRenameFile:', newFilePath);
       file.name = fileName;
       file.file_path = newFilePath;
       showRenameMsgbox.value = false;
@@ -6445,7 +6441,6 @@ const onMoveTo = async () => {
     );
     const successIds = successfulMoves.map(({ item }) => item.id);
     successfulMoves.forEach(({ item, movedFile }) => {
-      console.log('onMoveTo:', movedFile);
       affectedAlbumIds.add(Number(item.album_id || 0));
     });
     const failedCount = moves.filter(
@@ -6465,7 +6460,6 @@ const onMoveTo = async () => {
     const sourceLabel = file.name;
     const movedFile = await moveFile(file.id, file.file_path, destFolderId, destPath);
     if(movedFile) {
-      console.log('onMoveTo:', movedFile);
       affectedAlbumIds.add(Number(file.album_id || 0));
       removeFromFileList(selectedItemIndex.value);
       successCount = 1;
@@ -6905,9 +6899,7 @@ async function deleteFileAlways(file: any, permanently = false) {
   const deletedFile = permanently
     ? await deleteFilePermanently(file.id, file.file_path)
     : await deleteFile(file.id, file.file_path);
-  if(deletedFile) {
-    console.log(`clickDeleteFile - ${permanently ? 'permanently deleted' : 'trashed'} file:`, file.file_path);
-  } else {
+  if (!deletedFile) {
     throw new Error(`Failed to ${permanently ? 'permanently delete' : 'trash'} file: ${file.file_path}`);
   }
 }
@@ -7297,7 +7289,6 @@ const clickRotate = async () => {
 
 // set file tag
 const clickTag = async () => {
-  console.log('clickTag');
   if (selectMode.value) {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
@@ -7341,7 +7332,6 @@ const onEditComment = async (newComment: any) => {
     const file = fileList.value[selectedItemIndex.value];
     const result = await editFileComment(file.id, newComment);
     if(result) {
-      console.log('onEditComment:', newComment);
       file.comments = newComment;
       showCommentMsgbox.value = false;
       syncFileMetaToImageViewer(file.id, { comments: newComment });
@@ -7713,7 +7703,7 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
         applyThumbToFile(batchFiles[j], Array.isArray(thumbs) ? thumbs[j] : null);
       }
     } catch (error) {
-      console.log('Error fetching thumbnails:', error);
+      console.error('Error fetching thumbnails:', error);
     }
   };
 
@@ -7723,7 +7713,6 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
 
     for (let i = offset; i < files.length; i += batchSize) {
       if (requestId !== currentThumbRequestId) {
-        console.log(`Thumbnail generation cancelled (request ${requestId} superseded by ${currentThumbRequestId})`);
         return;
       }
 
@@ -7906,7 +7895,6 @@ async function openImageViewer(
       });
 
       imageWindow.once('tauri://created', () => {
-        console.log('ImageViewer window created');
         videoRef.value?.pause();  // pause video playing in preview pane
       });
 

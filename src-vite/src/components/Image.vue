@@ -1585,7 +1585,6 @@ const toggleZoomFit = () => {
 };
 
 const updateZoomFit = (force: boolean = false) => {
-  console.log('updateZoomFit');
   isZoomFit.value ? zoomFit(force) : zoomReset(force);
 
   // set the hide image to the same position
@@ -1596,7 +1595,6 @@ const updateZoomFit = (force: boolean = false) => {
 
 // Zoom to fit image in container
 const zoomFit = (force: boolean = false) => {
-  console.log('zoomFit');
   const container = containerSize.value;
   const imgRotatedSize = imageSizeRotated.value[activeImage.value];
   
@@ -1613,7 +1611,6 @@ const zoomFit = (force: boolean = false) => {
 
 // Reset zoom level and position
 const zoomReset = (force: boolean = false) => {
-  console.log('zoomReset');
   updatePosition();
   const mousePos = mousePosition.value;
   const containerPosVal = containerPos.value;

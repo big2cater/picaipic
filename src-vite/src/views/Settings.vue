@@ -5113,7 +5113,6 @@ async function testInvokeAiPluginCapability(plugin: AiPluginSummary, capability:
       inputs: {},
       parameters: {},
     });
-    console.log('invokeAiPluginCapability result:', result);
     toast.success(pluginText('invokeSuccess'));
     await refreshAiPluginStatus(plugin, false);
   } catch (error: any) {

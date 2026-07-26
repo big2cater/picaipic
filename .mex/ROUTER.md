@@ -28,6 +28,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 ## Current Project State
 
 **Working:**
+- **Supplement audit re-verify + hygiene (2026-07-26):** `docs/review/code-review-2026-07-26-supplement.md` revised (status table: true debt vs overstated/stale). S8: shared `t_common::lock_mutex` poison recovery across main/t_sqlite AI/t_face/t_dedup/t_utils/t_cmds. P5: stripped production debug `console.log`; failures use `console.error`. Skipped low-ROI S10 face_indices Arc and already-done P1 decode-out-of-lock. S6: `t_sqlite::query_builder_tests` (14) for search/smart-rule SQL shape.
 - **FX themes (2026-07-26, feature branch):** menu **Default / Retro / CMYK / Black hole / Cyberpunk** (`THEME_ID` 0–4). Both FX themes dual-pin + `data-theme=dark`, share `dynamicThemeIntensity`, maximize + **6s** idle (seven-way Home gates). GridView **theme-gates** WebGL layer mount (one context at a time).
   - **Black hole:** `BlackHoleBackground` cosmos; idle → `PhotoVortexLayer` UV absorb; ResizeObserver size cache; lazy GL; CSS warp **not driven**. Design `docs/guide/black-hole-idle-theme-design.md`; pattern `patterns/change-black-hole-theme.md`.
   - **Cyberpunk:** always-on `CyberpunkBackground` (night-city + **sprite-baked** rain/particles/kana); idle → `PhotoGlitchLayer` with **mediump-safe** hash + `mod(time)`; intensity `>0`. Spec `docs/superpowers/specs/2026-07-26-cyberpunk-idle-glitch-design.md`; plan `docs/superpowers/plans/2026-07-26-cyberpunk-idle-glitch-impl.md`; pattern `patterns/change-cyberpunk-theme.md`.

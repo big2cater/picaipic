@@ -311,3 +311,10 @@ last_updated: 2026-07-26
 **Reasoning:** JPG+RW2 libraries spent most scan time demosaicing every RAW under heavy concurrency 1–2; embedded previews are good enough for grid UI.
 **Alternatives considered:** Always demosaic for color fidelity (too slow); pair-display only JPEG and hide RAW (product still wants both visible).
 **Consequences:** Occasional orientation/WB differences vs demosaic; terminal may log timeouts. Pattern: `fix-library-scan-selection.md`.
+
+## 2026-07-26 — Supplement review triage
+
+- External/static supplement report overstated urgency: many items are maintainability debt, not defects.
+- Accepted now: poison-safe mutex helper + debug log cleanup.
+- Deferred: Content.vue split, AFile::new split, CLIP multi-session, face_indices Arc, sleep eventization.
+- Rejected as written: "t_sqlite zero tests" (has embed/search unit tests); P1 "decode under lock" (already outside).

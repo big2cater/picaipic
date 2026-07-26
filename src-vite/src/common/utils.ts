@@ -702,10 +702,7 @@ export async function openFolderDialog(title?: string) {
   });
 
   if (selected) {
-    console.log('Selected folder:', selected);
     return selected;
-  } else {
-    console.log('No folder selected.');
   }
   return null;
 }

@@ -121,7 +121,6 @@ const sorted_calendar_items = computed(() => {
 });
 
 onMounted(async () => {
-  console.log('Calendar.vue mounted');
   await getCalendarDates();
   ensureCalendarSelection();
   // Scroll to selected date after data is loaded and DOM is updated

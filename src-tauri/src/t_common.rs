@@ -1,6 +1,8 @@
 /**
  * Common constants and shared types
  */
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 
 // Image support
 pub const NORMAL_IMGS: &[&str] = &[
@@ -95,3 +97,10 @@ pub const IMAGE_SEARCH_ANN_EF_SEARCH: usize = 120;
 pub const IMAGE_SEARCH_ANN_EF_CONSTRUCTION: usize = 200;
 /// How many HNSW neighbors to pull before exact rerank (covers thr_cap 200 + headroom).
 pub const IMAGE_SEARCH_ANN_CANDIDATES: usize = 500;
+
+/// Recover from mutex poisoning instead of panicking subsequent work.
+#[inline]
+pub fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+

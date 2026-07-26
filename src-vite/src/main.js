@@ -46,7 +46,6 @@ app.use(i18n)
 
 // Mount the app
 app.mount('#app')
-console.log('App mounted', app)
 
 // Listen for events
 listen('settings-appearance-changed', (event) => {

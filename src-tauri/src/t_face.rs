@@ -688,7 +688,7 @@ impl FaceJobQueue {
     }
 
     fn push(&self, job: FaceIndexJob) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = t_common::lock_mutex(&self.inner);
         if g.closed {
             return;
         }
@@ -697,14 +697,14 @@ impl FaceJobQueue {
     }
 
     fn close(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = t_common::lock_mutex(&self.inner);
         g.closed = true;
         self.cvar.notify_all();
     }
 
     /// Block until a job is available, or return None when closed and drained.
     fn pop(&self) -> Option<FaceIndexJob> {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = t_common::lock_mutex(&self.inner);
         loop {
             if let Some(job) = g.jobs.pop_front() {
                 return Some(job);
@@ -712,7 +712,7 @@ impl FaceJobQueue {
             if g.closed {
                 return None;
             }
-            g = self.cvar.wait(g).unwrap();
+            g = self.cvar.wait(g).unwrap_or_else(|e| e.into_inner());
         }
     }
 }
@@ -744,7 +744,7 @@ pub fn run_face_indexing(
 
     // Check if already running
     {
-        let mut running = status_token.lock().unwrap();
+        let mut running = t_common::lock_mutex(&status_token);
         if *running {
             return Err("Face indexing is already running".to_string());
         }
@@ -752,11 +752,11 @@ pub fn run_face_indexing(
     }
 
     // Reset cancellation flag
-    *cancel_token.lock().unwrap() = false;
+    *t_common::lock_mutex(&cancel_token) = false;
 
     // Reset progress
     {
-        let mut progress = progress_token.lock().unwrap();
+        let mut progress = t_common::lock_mutex(&progress_token);
         progress.current = 0;
         progress.total = 0;
         progress.faces_found = 0;
@@ -766,14 +766,12 @@ pub fn run_face_indexing(
     tauri::async_runtime::spawn(async move {
         // 1. Initialization
         let reset_status = || {
-            if let Ok(mut running) = status_token.lock() {
-                *running = false;
-            }
+            *t_common::lock_mutex(&status_token) = false;
         };
 
         // Load models if not already loaded
         {
-            let mut engine = face_state.0.lock().unwrap();
+            let mut engine = t_common::lock_mutex(&face_state.0);
             if !engine.is_loaded() {
                 if let Err(e) = engine.load_models(&app_handle) {
                     eprintln!("Failed to load face models: {}", e);
@@ -825,7 +823,7 @@ pub fn run_face_indexing(
 
         // Init progress
         {
-            let mut progress = progress_token.lock().unwrap();
+            let mut progress = t_common::lock_mutex(&progress_token);
             progress.total = total_files;
             progress.current = current;
             progress.faces_found = total_faces;
@@ -908,7 +906,7 @@ pub fn run_face_indexing(
                 }
 
                 while let Some((file_id, file_path, width, height)) = job_queue.pop() {
-                    if *cancel.lock().unwrap() {
+                    if *t_common::lock_mutex(&cancel) {
                         // Still report the job so the main loop advances progress to 100%.
                         // Work is retryable (no write); only progress accounting is closed out.
                         let _ = result_tx.send(FaceIndexWorkerResult {
@@ -988,7 +986,7 @@ pub fn run_face_indexing(
         let feed_queue = Arc::clone(&job_queue);
         let feed_handle = std::thread::spawn(move || {
             for item in files {
-                if *feed_cancel.lock().unwrap() {
+                if *t_common::lock_mutex(&feed_cancel) {
                     break;
                 }
                 feed_queue.push(item);
@@ -1016,7 +1014,7 @@ pub fn run_face_indexing(
                 Err(_) => break, // all workers finished and dropped senders
             };
 
-            if *cancel_token.lock().unwrap() {
+            if *t_common::lock_mutex(&cancel_token) {
                 cancelled = true;
             }
 
@@ -1030,7 +1028,7 @@ pub fn run_face_indexing(
 
             if current % 10 == 0 || current == total_files || cancelled {
                 {
-                    let mut progress = progress_token.lock().unwrap();
+                    let mut progress = t_common::lock_mutex(&progress_token);
                     progress.current = current;
                     progress.faces_found = total_faces;
                 }
@@ -1064,19 +1062,19 @@ pub fn run_face_indexing(
         flush_writes(&mut write_batch, &mut total_faces);
 
         {
-            let mut progress = progress_token.lock().unwrap();
+            let mut progress = t_common::lock_mutex(&progress_token);
             progress.current = current.min(total_files);
             progress.faces_found = total_faces;
         }
 
-        if *cancel_token.lock().unwrap() {
+        if *t_common::lock_mutex(&cancel_token) {
             cancelled = true;
         }
 
         if cancelled {
             // Feeder may have stopped early; force progress bar to 100% on cancel.
             {
-                let mut progress = progress_token.lock().unwrap();
+                let mut progress = t_common::lock_mutex(&progress_token);
                 progress.current = total_files;
                 progress.faces_found = total_faces;
             }
@@ -1103,7 +1101,7 @@ pub fn run_face_indexing(
 
         // 4. Clustering
         {
-            let mut progress = progress_token.lock().unwrap();
+            let mut progress = t_common::lock_mutex(&progress_token);
             progress.phase = "clustering".to_string();
         }
 
@@ -1133,10 +1131,10 @@ pub fn run_face_indexing(
             },
             || {
                 // Check if user has cancelled
-                *cancel_token_cluster.lock().unwrap()
+                *t_common::lock_mutex(&cancel_token_cluster)
             },
         );
-        let cancelled_during_cluster = *cancel_token.lock().unwrap()
+        let cancelled_during_cluster = *t_common::lock_mutex(&cancel_token)
             || cluster_result
                 .as_ref()
                 .err()

@@ -2974,7 +2974,7 @@ impl AFile {
 
     /// check ai status
     pub fn check_ai_status(state: &State<t_ai::AiState>) -> String {
-        let engine = state.0.lock().unwrap();
+        let engine = t_common::lock_mutex(&state.0);
         if engine.is_loaded() {
             "AI Models Loaded".to_string()
         } else {
@@ -2989,7 +2989,7 @@ impl AFile {
     ) -> Result<Option<Vec<f32>>, String> {
         if !params.search_text.is_empty() {
             // encode_text applies short-label CLIP template (a photo of a …).
-            let mut engine = state.0.lock().unwrap();
+            let mut engine = t_common::lock_mutex(&state.0);
             Ok(Some(engine.encode_text(&params.search_text)?))
         } else if let Some(file_id) = params.file_id.filter(|&id| id > 0) {
             match Self::get_embedding_by_id(file_id) {
@@ -3062,7 +3062,7 @@ impl AFile {
             None
         };
 
-        let mut engine = state.0.lock().unwrap();
+        let mut engine = t_common::lock_mutex(&state.0);
         let (embedding, source) = if let Some((img, src)) = prepared {
             match panic::catch_unwind(AssertUnwindSafe(|| {
                 engine.encode_image_from_dynamic(img)
@@ -4321,6 +4321,296 @@ mod score_embed_matrix_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod query_builder_tests {
+    use super::{AFile, QueryParams, SmartQueryParams, SmartRule};
+    use rusqlite::ToSql;
+
+    fn empty_query_params() -> QueryParams {
+        QueryParams {
+            search_file_name: String::new(),
+            search_file_type: 0,
+            sort_type: 0,
+            sort_order: 0,
+            search_all_subfolders: String::new(),
+            search_folder: String::new(),
+            start_date: 0,
+            end_date: 0,
+            calendar_sort: 0,
+            make: String::new(),
+            model: String::new(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            location_admin1: String::new(),
+            location_name: String::new(),
+            is_favorite: false,
+            rating: -1,
+            tag_id: 0,
+            person_id: 0,
+            gps_min_lat: None,
+            gps_max_lat: None,
+            gps_min_lon: None,
+            gps_max_lon: None,
+        }
+    }
+
+    fn rule(field: &str, operator: &str, value: serde_json::Value) -> SmartRule {
+        SmartRule {
+            id: "t".into(),
+            field: field.into(),
+            operator: operator.into(),
+            value,
+        }
+    }
+
+    #[test]
+    fn file_type_mask_image_and_live() {
+        let c = AFile::build_file_type_condition(1 | 8).expect("mask");
+        assert!(c.contains("a.file_type = 1"));
+        assert!(c.contains("live_photo_type"));
+        assert!(c.contains(" OR "));
+        assert!(AFile::build_file_type_condition(0).is_none());
+        // All three traditional kinds ≡ no type filter.
+        assert!(AFile::build_file_type_condition(7).is_none());
+    }
+
+    #[test]
+    fn search_parts_always_exclude_live_companion_and_excluded_folders() {
+        let (_joins, where_clause, params) =
+            AFile::build_search_query_parts(&empty_query_params());
+        assert!(where_clause.contains("live_photo_type"));
+        assert!(where_clause.contains("is_excluded_from_search"));
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn search_parts_name_favorite_rating_tag_person() {
+        let mut q = empty_query_params();
+        q.search_file_name = "Holiday".into();
+        q.is_favorite = true;
+        q.rating = 5;
+        q.tag_id = 12;
+        q.person_id = 3;
+        let (joins, where_clause, params) = AFile::build_search_query_parts(&q);
+        assert!(where_clause.contains("a.name LIKE ? COLLATE NOCASE"));
+        assert!(where_clause.contains("a.is_favorite = 1"));
+        assert!(where_clause.contains("a.rating = ?"));
+        assert!(joins.contains("afile_tags"));
+        assert!(joins.contains("faces"));
+        // name, rating, tag_id, person_id
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn search_parts_rating_zero_means_unrated() {
+        let mut q = empty_query_params();
+        q.rating = 0;
+        let (_j, where_clause, params) = AFile::build_search_query_parts(&q);
+        assert!(where_clause.contains("(a.rating = 0 OR a.rating IS NULL)"));
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn search_parts_date_range_uses_local_calendar_day() {
+        let mut q = empty_query_params();
+        q.start_date = 1_700_000_000;
+        q.end_date = 1_700_086_400;
+        q.calendar_sort = 0; // taken_date
+        let (_j, where_clause, params) = AFile::build_search_query_parts(&q);
+        assert!(where_clause.contains(
+            "strftime('%Y-%m-%d', a.taken_date, 'unixepoch', 'localtime')"
+        ));
+        assert!(where_clause.contains("localtime"));
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn search_parts_gps_antimeridian_or_clause() {
+        let mut q = empty_query_params();
+        q.gps_min_lat = Some(-10.0);
+        q.gps_max_lat = Some(10.0);
+        q.gps_min_lon = Some(170.0);
+        q.gps_max_lon = Some(-170.0);
+        let (_j, where_clause, params) = AFile::build_search_query_parts(&q);
+        assert!(where_clause.contains("gps_latitude BETWEEN"));
+        assert!(where_clause.contains("gps_longitude >= ? OR a.gps_longitude <= ?"));
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn smart_size_mb_to_bytes_in_condition() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let cond = AFile::build_smart_rule_condition(
+            &rule("size", "gt", serde_json::json!(1)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert_eq!(cond, "a.size > ?");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn smart_name_favorite_and_rating_empty() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let name = AFile::build_smart_rule_condition(
+            &rule("name", "contains", serde_json::json!("cat")),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert_eq!(name, "a.name LIKE ? COLLATE NOCASE");
+        assert_eq!(params.len(), 1);
+
+        let fav = AFile::build_smart_rule_condition(
+            &rule("favorite", "is", serde_json::json!(true)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert_eq!(fav, "a.is_favorite = 1");
+
+        let empty_rating = AFile::build_smart_rule_condition(
+            &rule("rating", "empty", serde_json::Value::Null),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert_eq!(empty_rating, "(a.rating IS NULL OR a.rating = 0)");
+    }
+
+    #[test]
+    fn smart_tag_has_sets_join_and_group() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let cond = AFile::build_smart_rule_condition(
+            &rule("tag", "has", serde_json::json!(9)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert_eq!(cond, "at_smart.tag_id = ?");
+        assert!(needs_group);
+        assert!(joins.iter().any(|j| j.contains("afile_tags")));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn smart_person_not_has_uses_not_exists() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let cond = AFile::build_smart_rule_condition(
+            &rule("person", "not_has", serde_json::json!(4)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert!(cond.contains("NOT EXISTS"));
+        assert!(cond.contains("person_id"));
+        assert!(!needs_group);
+        assert!(joins.is_empty());
+    }
+
+    #[test]
+    fn smart_date_before_uses_local_day_compare() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let cond = AFile::build_smart_rule_condition(
+            &rule("date_taken", "before", serde_json::json!(1_700_000_000)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap();
+        assert!(cond.contains("a.taken_date"));
+        assert!(cond.contains("localtime"));
+        assert!(cond.contains('<'));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn smart_unsupported_field_errors() {
+        let mut joins = Vec::new();
+        let mut needs_group = false;
+        let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+        let err = AFile::build_smart_rule_condition(
+            &rule("nope", "is", serde_json::json!(1)),
+            &mut joins,
+            &mut needs_group,
+            &mut params,
+        )
+        .unwrap_err();
+        assert!(err.contains("Unsupported smart field"));
+    }
+
+    #[test]
+    fn smart_query_requires_rules_and_match_any_ors() {
+        let empty = AFile::build_smart_query_parts(&SmartQueryParams {
+            version: 1,
+            match_mode: "all".into(),
+            rules: vec![],
+            sort_type: 0,
+            sort_order: 0,
+            calendar_sort: 0,
+        });
+        assert!(empty.is_err());
+
+        let (_j, where_all, _, _) = AFile::build_smart_query_parts(&SmartQueryParams {
+            version: 1,
+            match_mode: "all".into(),
+            rules: vec![
+                rule("favorite", "is", serde_json::json!(true)),
+                rule("rating", "gte", serde_json::json!(3)),
+            ],
+            sort_type: 0,
+            sort_order: 0,
+            calendar_sort: 0,
+        })
+        .unwrap();
+        assert!(where_all.contains("a.is_favorite = 1"));
+        assert!(where_all.contains(" AND "));
+
+        let (_j, where_any, _, _) = AFile::build_smart_query_parts(&SmartQueryParams {
+            version: 1,
+            match_mode: "any".into(),
+            rules: vec![
+                rule("favorite", "is", serde_json::json!(true)),
+                rule("rating", "gte", serde_json::json!(3)),
+            ],
+            sort_type: 0,
+            sort_order: 0,
+            calendar_sort: 0,
+        })
+        .unwrap();
+        assert!(where_any.contains(" OR "));
+        assert!(where_any.contains("is_excluded_from_search"));
+        assert!(where_any.contains("live_photo_type"));
+    }
+
+    #[test]
+    fn smart_sj_helpers_parse_mixed_json() {
+        assert_eq!(AFile::sj_i64(&serde_json::json!(3)), Some(3));
+        assert_eq!(AFile::sj_i64(&serde_json::json!("7")), Some(7));
+        assert_eq!(AFile::sj_bool(&serde_json::json!("yes")), Some(true));
+        assert_eq!(AFile::sj_bool(&serde_json::json!(0)), Some(false));
+        assert_eq!(AFile::sj_str(&serde_json::json!(12)), Some("12".into()));
+    }
+}
+
 
 /// Define the album thumbnail struct
 #[derive(Debug, Serialize, Deserialize)]

@@ -4,6 +4,7 @@
  * author:  julyx10
  * date:    2024-08-08
  */
+use crate::t_common::lock_mutex;
 use crate::t_config::{self, AppConfig, Library, LibraryInfo, LibraryState};
 use crate::t_face;
 use crate::t_image;
@@ -21,16 +22,11 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
 // cancellation token for indexing
 pub struct IndexCancellation(pub Arc<Mutex<HashMap<i64, bool>>>);
-
-/// Recover from mutex poisoning instead of panicking subsequent commands.
-fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

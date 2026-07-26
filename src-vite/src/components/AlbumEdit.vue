@@ -263,7 +263,6 @@ watch(() => selectedFolder.value, (newPath) => {
 
     countFolder(newPath).then((res) => {
       [totalFolderCount.value, totalImageCount.value, totalImageSize.value, totalVideoCount.value, totalVideoSize.value] = res;
-      console.log('count folder:', res);
     }).catch((err) => {
       console.error('count folder error:', err);
     });

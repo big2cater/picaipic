@@ -229,7 +229,6 @@ export async function getAllAlbums() {
   try {
     let albums = [];
     const fetchedAlbums = await invoke('get_all_albums');
-    console.log('get_all_albums', fetchedAlbums);
     if (fetchedAlbums) {
       albums = fetchedAlbums.map(album => ({
         ...album, 
@@ -259,7 +258,6 @@ export async function getAlbum(albumId) {
   }
   try {
     const album = await invoke('get_album', { albumId });
-    console.log('get_album', album);
     if (album) {
       return album;
     }
@@ -289,7 +287,6 @@ export async function addAlbum(folderPath) {
   }
   try {
     const newAlbum = await invoke('add_album', { folderPath });
-    console.log('add_album', newAlbum);
     if(newAlbum) {
       return {
         ...newAlbum,
@@ -298,7 +295,7 @@ export async function addAlbum(folderPath) {
       };
     };
   } catch (error) {
-    console.log('Failed to add album:', error);
+    console.error('Failed to add album:', error);
   }
   return null;
 }
@@ -307,12 +304,11 @@ export async function addAlbum(folderPath) {
 export async function editAlbum(albumId, newName, newDespription) {
   try {
     const album = await invoke('edit_album', { id: albumId, name: newName, description: newDespription });
-    console.log('edit_album', album);
     if (album) {
       return album;
     }
   } catch (error) {
-    console.log('Failed to edit album:', error);
+    console.error('Failed to edit album:', error);
   }
   return null;
 }
@@ -321,12 +317,11 @@ export async function editAlbum(albumId, newName, newDespription) {
 export async function removeAlbum(albumId) {
   try {
     const removedAlbum = await invoke('remove_album', { id: albumId });
-    console.log('remove_album', removedAlbum);
     if (removedAlbum) {
       return removedAlbum;
     }
   } catch (error) {
-    console.log('Failed to remove album:', error);
+    console.error('Failed to remove album:', error);
   }
   return null;
 }
@@ -378,12 +373,11 @@ export async function getExternalAppDisplayName(appPath) {
 export async function setDisplayOrder(albumId, order) {
   try {
     const updatedAlbum = await invoke('set_album_display_order', { id: albumId, displayOrder: order });
-    console.log('set_album_display_order', updatedAlbum);
     if (updatedAlbum) {
       return updatedAlbum;
     }
   } catch (error) {
-    console.log('Failed to set display order:', error);
+    console.error('Failed to set display order:', error);
   }
   return null;
 }
@@ -396,7 +390,7 @@ export async function setAlbumCover(albumId, fileId) {
       return result;
     }
   } catch (error) {
-    console.log('Failed to set album cover:', error);
+    console.error('Failed to set album cover:', error);
   }
   return null;
 }
@@ -412,7 +406,7 @@ export async function selectFolder(albumId, folderPath) {
       return selectedFolder;
     };
   } catch (error) {
-    console.log('Failed to select folder:', error);
+    console.error('Failed to select folder:', error);
   }
   return null;
 }
@@ -431,11 +425,10 @@ export async function fetchFolder(path, isRecursive, sort = 0) {
         child.is_favorite = await getFolderFavorite(child.path);
         child.is_excluded_from_search = await getFolderSearchExcluded(child.path);
       }
-      console.log('fetchFolder:', folder);
       return folder;
     };
   } catch (error) {
-    console.log('Failed to fetch folder:', error);
+    console.error('Failed to fetch folder:', error);
   }
   return null;
 }
@@ -520,7 +513,7 @@ export async function createFolder(path, folderName) {
       return newFolder;
     };
   } catch (error) {
-    console.log('Failed to create folder:', error);
+    console.error('Failed to create folder:', error);
   }
   return null;
 }
@@ -533,7 +526,7 @@ export async function renameFolder(folderPath, newFolderName) {
       return renamedFolder;
     };
   } catch (error) {
-    console.log('Failed to rename folder:', error);
+    console.error('Failed to rename folder:', error);
   }
   return null;
 }
@@ -546,7 +539,7 @@ export async function moveFolder(folderPath, newAlbumId, newFolderPath, conflict
       return result;
     };
   } catch (error) {
-    console.log('Failed to move folder:', error);
+    console.error('Failed to move folder:', error);
   }
   return null;
 }
@@ -555,7 +548,7 @@ export async function moveFolderOutsideLibrary(folderPath, newFolderPath, confli
   try {
     return await invoke('move_folder_outside_library', { folderPath, newFolderPath, conflictPolicy });
   } catch (error) {
-    console.log('Failed to move folder outside library:', error);
+    console.error('Failed to move folder outside library:', error);
   }
   return null;
 }
@@ -568,7 +561,7 @@ export async function copyFolder(folderPath, newFolderPath, newAlbumId = 0, conf
       return result;
     };
   } catch (error) {
-    console.log('Failed to copy folder:', error);
+    console.error('Failed to copy folder:', error);
   }
   return null;
 }
@@ -581,7 +574,7 @@ export async function deleteFolder(folderPath) {
       return result;
     };
   } catch (error) {
-    console.log('Failed to delete folder:', error);
+    console.error('Failed to delete folder:', error);
   }
   return null;
 };
@@ -775,7 +768,7 @@ export async function editImage(params) {
   try {
     return await invoke('edit_image', { params });
   } catch (error) {
-    console.log('Failed to edit image:', error);
+    console.error('Failed to edit image:', error);
     return false;
   }
 }
@@ -929,7 +922,7 @@ export async function copyEditedImage(params) {
   try {
     return await invoke('copy_edited_image', { params });
   } catch (error) {
-    console.log('Failed to copy edited image to clipboard:', error);
+    console.error('Failed to copy edited image to clipboard:', error);
     return false;
   }
 }
@@ -989,7 +982,7 @@ export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_b
       return result;
     };
   } catch (error) {
-    console.log('Failed to copy file:', error);
+    console.error('Failed to copy file:', error);
   }
   return null;
 }
@@ -1040,7 +1033,7 @@ export async function editFileComment(fileId, comment) {
       return result;
     };
   } catch (error) {
-    console.log('Failed to edit file comment:', error);
+    console.error('Failed to edit file comment:', error);
   }
   return null;
 }
@@ -1073,7 +1066,7 @@ export async function getFileThumb(fileId, filePath, fileType, orientation, thum
       return result;
     };
   } catch (error) {
-    console.log('Failed to get file thumb:', error);
+    console.error('Failed to get file thumb:', error);
   }
   return null;
 }
@@ -1085,7 +1078,7 @@ export async function getFileThumbById(fileId, thumbnailSize, forceRegenerate = 
       return result;
     }
   } catch (error) {
-    console.log('Failed to get file thumb by id:', error);
+    console.error('Failed to get file thumb by id:', error);
   }
   return null;
 }
@@ -1094,7 +1087,7 @@ export async function getFileThumbs(files, thumbnailSize, forceRegenerate = fals
   try {
     return await invoke('get_file_thumbs', { files, thumbnailSize, forceRegenerate });
   } catch (error) {
-    console.log('Failed to get file thumbs:', error);
+    console.error('Failed to get file thumbs:', error);
   }
   return [];
 }
@@ -1186,7 +1179,7 @@ export async function addFileToDb(folderId, filePath) {
       return result;
     };
   } catch (error) {
-    console.log('Failed to add file to db:', error);
+    console.error('Failed to add file to db:', error);
   }
   return null;
 }
@@ -1260,7 +1253,7 @@ export async function getFolderFavorite(folderPath) {
       return is_favorite;
     };
   } catch (error) {
-    console.log('Failed to get folder favorite:', error);
+    console.error('Failed to get folder favorite:', error);
   }
   return false;
 }
@@ -1273,7 +1266,7 @@ export async function setFolderFavorite(folderId, isFavorite) {
       return result;
     };
   } catch (error) {
-    console.log('Failed to set folder favorite:', error);
+    console.error('Failed to set folder favorite:', error);
   }
   return null;
 }
@@ -1286,7 +1279,7 @@ export async function getFolderSearchExcluded(folderPath) {
       return isExcluded;
     };
   } catch (error) {
-    console.log('Failed to get folder search exclusion:', error);
+    console.error('Failed to get folder search exclusion:', error);
   }
   return false;
 }
@@ -1299,7 +1292,7 @@ export async function setFolderSearchExcluded(albumId, folderPath, isExcluded) {
       return result;
     };
   } catch (error) {
-    console.log('Failed to set folder search exclusion:', error);
+    console.error('Failed to set folder search exclusion:', error);
   }
   return null;
 }
@@ -1339,7 +1332,6 @@ export async function batchUpdateFileMetadata(params) {
 export async function getAllTags(sort = 0) {
   try {
     const tags = await invoke('get_all_tags', { sort });
-    console.log('getAllTags:', tags);
     if (tags) {
       return tags;
     }
@@ -1541,7 +1533,6 @@ export async function getPackageInfo() {
 export async function getBuildTime() {
   try {
     const unixTime = await invoke('get_build_time');
-    console.log('get_build_time', unixTime);
     if (unixTime != null) {
       return new Date(unixTime * 1000).toLocaleString();
     }
