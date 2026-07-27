@@ -12,8 +12,8 @@ Updated: 2026-07-27
 | Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1; **mediump-safe** hash + mod time; intensity `>0` — `change-cyberpunk-theme.md` |
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
-| SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 1 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
-| Large-library scan profiling | **Metadata measured; full-scan phase instrumentation ready** — `D:\100k`: 10k and 100k both **43.7 files/sec**, 0 failures; `PICAIPIC_SCAN_PHASE_PROFILE=1` separates count/traversal/index/drain/thumb/embed/finalize |
+| SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 3 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
+| Large-library scan profiling | **Metadata + direct index/thumb measured; worker phases ready** — `D:\100k`: AFile **43.7 files/sec**; serial temp-DB + 200px thumbs **22.0 files/sec** at 10k, 0 failures, 51.6% index / 48.4% thumb |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |

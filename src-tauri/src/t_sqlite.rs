@@ -4740,9 +4740,9 @@ mod query_builder_tests {
 
 #[cfg(test)]
 mod crud_tests {
-    use super::{AFile, RawMetadataTarget};
+    use super::{AFile, AFolder, RawMetadataTarget};
     use crate::t_libraw::RawMeta;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::fs;
     use std::path::PathBuf;
 
@@ -4787,6 +4787,194 @@ mod crud_tests {
             processed as f64 / elapsed.max(0.001)
         );
         assert!(processed > 0, "profile directory contained no files");
+    }
+
+    #[test]
+    #[ignore = "requires PICAIPIC_SCAN_PROFILE_DIR; writes only a temporary SQLite fixture"]
+    fn profile_directory_index_and_thumbnails() {
+        let root = std::env::var("PICAIPIC_SCAN_PROFILE_DIR")
+            .expect("set PICAIPIC_SCAN_PROFILE_DIR to a read-only media directory");
+        let limit = std::env::var("PICAIPIC_SCAN_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let thumbnail_size = std::env::var("PICAIPIC_SCAN_PROFILE_THUMB_SIZE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(200)
+            .max(1);
+        let token = format!(
+            "picaipic-scan-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let db_path = std::env::temp_dir().join(format!("{token}.db"));
+        let conn = Connection::open(&db_path).expect("open temporary profiling DB");
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             CREATE TABLE afolders (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 album_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 path TEXT NOT NULL UNIQUE,
+                 created_at INTEGER,
+                 modified_at INTEGER,
+                 is_favorite INTEGER DEFAULT 0,
+                 is_excluded_from_search INTEGER DEFAULT 0
+             );
+             CREATE TABLE afiles (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 folder_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 name_pinyin TEXT, size INTEGER NOT NULL, file_type INTEGER, format_label TEXT,
+                 created_at INTEGER, modified_at INTEGER, inode INTEGER, taken_date INTEGER,
+                 width INTEGER, height INTEGER, duration INTEGER, is_favorite INTEGER,
+                 rating INTEGER NOT NULL DEFAULT 0, rotate INTEGER, comments TEXT, has_tags INTEGER,
+                 e_make TEXT, e_model TEXT, e_date_time TEXT, e_software TEXT, e_artist TEXT,
+                 e_copyright TEXT, e_description TEXT, e_lens_make TEXT, e_lens_model TEXT,
+                 e_exposure_bias TEXT, e_exposure_time TEXT, e_f_number TEXT, e_focal_length TEXT,
+                 e_iso_speed TEXT, e_flash TEXT, e_orientation INTEGER, gps_latitude REAL,
+                 gps_longitude REAL, gps_altitude REAL, geo_name TEXT, geo_admin1 TEXT,
+                 geo_admin2 TEXT, geo_cc TEXT, content_id TEXT, paired_file_id INTEGER,
+                 live_photo_type INTEGER DEFAULT 0, last_scan_time INTEGER DEFAULT 0,
+                 UNIQUE(folder_id, name),
+                 FOREIGN KEY(folder_id) REFERENCES afolders(id) ON DELETE CASCADE
+             );
+             CREATE TABLE athumbs (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 file_id INTEGER NOT NULL UNIQUE,
+                 error_code INTEGER NOT NULL,
+                 thumb_data BLOB,
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
+             );",
+        )
+        .expect("create temporary profiling schema");
+
+        let started = std::time::Instant::now();
+        let mut index_elapsed = std::time::Duration::ZERO;
+        let mut thumbnail_elapsed = std::time::Duration::ZERO;
+        let mut folders = std::collections::HashMap::<String, i64>::new();
+        let mut processed = 0usize;
+        let mut index_failed = 0usize;
+        let mut thumbnail_failed = 0usize;
+        let mut thumbnail_bytes = 0u64;
+
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            if processed >= limit {
+                break;
+            }
+            let path = entry.path();
+            let Some(path_str) = path.to_str() else {
+                index_failed += 1;
+                continue;
+            };
+            let Some(file_type) = crate::t_utils::get_file_type(path_str) else {
+                continue;
+            };
+            let parent = path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(&root))
+                .to_string_lossy()
+                .into_owned();
+            let folder_id = if let Some(id) = folders.get(&parent) {
+                *id
+            } else {
+                let folder = AFolder::add_to_db_with_conn(&conn, 1, &parent)
+                    .expect("insert profiling folder");
+                let id = folder.id.expect("profiling folder id");
+                folders.insert(parent, id);
+                id
+            };
+
+            let index_started = std::time::Instant::now();
+            let file = AFile::new(folder_id, path_str, file_type);
+            let file = match file {
+                Ok(mut file) => {
+                    file.last_scan_time = Some(1);
+                    if file.insert_with_conn(&conn).is_err() {
+                        index_failed += 1;
+                        index_elapsed += index_started.elapsed();
+                        processed += 1;
+                        continue;
+                    }
+                    file
+                }
+                Err(_) => {
+                    index_failed += 1;
+                    index_elapsed += index_started.elapsed();
+                    processed += 1;
+                    continue;
+                }
+            };
+            let file_id = conn.last_insert_rowid();
+            index_elapsed += index_started.elapsed();
+
+            let thumbnail_started = std::time::Instant::now();
+            let thumbnail = match file_type {
+                1 => crate::t_image::get_image_thumbnail(
+                    path_str,
+                    file.e_orientation.unwrap_or(1) as i32,
+                    thumbnail_size,
+                ),
+                3 => crate::t_image::get_raw_thumbnail(
+                    path_str,
+                    file.e_orientation.unwrap_or(1) as i32,
+                    thumbnail_size,
+                ),
+                _ => Ok(None),
+            };
+            let (error_code, thumbnail) = match thumbnail {
+                Ok(Some(bytes)) => {
+                    thumbnail_bytes += bytes.len() as u64;
+                    (0, Some(bytes))
+                }
+                _ => {
+                    thumbnail_failed += 1;
+                    (1, None)
+                }
+            };
+            conn.execute(
+                "INSERT INTO athumbs (file_id, error_code, thumb_data) VALUES (?1, ?2, ?3)",
+                params![file_id, error_code, thumbnail],
+            )
+            .expect("insert profiling thumbnail row");
+            thumbnail_elapsed += thumbnail_started.elapsed();
+            processed += 1;
+        }
+
+        let elapsed = started.elapsed().as_secs_f64();
+        eprintln!(
+            "[scan-profile-direct] root='{}' files={} folders={} index_failed={} thumbnail_failed={} thumbnail_size={} index_seconds={:.3} thumbnail_seconds={:.3} thumbnail_bytes={} total_seconds={:.3} files_per_second={:.1} temp_db='{}'",
+            root,
+            processed,
+            folders.len(),
+            index_failed,
+            thumbnail_failed,
+            thumbnail_size,
+            index_elapsed.as_secs_f64(),
+            thumbnail_elapsed.as_secs_f64(),
+            thumbnail_bytes,
+            elapsed,
+            processed as f64 / elapsed.max(0.001),
+            db_path.display(),
+        );
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = fs::remove_file(db_path.with_extension("db-shm"));
+        assert!(
+            processed > 0,
+            "profile directory contained no supported media files"
+        );
     }
 
     fn fixture() -> (Connection, PathBuf, PathBuf) {

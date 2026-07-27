@@ -55,6 +55,27 @@ Reference results on 2026-07-27 using the debug test profile:
 
 Interpretation: AFile::new metadata/header/GPS pre-read stayed linear on this all-JPEG set from 10k to 100k files. Do not use this result as end-to-end scan throughput; the next bottleneck check must include database writes, thumbnail drain, and optional embedding.
 
+### Direct Index + Thumbnail Fixture
+
+Use the second ignored fixture to combine temporary SQLite folder/file inserts with real image thumbnail decode/resize/JPEG encode:
+
+    $env:PICAIPIC_SCAN_PROFILE_DIR='D:\100k'
+    $env:PICAIPIC_SCAN_PROFILE_LIMIT='10000'
+    $env:PICAIPIC_SCAN_PROFILE_THUMB_SIZE='200'
+    cargo.exe test profile_directory_index_and_thumbnails -- --ignored --nocapture
+
+The fixture reads source media only, writes a temporary SQLite database, and removes the temporary DB on normal completion. It does not use the app thumbnail cache, Tauri events, concurrent worker budgets, or AI embedding.
+
+Reference results on 2026-07-27 using the debug test profile:
+
+| Limit | Index failed | Thumbnail failed | Index seconds | Thumbnail seconds | Total seconds | Files/sec |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 0 | 0 | 0.190 | 0.220 | 0.411 | 24.3 |
+| 1,000 | 0 | 0 | 23.948 | 21.681 | 45.638 | 21.9 |
+| 10,000 | 0 | 0 | 234.076 | 219.778 | 453.930 | 22.0 |
+
+At 10k, synchronous metadata + SQLite indexing accounted for 51.6% of fixture time and thumbnail work for 48.4%. Throughput stayed linear from 1k to 10k. This identifies two similarly sized serial cost centers; it does not predict the production worker wall time because production overlaps thumbnail work with traversal and adds cache writes plus optional embedding.
+
 ## Full Scan Phase Timing
 
 Set PICAIPIC_SCAN_PHASE_PROFILE=1 before starting PicAiPic, then run a normal album scan. The final terminal output adds one [scan-profile] line with:
