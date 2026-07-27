@@ -16,6 +16,7 @@ Use an explicit connection-backed SQL core for model methods that normally open 
 - Build minimal little-endian TIFF bytes in the test for deterministic EXIF coverage. Use IFD0 for Make/Model/Software and an ExifIFD pointer for DateTimeOriginal; assert both parsed identity and modified-time fallback.
 - Put LensMake/LensModel and UserComment in ExifIFD. A valid-looking tag in IFD0 may be ignored by the parser, so fixture directory placement is part of the contract.
 - For capture fields, use RATIONAL for ExposureTime/FNumber/FocalLength, SRATIONAL for ExposureBias, and an inline SHORT for ISO. Recalculate every downstream offset when the ExifIFD entry count changes.
+- Test RAW overlay with a constructed `RawMeta`; do not require a camera RAW asset merely to verify EXIF-first merge policy and timestamp fallback.
 - Verify the database row after insert and update, then verify dependent rows (for example thumbnails) are cleaned during delete.
 - Always drop the connection and remove both database and source fixture paths, including on assertion-free success paths.
 

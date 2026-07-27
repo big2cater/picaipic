@@ -330,3 +330,4 @@ last_updated: 2026-07-26
 - Keep UserComment decoding in the extracted description helper with the existing charset-aware `t_ai_prompt` routine first and generic EXIF string fallback second.
 - LensMake/LensModel belong in ExifIFD, not IFD0. Keep little_exif JPEG fallback and LibRaw overlay outside `ExifCapture`; the extracted helper reads only the primary kamadak-exif values.
 - Capture fixture values lock the stored display contract: `1/125 s`, `f/2.8`, `0 EV`, `50 mm`, and ISO `200`. Rational payloads live after the ExifIFD; ISO SHORT remains inline.
+- Extract RAW merge policy without abstracting LibRaw I/O: `RawMetadataTarget` fills only missing EXIF fields and replaces `taken_date` only when it still equals filesystem modified time.

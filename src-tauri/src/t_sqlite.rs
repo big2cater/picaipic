@@ -941,6 +941,69 @@ struct ExifCapture {
     iso_speed: Option<String>,
 }
 
+struct RawMetadataTarget<'a> {
+    make: &'a mut Option<String>,
+    model: &'a mut Option<String>,
+    software: &'a mut Option<String>,
+    artist: &'a mut Option<String>,
+    description: &'a mut Option<String>,
+    iso_speed: &'a mut Option<String>,
+    exposure_time: &'a mut Option<String>,
+    f_number: &'a mut Option<String>,
+    focal_length: &'a mut Option<String>,
+    flash: &'a mut Option<String>,
+    lens_make: &'a mut Option<String>,
+    lens_model: &'a mut Option<String>,
+    taken_date: &'a mut Option<i64>,
+    modified_at: Option<i64>,
+}
+
+impl RawMetadataTarget<'_> {
+    fn apply(self, meta: t_libraw::RawMeta) {
+        if self.make.is_none() {
+            *self.make = meta.make;
+        }
+        if self.model.is_none() {
+            *self.model = meta.model;
+        }
+        if self.software.is_none() {
+            *self.software = meta.software;
+        }
+        if self.artist.is_none() {
+            *self.artist = meta.artist;
+        }
+        if self.description.is_none() {
+            *self.description = meta.description;
+        }
+        if self.iso_speed.is_none() {
+            *self.iso_speed = meta.iso_speed;
+        }
+        if self.exposure_time.is_none() {
+            *self.exposure_time = meta.shutter;
+        }
+        if self.f_number.is_none() {
+            *self.f_number = meta.aperture;
+        }
+        if self.focal_length.is_none() {
+            *self.focal_length = meta.focal_len;
+        }
+        if self.flash.is_none() {
+            *self.flash = meta.flash_used;
+        }
+        if self.lens_make.is_none() {
+            *self.lens_make = meta.lens_make;
+        }
+        if self.lens_model.is_none() {
+            *self.lens_model = meta.lens_model;
+        }
+        if *self.taken_date == self.modified_at {
+            if let Some(timestamp) = meta.timestamp {
+                *self.taken_date = Some(timestamp);
+            }
+        }
+    }
+}
+
 impl AFile {
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
@@ -1130,47 +1193,23 @@ impl AFile {
             // RAW files whose EXIF data is stored outside the preview image.
             if file_type == 3 {
                 if let Ok(meta) = t_libraw::get_raw_meta(file_path) {
-                    if e_make.is_none() {
-                        e_make = meta.make;
+                    RawMetadataTarget {
+                        make: &mut e_make,
+                        model: &mut e_model,
+                        software: &mut e_software,
+                        artist: &mut e_artist,
+                        description: &mut e_description,
+                        iso_speed: &mut e_iso_speed,
+                        exposure_time: &mut e_exposure_time,
+                        f_number: &mut e_f_number,
+                        focal_length: &mut e_focal_length,
+                        flash: &mut e_flash,
+                        lens_make: &mut e_lens_make,
+                        lens_model: &mut e_lens_model,
+                        taken_date: &mut taken_date,
+                        modified_at: file_info.modified,
                     }
-                    if e_model.is_none() {
-                        e_model = meta.model;
-                    }
-                    if e_software.is_none() {
-                        e_software = meta.software;
-                    }
-                    if e_artist.is_none() {
-                        e_artist = meta.artist;
-                    }
-                    if e_description.is_none() {
-                        e_description = meta.description;
-                    }
-                    if e_iso_speed.is_none() {
-                        e_iso_speed = meta.iso_speed;
-                    }
-                    if e_exposure_time.is_none() {
-                        e_exposure_time = meta.shutter;
-                    }
-                    if e_f_number.is_none() {
-                        e_f_number = meta.aperture;
-                    }
-                    if e_focal_length.is_none() {
-                        e_focal_length = meta.focal_len;
-                    }
-                    if e_flash.is_none() {
-                        e_flash = meta.flash_used;
-                    }
-                    if e_lens_make.is_none() {
-                        e_lens_make = meta.lens_make;
-                    }
-                    if e_lens_model.is_none() {
-                        e_lens_model = meta.lens_model;
-                    }
-                    if taken_date == file_info.modified {
-                        if let Some(ts) = meta.timestamp {
-                            taken_date = Some(ts);
-                        }
-                    }
+                    .apply(meta);
                 }
             }
 
@@ -4701,7 +4740,8 @@ mod query_builder_tests {
 
 #[cfg(test)]
 mod crud_tests {
-    use super::AFile;
+    use super::{AFile, RawMetadataTarget};
+    use crate::t_libraw::RawMeta;
     use rusqlite::Connection;
     use std::fs;
     use std::path::PathBuf;
@@ -4999,6 +5039,110 @@ mod crud_tests {
         assert_eq!(capture.exposure_bias.as_deref(), Some("0 EV"));
         assert_eq!(capture.focal_length.as_deref(), Some("50 mm"));
         assert_eq!(capture.iso_speed.as_deref(), Some("200"));
+    }
+
+    #[test]
+    fn raw_metadata_overlay_fills_only_missing_fields() {
+        let mut make = Some("EXIF make".to_string());
+        let mut model = None;
+        let mut software = None;
+        let mut artist = None;
+        let mut description = None;
+        let mut iso_speed = None;
+        let mut exposure_time = Some("1/125 s".to_string());
+        let mut f_number = None;
+        let mut focal_length = None;
+        let mut flash = None;
+        let mut lens_make = None;
+        let mut lens_model = None;
+        let mut taken_date = Some(7);
+        RawMetadataTarget {
+            make: &mut make,
+            model: &mut model,
+            software: &mut software,
+            artist: &mut artist,
+            description: &mut description,
+            iso_speed: &mut iso_speed,
+            exposure_time: &mut exposure_time,
+            f_number: &mut f_number,
+            focal_length: &mut focal_length,
+            flash: &mut flash,
+            lens_make: &mut lens_make,
+            lens_model: &mut lens_model,
+            taken_date: &mut taken_date,
+            modified_at: Some(7),
+        }
+        .apply(RawMeta {
+            make: Some("RAW make".into()),
+            model: Some("RAW model".into()),
+            software: Some("RAW software".into()),
+            artist: Some("RAW artist".into()),
+            description: Some("RAW description".into()),
+            timestamp: Some(9),
+            iso_speed: Some("400".into()),
+            shutter: Some("1/30 s".into()),
+            aperture: Some("f/4".into()),
+            focal_len: Some("35 mm".into()),
+            flash_used: Some("Not fired".into()),
+            lens_make: Some("RAW lens make".into()),
+            lens_model: Some("RAW lens model".into()),
+        });
+
+        assert_eq!(make.as_deref(), Some("EXIF make"));
+        assert_eq!(exposure_time.as_deref(), Some("1/125 s"));
+        assert_eq!(model.as_deref(), Some("RAW model"));
+        assert_eq!(iso_speed.as_deref(), Some("400"));
+        assert_eq!(lens_model.as_deref(), Some("RAW lens model"));
+        assert_eq!(taken_date, Some(9));
+    }
+
+    #[test]
+    fn raw_metadata_overlay_keeps_exif_taken_date() {
+        let mut make = None;
+        let mut model = None;
+        let mut software = None;
+        let mut artist = None;
+        let mut description = None;
+        let mut iso_speed = None;
+        let mut exposure_time = None;
+        let mut f_number = None;
+        let mut focal_length = None;
+        let mut flash = None;
+        let mut lens_make = None;
+        let mut lens_model = None;
+        let mut taken_date = Some(8);
+        RawMetadataTarget {
+            make: &mut make,
+            model: &mut model,
+            software: &mut software,
+            artist: &mut artist,
+            description: &mut description,
+            iso_speed: &mut iso_speed,
+            exposure_time: &mut exposure_time,
+            f_number: &mut f_number,
+            focal_length: &mut focal_length,
+            flash: &mut flash,
+            lens_make: &mut lens_make,
+            lens_model: &mut lens_model,
+            taken_date: &mut taken_date,
+            modified_at: Some(7),
+        }
+        .apply(RawMeta {
+            make: None,
+            model: None,
+            software: None,
+            artist: None,
+            description: None,
+            timestamp: Some(9),
+            iso_speed: None,
+            shutter: None,
+            aperture: None,
+            focal_len: None,
+            flash_used: None,
+            lens_make: None,
+            lens_model: None,
+        });
+        assert_eq!(taken_date, Some(8));
     }
 
     #[test]
