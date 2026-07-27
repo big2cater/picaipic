@@ -10,6 +10,7 @@ _Last reviewed: 2026-07-27 (S1/S6 SQLite metadata helpers, CRUD/EXIF/RAW fixture
 | [change-black-hole-theme.md](change-black-hole-theme.md) | Black-hole theme, cosmos WebGL, idle PhotoVortex, chrome glass, intensity |
 | [change-cyberpunk-theme.md](change-cyberpunk-theme.md) | Cyberpunk theme, night-city ambient, idle PhotoGlitchLayer, intensity gate |
 | [fix-library-scan-selection.md](fix-library-scan-selection.md) | Scan/import: dup afiles, selection, Live move counts, **preview stuck N-2**, RAW thumb speed |
+| [profile-library-scan.md](profile-library-scan.md) | Establishing real scan/metadata/thumbnail/embedding performance baselines |
 | [change-ai-plugin.md](change-ai-plugin.md) | Adding/changing a plugin, manifest, capability, runtime, permission, task, or package contract |
 | [change-database-schema.md](change-database-schema.md) | Changing SQLite schema, migrations, database storage, backup, or restore |
 | [test-sqlite-crud-fixture.md](test-sqlite-crud-fixture.md) | Testing SQLite model CRUD against a temporary per-test fixture |

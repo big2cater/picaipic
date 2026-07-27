@@ -4746,6 +4746,49 @@ mod crud_tests {
     use std::fs;
     use std::path::PathBuf;
 
+    #[test]
+    #[ignore = "requires PICAIPIC_SCAN_PROFILE_DIR with a representative media library"]
+    fn profile_afile_new_for_directory() {
+        let root = std::env::var("PICAIPIC_SCAN_PROFILE_DIR")
+            .expect("set PICAIPIC_SCAN_PROFILE_DIR to a read-only media directory");
+        let limit = std::env::var("PICAIPIC_SCAN_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let started = std::time::Instant::now();
+        let mut processed = 0usize;
+        let mut failed = 0usize;
+
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            if processed >= limit {
+                break;
+            }
+            let Some(path) = entry.path().to_str() else {
+                failed += 1;
+                continue;
+            };
+            if AFile::new(1, path, 1).is_err() {
+                failed += 1;
+            }
+            processed += 1;
+        }
+
+        let elapsed = started.elapsed().as_secs_f64();
+        eprintln!(
+            "[scan-profile] root='{}' files={} failed={} seconds={:.3} files_per_second={:.1}",
+            root,
+            processed,
+            failed,
+            elapsed,
+            processed as f64 / elapsed.max(0.001)
+        );
+        assert!(processed > 0, "profile directory contained no files");
+    }
+
     fn fixture() -> (Connection, PathBuf, PathBuf) {
         let token = format!(
             "picaipic-crud-{}-{}",

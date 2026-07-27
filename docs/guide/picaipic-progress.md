@@ -13,6 +13,7 @@ Updated: 2026-07-27
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 1 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
+| Large-library scan profiling | **Metadata micro-benchmark measured** — `D:\100k` all-JPEG set: 10k and 100k both **43.7 files/sec**, 0 failures; scoped to `AFile::new`, not full import throughput |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |
