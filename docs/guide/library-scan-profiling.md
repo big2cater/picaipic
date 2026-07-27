@@ -55,6 +55,20 @@ Reference results on 2026-07-27 using the debug test profile:
 
 Interpretation: AFile::new metadata/header/GPS pre-read stayed linear on this all-JPEG set from 10k to 100k files. Do not use this result as end-to-end scan throughput; the next bottleneck check must include database writes, thumbnail drain, and optional embedding.
 
+## Full Scan Phase Timing
+
+Set PICAIPIC_SCAN_PHASE_PROFILE=1 before starting PicAiPic, then run a normal album scan. The final terminal output adds one [scan-profile] line with:
+
+- count_seconds: initial filesystem count pass.
+- traversal_seconds: traversal wall time while indexing and scheduling background work.
+- index_seconds: cumulative synchronous index_single_file time, including folder/file DB work and AFile::new.
+- drain_seconds: wall time spent waiting for thumbnail/embedding tasks after traversal ends.
+- thumbnail_task_seconds / embedding_task_seconds: cumulative task latency, including semaphore waits; these can exceed wall time because tasks overlap.
+- finalize_seconds: stale-row cleanup, Live/Motion pairing, recount, progress finalization, and cover selection.
+- total_seconds: end-to-end worker wall time.
+
+Use the attempt/success counters beside each cumulative phase to identify failures and normalize averages. Keep the same thumbnail size and AI settings when comparing cold and warm runs.
+
 ## Decision Rules
 
 - Metadata dominates: profile `AFile::new` and file opens on the real mix before changing parser fallback order.

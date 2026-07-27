@@ -2833,6 +2833,25 @@ struct ProcessingBudget {
     embedding: Arc<Semaphore>,
 }
 
+#[derive(Clone, Default)]
+struct ScanPhaseStats {
+    index_attempts: u64,
+    index_successes: u64,
+    index_elapsed: Duration,
+    thumbnail_attempts: u64,
+    thumbnail_successes: u64,
+    thumbnail_elapsed: Duration,
+    embedding_attempts: u64,
+    embedding_successes: u64,
+    embedding_elapsed: Duration,
+}
+
+fn scan_phase_profile_enabled() -> bool {
+    std::env::var("PICAIPIC_SCAN_PHASE_PROFILE")
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 impl ProcessingBudget {
     fn new() -> Self {
         let logical_cores = std::thread::available_parallelism()
@@ -3097,7 +3116,9 @@ async fn process_thumbnail_task(
     task: ThumbnailTask,
     budget: ProcessingBudget,
     tracker: Arc<Mutex<ProgressTracker>>,
+    phase_stats: Option<Arc<Mutex<ScanPhaseStats>>>,
 ) -> Result<bool, String> {
+    let thumbnail_started = phase_stats.as_ref().map(|_| Instant::now());
     // --- Preview phase: hold thumb permit only while generating UI thumbnails ---
     let thumb_timeout = if task.is_heavy {
         HEAVY_THUMB_TIMEOUT
@@ -3160,6 +3181,15 @@ async fn process_thumbnail_task(
         }
     }; // thumb permit released here so other previews keep flowing during embed
 
+    if let Some(stats) = &phase_stats {
+        let mut stats = t_common::lock_mutex(stats);
+        stats.thumbnail_attempts += 1;
+        stats.thumbnail_successes += u64::from(thumb_ok);
+        if let Some(started) = thumbnail_started {
+            stats.thumbnail_elapsed += started.elapsed();
+        }
+    }
+
     // CRITICAL: always advance `processed` after the preview attempt (success OR fail).
     // Previously failures only bumped `failed` and returned early, so progress could
     // stick forever at e.g. 216/218 in phase preparing_previews.
@@ -3198,6 +3228,7 @@ async fn process_thumbnail_task(
         return Ok(true);
     }
 
+    let embedding_started = phase_stats.as_ref().map(|_| Instant::now());
     // --- Search-index phase: separate permit; does not block thumbnail workers ---
     let _embedding_permit = budget
         .embedding
@@ -3237,6 +3268,15 @@ async fn process_thumbnail_task(
         }
     };
 
+    if let Some(stats) = &phase_stats {
+        let mut stats = t_common::lock_mutex(stats);
+        stats.embedding_attempts += 1;
+        stats.embedding_successes += u64::from(embedding_ok);
+        if let Some(started) = embedding_started {
+            stats.embedding_elapsed += started.elapsed();
+        }
+    }
+
     if embedding_ok {
         with_progress_tracker(&tracker, |tracker| {
             tracker.modify(|snapshot| {
@@ -3265,6 +3305,9 @@ pub async fn index_album_worker(
 ) -> Result<(), String> {
     let _album_scan_guard = AlbumScanGuard::acquire(album_id)?;
     let scan_start = std::time::Instant::now();
+    let phase_profile_enabled = scan_phase_profile_enabled();
+    let phase_stats = phase_profile_enabled
+        .then(|| Arc::new(Mutex::new(ScanPhaseStats::default())));
     // Generate a unique scan time for this session (current timestamp)
     let current_scan_time = Utc::now().timestamp_millis();
     let processing_budget = ProcessingBudget::new();
@@ -3292,8 +3335,10 @@ pub async fn index_album_worker(
     }
 
     // 2. Count total files
+    let count_started = Instant::now();
     let (_folders, image_count, _image_size, video_count, _video_size) =
         count_folder_files(&album.path);
+    let count_elapsed = count_started.elapsed();
     let total_files = image_count + video_count;
     let search_total = image_count;
 
@@ -3326,6 +3371,7 @@ pub async fn index_album_worker(
     let mut traversal_failed = false;
     let mut traversed_count = 0u64;
     let mut thumbnail_join_set: JoinSet<Result<bool, String>> = JoinSet::new();
+    let traversal_started = Instant::now();
     for entry in WalkDir::new(&album.path)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
@@ -3378,14 +3424,25 @@ pub async fn index_album_worker(
                     continue;
                 }
 
-                if let Some(outcome) = index_single_file(
+                let index_started = phase_stats.as_ref().map(|_| Instant::now());
+                let outcome = index_single_file(
                     &album.path,
                     album_id,
                     &path_str,
                     ftype,
                     thumbnail_size,
                     current_scan_time,
-                ) {
+                );
+                if let Some(stats) = &phase_stats {
+                    let mut stats = t_common::lock_mutex(stats);
+                    stats.index_attempts += 1;
+                    stats.index_successes += u64::from(outcome.is_some());
+                    if let Some(started) = index_started {
+                        stats.index_elapsed += started.elapsed();
+                    }
+                }
+
+                if let Some(outcome) = outcome {
                     let file_size = outcome
                         .task
                         .as_ref()
@@ -3399,6 +3456,7 @@ pub async fn index_album_worker(
                             task,
                             processing_budget.clone(),
                             tracker.clone(),
+                            phase_stats.clone(),
                         ));
                     }
                     with_progress_tracker(&tracker, |tracker| {
@@ -3435,7 +3493,9 @@ pub async fn index_album_worker(
             }
         }
     }
+    let traversal_elapsed = traversal_started.elapsed();
 
+    let drain_started = Instant::now();
     while let Some(result) = thumbnail_join_set.join_next().await {
         match result {
             Ok(Ok(_)) => {}
@@ -3461,6 +3521,7 @@ pub async fn index_album_worker(
             }
         }
     }
+    let drain_elapsed = drain_started.elapsed();
 
     with_progress_tracker(&tracker, |tracker| tracker.emit_now());
     let mut final_snapshot = with_progress_tracker(&tracker, |tracker| tracker.snapshot());
@@ -3473,6 +3534,7 @@ pub async fn index_album_worker(
         let _ = Album::update_progress(album_id, previous_indexed, previous_total);
     }
 
+    let finalize_started = Instant::now();
     clear_index_trace();
 
     // Delete files that are in DB but not in file system (Mark-and-Sweep)
@@ -3517,6 +3579,7 @@ pub async fn index_album_worker(
     if scan_complete {
         let _ = Album::auto_set_cover(album_id);
     }
+    let finalize_elapsed = finalize_started.elapsed();
 
     // Summary log
     let elapsed = scan_start.elapsed().as_secs_f64();
@@ -3524,6 +3587,29 @@ pub async fn index_album_worker(
         "[scan] album={} folder='{}' files={} time={:.1}s",
         album_id, album.path, final_snapshot.processed, elapsed
     );
+    if let Some(stats) = &phase_stats {
+        let stats = t_common::lock_mutex(stats).clone();
+        println!(
+            "[scan-profile] album={} folder='{}' files={} count_seconds={:.3} traversal_seconds={:.3} index_attempts={} index_successes={} index_seconds={:.3} drain_seconds={:.3} thumbnail_attempts={} thumbnail_successes={} thumbnail_task_seconds={:.3} embedding_attempts={} embedding_successes={} embedding_task_seconds={:.3} finalize_seconds={:.3} total_seconds={:.3}",
+            album_id,
+            album.path,
+            final_snapshot.processed,
+            count_elapsed.as_secs_f64(),
+            traversal_elapsed.as_secs_f64(),
+            stats.index_attempts,
+            stats.index_successes,
+            stats.index_elapsed.as_secs_f64(),
+            drain_elapsed.as_secs_f64(),
+            stats.thumbnail_attempts,
+            stats.thumbnail_successes,
+            stats.thumbnail_elapsed.as_secs_f64(),
+            stats.embedding_attempts,
+            stats.embedding_successes,
+            stats.embedding_elapsed.as_secs_f64(),
+            finalize_elapsed.as_secs_f64(),
+            elapsed,
+        );
+    }
 
     // 6. Emit finished
     app_handle
