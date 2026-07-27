@@ -1031,26 +1031,7 @@ impl AFile {
             // 6: Rotate 90 CW
             // 7: Mirror horizontal and rotate 90 CW
             // 8: Rotate 270 CW
-            e_orientation = exif.as_ref().and_then(|exif_data| {
-                exif_data
-                    .get_field(Tag::Orientation, In::PRIMARY)
-                    .or_else(|| exif_data.fields().find(|f| f.tag == Tag::Orientation))
-                    .and_then(|field| field.value.get_uint(0))
-                    .map(|v| v as u32)
-            });
-
-            // 2. Binary Scan Fallback if still None or 1
-            if e_orientation.is_none() || e_orientation == Some(1) {
-                if let Some(hdr) = file_header_deref {
-                    if let Some(bo) = t_image::scan_orientation_binary(hdr) {
-                        e_orientation = Some(bo as u32);
-                    }
-                }
-            }
-
-            if e_orientation.is_none() {
-                e_orientation = Some(1);
-            }
+            e_orientation = Some(Self::extract_orientation(&exif, file_header_deref));
 
             // Process flash data
             e_flash = exif.as_ref().and_then(|exif_data| {
@@ -1450,6 +1431,26 @@ impl AFile {
             });
         }
         t_image::read_exif_permissive(file_path)
+    }
+
+    fn extract_orientation(exif: &Option<exif::Exif>, file_header: Option<&[u8]>) -> u32 {
+        let mut orientation = exif.as_ref().and_then(|exif_data| {
+            exif_data
+                .get_field(Tag::Orientation, In::PRIMARY)
+                .or_else(|| exif_data.fields().find(|f| f.tag == Tag::Orientation))
+                .and_then(|field| field.value.get_uint(0))
+                .map(|v| v as u32)
+        });
+
+        if orientation.is_none() || orientation == Some(1) {
+            if let Some(hdr) = file_header {
+                if let Some(binary_orientation) = t_image::scan_orientation_binary(hdr) {
+                    orientation = Some(binary_orientation as u32);
+                }
+            }
+        }
+
+        orientation.unwrap_or(1)
     }
 
     fn extract_gps_data(exif: &Option<exif::Exif>) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -4763,6 +4764,25 @@ mod crud_tests {
         assert!(AFile::read_image_exif(&path, 0, Some(b"not-exif")).is_none());
         assert!(AFile::read_image_exif(&path, 1, Some(b"not-exif")).is_none());
         let _ = fs::remove_file(media_path);
+    }
+
+    fn orientation_tiff_fixture() -> Vec<u8> {
+        vec![
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF header + IFD offset
+            0x01, 0x00, // one IFD entry
+            0x12, 0x01, 0x03, 0x00, // Orientation, SHORT
+            0x01, 0x00, 0x00, 0x00, // one value
+            0x06, 0x00, 0x00, 0x00, // rotate 90 CW
+            0x00, 0x00, 0x00, 0x00, // no next IFD
+        ]
+    }
+
+    #[test]
+    fn exif_fixture_drives_orientation_extraction() {
+        let fixture = orientation_tiff_fixture();
+        let exif = AFile::read_image_exif("missing.jpg", 1, Some(&fixture))
+            .expect("minimal TIFF EXIF should parse");
+        assert_eq!(AFile::extract_orientation(&Some(exif), Some(&fixture)), 6);
     }
 
     #[test]
