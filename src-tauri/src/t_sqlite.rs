@@ -931,6 +931,16 @@ struct ExifDescription {
     user_comment: Option<String>,
 }
 
+struct ExifCapture {
+    lens_make: Option<String>,
+    lens_model: Option<String>,
+    exposure_bias: Option<String>,
+    exposure_time: Option<String>,
+    f_number: Option<String>,
+    focal_length: Option<String>,
+    iso_speed: Option<String>,
+}
+
 impl AFile {
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
@@ -1079,13 +1089,14 @@ impl AFile {
             e_copyright = description.copyright;
             e_description = description.description;
             exif_user_comment = description.user_comment;
-            e_lens_make = Self::get_exif_field(&exif, Tag::LensMake);
-            e_lens_model = Self::get_exif_field(&exif, Tag::LensModel);
-            e_exposure_bias = Self::get_exif_field(&exif, Tag::ExposureBiasValue);
-            e_exposure_time = Self::get_exif_field(&exif, Tag::ExposureTime);
-            e_f_number = Self::get_exif_field(&exif, Tag::FNumber);
-            e_focal_length = Self::get_exif_field(&exif, Tag::FocalLength);
-            e_iso_speed = Self::get_exif_field(&exif, Tag::PhotographicSensitivity);
+            let capture = Self::extract_exif_capture(&exif);
+            e_lens_make = capture.lens_make;
+            e_lens_model = capture.lens_model;
+            e_exposure_bias = capture.exposure_bias;
+            e_exposure_time = capture.exposure_time;
+            e_f_number = capture.f_number;
+            e_focal_length = capture.focal_length;
+            e_iso_speed = capture.iso_speed;
 
             // The editor uses little_exif to preserve metadata. Some legacy
             // JPEGs are accepted by that reader but rejected by kamadak-exif,
@@ -1490,6 +1501,18 @@ impl AFile {
                 .as_ref()
                 .and_then(crate::t_ai_prompt::extract_user_comment_from_exif)
                 .or_else(|| Self::get_exif_field(exif, Tag::UserComment)),
+        }
+    }
+
+    fn extract_exif_capture(exif: &Option<exif::Exif>) -> ExifCapture {
+        ExifCapture {
+            lens_make: Self::get_exif_field(exif, Tag::LensMake),
+            lens_model: Self::get_exif_field(exif, Tag::LensModel),
+            exposure_bias: Self::get_exif_field(exif, Tag::ExposureBiasValue),
+            exposure_time: Self::get_exif_field(exif, Tag::ExposureTime),
+            f_number: Self::get_exif_field(exif, Tag::FNumber),
+            focal_length: Self::get_exif_field(exif, Tag::FocalLength),
+            iso_speed: Self::get_exif_field(exif, Tag::PhotographicSensitivity),
         }
     }
 
@@ -4825,6 +4848,8 @@ mod crud_tests {
         let artist = b"Alice\0";
         let copyright = b"2026 Co\0";
         let description = b"Sunset\0";
+        let lens_make = b"Canon\0";
+        let lens_model = b"RF50\0";
         let date = b"2026:07:27 13:45:00\0";
         let user_comment = b"ASCII\0\0\0prompt text\0";
         let make_offset = 98u32;
@@ -4834,8 +4859,10 @@ mod crud_tests {
         let copyright_offset = artist_offset + artist.len() as u32;
         let description_offset = copyright_offset + copyright.len() as u32;
         let exif_offset = description_offset + description.len() as u32;
-        let date_offset = exif_offset + 30;
+        let date_offset = exif_offset + 54;
         let user_comment_offset = date_offset + date.len() as u32;
+        let lens_make_offset = user_comment_offset + user_comment.len() as u32;
+        let lens_model_offset = lens_make_offset + lens_make.len() as u32;
         let push_u16 = |data: &mut Vec<u8>, value: u16| data.extend(value.to_le_bytes());
         let push_u32 = |data: &mut Vec<u8>, value: u32| data.extend(value.to_le_bytes());
 
@@ -4864,7 +4891,7 @@ mod crud_tests {
         data.extend(artist);
         data.extend(copyright);
         data.extend(description);
-        push_u16(&mut data, 2);
+        push_u16(&mut data, 4);
         push_u16(&mut data, 0x9003);
         push_u16(&mut data, 2);
         push_u32(&mut data, date.len() as u32);
@@ -4873,9 +4900,19 @@ mod crud_tests {
         push_u16(&mut data, 7);
         push_u32(&mut data, user_comment.len() as u32);
         push_u32(&mut data, user_comment_offset);
+        push_u16(&mut data, 0xa433);
+        push_u16(&mut data, 2);
+        push_u32(&mut data, lens_make.len() as u32);
+        push_u32(&mut data, lens_make_offset);
+        push_u16(&mut data, 0xa434);
+        push_u16(&mut data, 2);
+        push_u32(&mut data, lens_model.len() as u32);
+        push_u32(&mut data, lens_model_offset);
         push_u32(&mut data, 0);
         data.extend(date);
         data.extend(user_comment);
+        data.extend(lens_make);
+        data.extend(lens_model);
         data
     }
 
@@ -4914,6 +4951,20 @@ mod crud_tests {
         assert_eq!(description.copyright.as_deref(), Some("2026 Co"));
         assert_eq!(description.description.as_deref(), Some("Sunset"));
         assert_eq!(description.user_comment.as_deref(), Some("prompt text"));
+    }
+
+    #[test]
+    fn exif_fixture_drives_capture_extraction() {
+        let fixture = identity_tiff_fixture();
+        let exif = AFile::read_image_exif("missing.jpg", 1, Some(&fixture))
+            .expect("capture TIFF EXIF should parse");
+        let capture = AFile::extract_exif_capture(&Some(exif));
+        assert_eq!(capture.lens_make.as_deref(), Some("Canon"));
+        assert_eq!(capture.lens_model.as_deref(), Some("RF50"));
+        assert!(capture.exposure_time.is_none());
+        assert!(capture.f_number.is_none());
+        assert!(capture.focal_length.is_none());
+        assert!(capture.iso_speed.is_none());
     }
 
     #[test]

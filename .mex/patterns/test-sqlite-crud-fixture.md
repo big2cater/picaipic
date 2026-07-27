@@ -14,6 +14,7 @@ Use an explicit connection-backed SQL core for model methods that normally open 
 - Build media fixtures through the existing model constructor when possible; use a small temporary source file and a non-decoding file type to avoid requiring bundled metadata assets.
 - Test metadata-read guards with deliberately invalid bytes before adding binary EXIF fixtures; this verifies routing without coupling CRUD tests to decoder behavior.
 - Build minimal little-endian TIFF bytes in the test for deterministic EXIF coverage. Use IFD0 for Make/Model/Software and an ExifIFD pointer for DateTimeOriginal; assert both parsed identity and modified-time fallback.
+- Put LensMake/LensModel and UserComment in ExifIFD. A valid-looking tag in IFD0 may be ignored by the parser, so fixture directory placement is part of the contract.
 - Verify the database row after insert and update, then verify dependent rows (for example thumbnails) are cleaned during delete.
 - Always drop the connection and remove both database and source fixture paths, including on assertion-free success paths.
 
