@@ -26,4 +26,4 @@ Use an explicit connection-backed SQL core for model methods that normally open 
 cargo test t_sqlite:: --manifest-path src-tauri/Cargo.toml
 ```
 
-Keep full metadata extraction fixtures as a separate follow-up; do not expand a CRUD fixture into an `AFile::new` integration suite by accident.
+Keep true file-based camera/RAW integration fixtures separate. The in-memory TIFF and `RawMeta` cases protect parsing and merge policy; they do not replace regression tests for Live/Motion/HEIC, LibRaw decoding, geocoding, or AI prompt extraction.

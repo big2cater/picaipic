@@ -1,8 +1,8 @@
 # PicAiPic Progress
 
-Updated: 2026-07-26
+Updated: 2026-07-27
 
-## Status board (2026-07-26)
+## Status board (2026-07-27)
 
 | Track | Status |
 |-------|--------|
@@ -12,6 +12,7 @@ Updated: 2026-07-26
 | Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1; **mediump-safe** hash + mod time; intensity `>0` — `change-cyberpunk-theme.md` |
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
+| SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 1 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |

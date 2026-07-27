@@ -1,7 +1,7 @@
 # PicAiPic 补充代码审计报告（核验修订版）
 
 - 日期：2026-07-26
-- 修订：2026-07-26（对照工作区源码二次核验；纠正过时/夸大项）
+- 修订：2026-07-27（S1 小步拆分、CRUD fixture 与全量 Rust 验证）
 - 范围：全项目静态分析 + 结构性/性能审计（补充 [主报告](code-review-2026-07-26.md) 的 B1–B10）
 - 方法：jCodeMunch 索引级分析 + 定向源码实读 + 本轮 `rg`/实读复核
 - 结论：**无致命 Bug**。原稿 12 项结构 + 6 项性能中，**真债约半数**；若干「立即修复」项已过时或 ROI 极低。优先做 hygiene / 锁一致性 / 长期拆分，勿按原稿第 5 节原样排期。
@@ -12,12 +12,12 @@
 
 | ID | 原稿判定 | 核验 | 说明 |
 |---|---|---|---|
-| S1 | 严重 | **属实（债）** | `AFile::new` 仍 ~938–1441，职责多；非线上故障 |
+| S1 | 严重 | **本轮加固 → 暂停** | `AFile::new` 仍是编排入口，但 header/EXIF/orientation/identity/descriptions/capture/RAW merge 已拆为可测 helper；Live/Motion、geocode、最终组装保留 |
 | S2 | 严重 | **属实（债）** | `Content.vue` ~8145 行；`ref`≈77、`computed`≈63（非「120+ ref」）；性能开销未 profiling |
 | S3 | 中等 | **属实（债）** | 多函数高复杂度；影响回归成本 |
 | S4 | 中等 | **属实（轻）** | 2 组循环仍在；Vue 组件循环常见；`api/config/store` 更值得注意 |
 | S5 | 中等 | **夸大** | 「249 unstable」多为叶子模块指标噪音；真枢纽是 `t_sqlite` 体积 |
-| S6 | 中等 | **收窄 → 本轮加固** | 原有 embed/search 单测；**新增** `query_builder_tests`（14）：`build_file_type_condition` / `build_search_query_parts` / `build_smart_rule_condition` / `build_smart_query_parts` / `sj_*` |
+| S6 | 中等 | **本轮加固** | query/smart SQL 14 项 + 临时 SQLite CRUD 往返 + EXIF/RAW merge fixtures；完整 Rust 107 passed / 1 ignored |
 | S7 | 低 | **属实（轻）** | `build.rs` ~12 处 `.unwrap()`（非 17+）；编译期，风格问题 |
 | S8 | 低 | **部分过时** | `t_cmds::lock_mutex` 已 poison-safe；残留：`main`/`t_sqlite` AI 锁、`t_face`、`t_dedup`、`t_utils` 进度 tracker 等 |
 | S9 | 低 | **属实（设计）** | sleep 多用于进程启停/健康检查；不全是无脑轮询；事件化非必须 |
@@ -30,7 +30,7 @@
 | P4 | 中等 | **半属实** | ~200MB 量级对；已有 cache/warm/后台 ANN；mmap SQLite blob 不现实 |
 | P6 | 低 | **属实（设计）** | 固定 poll 可接受；Notify 是增强非缺陷 |
 
-**本轮落地修复（见 §5）：** S8 残留 poison 锁统一恢复；P5 清理调试 `console.log`（失败路径改 `console.error` 或删除纯调试）。
+**本轮落地修复（见 §5）：** S8 残留 poison 锁统一恢复；P5 清理调试 `console.log`（失败路径改 `console.error` 或删除纯调试）；S1/S6 完成小步拆分与 fixture 加固。
 
 ---
 
@@ -49,11 +49,12 @@
 
 ## 2. 结构性项（修订后）
 
-### S1 [债/高] `AFile::new()` 大体量
+### S1 [债/高 → 本轮加固] `AFile::new()` 大体量
 
-- **文件**：`src-tauri/src/t_sqlite.rs:938–1441`
-- **核验**：属实。混合类型判断、图/视/RAW 元数据、EXIF、GPS、Live Photo、header 预读等。
-- **建议**：拆 `extract_*` 可单测函数；**排期重构**，非 hotfix。
+- **文件**：`src-tauri/src/t_sqlite.rs` 的 `AFile::new`（当前约 440 行）。
+- **本轮**：抽出 header 预读、EXIF 读取策略、orientation、identity/date、descriptions/UserComment、capture/lens 与 RAW merge policy；保留 header-first/full-JPEG、EXIF-first、little_exif、LibRaw 与 timestamp fallback 的优先级。
+- **测试**：最小 TIFF/EXIF fixture 覆盖 IFD0、ExifIFD、UserComment、Rational/SRational/ISO；构造 `RawMeta` 覆盖仅补空字段与真实 EXIF 时间不被覆盖。
+- **剩余**：类型分派、binary fallback、Live/Motion/HEIC 检测、geocode、AI prompt 和最终 `AFile` 组装仍在入口函数。这是合理的编排职责；本批停止继续拆分，避免在无真实媒体集的情况下扩大回归面。
 
 ### S2 [债/高] `Content.vue` 单体
 
@@ -82,8 +83,8 @@ api.js → config.js → libraryStore.js
 
 - **错误原文**：「`t_sqlite.rs` 零测试 / `has_tests=false`」
 - **事实**：已有 image-search top-k 与 embed score 单测。
-- **本轮**：`query_builder_tests`（14）覆盖 file-type mask、search WHERE（Live companion / 排除文件夹 / 名/收藏/评分/标签/人脸 / 本地日历日 / 跨日界线 GPS）、smart rule（size/name/favorite/rating/tag/person/date/unsupported）、match all|any、`sj_*` 解析。
-- **仍缺**：`AFile::insert`/`update` 的 DB 集成测试（需 fixture 库）。
+- **本轮**：`query_builder_tests`（14）覆盖 file-type mask、search WHERE（Live companion / 排除文件夹 / 名/收藏/评分/标签/人脸 / 本地日历日 / 跨日界线 GPS）、smart rule（size/name/favorite/rating/tag/person/date/unsupported）、match all|any、`sj_*` 解析；临时 SQLite fixture 覆盖 `AFile::insert` / `update` / `delete` 与 thumbnail 清理；metadata/RAW merge fixtures 覆盖新增 helper。
+- **验证**：`cargo check` 通过；完整 `cargo test` 为 **107 passed、1 ignored、0 failed**。
 
 ### S7 [轻] `build.rs` unwrap
 
@@ -167,20 +168,21 @@ api.js → config.js → libraryStore.js
 2. **S8**：统一 poison-safe `lock_mutex`，清生产路径 `Mutex::lock().unwrap()`
 3. **P5**：清理生产调试 `console.log`
 4. **S6**：`t_sqlite::query_builder_tests` 14 项（search + smart-rule SQL 形状）
+5. **S1 / S6**：`AFile::new` metadata 小步拆分；temporary SQLite CRUD + TIFF/EXIF + `RawMeta` fixture；完整 Rust test/check 通过
 
 ### 明确不做（本稿）
 
 - S10 `face_indices` → `Arc<[usize]>`（ROI 低）
 - P1「解码移出锁」（已完成）
-- S1/S2 大拆、P4 mmap、S4 依赖倒置、P6 事件化
+- S2 大拆、P4 mmap、S4 依赖倒置、P6 事件化；S1 不继续做无边界的 helper 拆分
 
 ### 后续值得做（有带宽时）
 
 | 优先级 | 项 |
 |---|---|
-| 中 | S6 剩余：`insert`/`update` DB 集成 fixture |
-| 中 | S1：拆 `AFile::new`（独立 PR，需元数据 fixture） |
-| 中 | P1 剩余：CLIP 锁/session 粒度（有大库 perf 证据再做） |
+| 中 | P1 剩余：CLIP 锁/session 粒度（先采集大库 perf 证据） |
+| 中 | 大库扫描/metadata profiling：确认真正耗时点后再优化 |
+| 低 | Live/Motion/HEIC 分支只在改功能时提取为单独 helper，并补真实媒体 fixture |
 | 低 | S2 顺手 composable；S7 expect；S9 常量化 |
 
 ---
@@ -193,7 +195,7 @@ api.js → config.js → libraryStore.js
 | 死代码 | A | 插件树假阳性为主 |
 | 依赖循环 | B | 2 组，可控 |
 | 耦合 | C→B- | 指标噪音大；枢纽文件真实 |
-| 测试 | 部分↑ | embed + search top-k + **query/smart SQL 形状**；CRUD 集成仍薄 |
+| 测试 | B | embed/search + query/smart SQL + SQLite CRUD + EXIF/RAW merge fixtures；真实相机媒体回归仍需手测 |
 | 综合 | **B** | 与主报告一致：工程健康，债可控 |
 
 **总评**：主报告 B 类安全/一致性问题更关键。补充稿有价值处是 **S1/S2/S3 结构债与 P1 剩余推理串行**；不宜把静态复杂度报告当成「本周 12 项事故清单」。
