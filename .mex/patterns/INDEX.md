@@ -12,6 +12,7 @@ _Last reviewed: 2026-07-26 (BH/CP FX + mediump/sprite/theme-gate + resize/rAF po
 | [fix-library-scan-selection.md](fix-library-scan-selection.md) | Scan/import: dup afiles, selection, Live move counts, **preview stuck N-2**, RAW thumb speed |
 | [change-ai-plugin.md](change-ai-plugin.md) | Adding/changing a plugin, manifest, capability, runtime, permission, task, or package contract |
 | [change-database-schema.md](change-database-schema.md) | Changing SQLite schema, migrations, database storage, backup, or restore |
+| [test-sqlite-crud-fixture.md](test-sqlite-crud-fixture.md) | Testing SQLite model CRUD against a temporary per-test fixture |
 | [change-live-photo.md](change-live-photo.md) | Apple Live Photo / Google Motion Photo detection, pairing, or long-press preview |
 | [debug-plugin-runtime.md](debug-plugin-runtime.md) | Diagnosing plugin discovery, trust, setup, process, health, task, or output failures |
 | [release-build.md](release-build.md) | Building/validating application installers, updater artifacts, or plugin packages |

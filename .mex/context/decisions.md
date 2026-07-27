@@ -318,3 +318,9 @@ last_updated: 2026-07-26
 - Accepted now: poison-safe mutex helper + debug log cleanup.
 - Deferred: Content.vue split, AFile::new split, CLIP multi-session, face_indices Arc, sleep eventization.
 - Rejected as written: "t_sqlite zero tests" (has embed/search unit tests); P1 "decode under lock" (already outside).
+
+## 2026-07-27 — Keep AFile split incremental and connection-testable
+
+- Extract only stable, local responsibilities from `AFile::new` first: image/RAW header pre-read remains behaviorally identical behind `read_file_header`.
+- Keep CRUD production entry points on the library connection path, but implement their SQL cores with an explicit `&Connection`/`&mut Connection` so temporary SQLite fixtures can exercise insert/update/delete without mutating global library configuration.
+- Defer the remaining metadata extraction split until representative EXIF/RAW fixtures exist.

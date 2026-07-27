@@ -970,18 +970,7 @@ impl AFile {
         let mut exif_user_comment: Option<String> = None;
 
         // Pre-read file header once for images (saves 3-4 redundant File::open per file).
-        let file_header: Option<Vec<u8>> = if file_type == 1 || file_type == 3 {
-            std::fs::File::open(file_path).ok().and_then(|mut f| {
-                use std::io::Read;
-                let mut buf = vec![0u8; 128 * 1024];
-                f.read(&mut buf).ok().map(|n| {
-                    buf.truncate(n);
-                    buf
-                })
-            })
-        } else {
-            None
-        };
+        let file_header = Self::read_file_header(file_path, file_type);
         let file_header_deref = file_header.as_deref();
 
         match file_type {
@@ -1440,6 +1429,19 @@ impl AFile {
         Ok(file)
     }
 
+    fn read_file_header(file_path: &str, file_type: i64) -> Option<Vec<u8>> {
+        if file_type != 1 && file_type != 3 {
+            return None;
+        }
+
+        let mut file = std::fs::File::open(file_path).ok()?;
+        use std::io::Read;
+        let mut buf = vec![0u8; 128 * 1024];
+        let read = file.read(&mut buf).ok()?;
+        buf.truncate(read);
+        Some(buf)
+    }
+
     fn extract_gps_data(exif: &Option<exif::Exif>) -> (Option<f64>, Option<f64>, Option<f64>) {
         let Some(exif_data) = exif else {
             return (None, None, None);
@@ -1636,6 +1638,10 @@ impl AFile {
     /// insert a file into db
     fn insert(&self) -> Result<usize, String> {
         let conn = open_conn()?;
+        self.insert_with_conn(&conn)
+    }
+
+    fn insert_with_conn(&self, conn: &Connection) -> Result<usize, String> {
         let result = conn.execute(
             "INSERT INTO afiles (
                 folder_id, 
@@ -1710,6 +1716,10 @@ impl AFile {
     /// update a file into db
     pub fn update(file_id: i64, file: &Self) -> Result<usize, String> {
         let conn = open_conn()?;
+        Self::update_with_conn(&conn, file_id, file)
+    }
+
+    fn update_with_conn(conn: &Connection, file_id: i64, file: &Self) -> Result<usize, String> {
         let result = conn.execute(
             "UPDATE afiles SET
                 name = ?1, name_pinyin = ?2, size = ?3, file_type = ?4, format_label = ?5, created_at = ?6, modified_at = ?7, inode = ?8,
@@ -1775,6 +1785,10 @@ impl AFile {
     // delete a file from db
     pub fn delete(id: i64) -> Result<usize, String> {
         let mut conn = open_conn()?;
+        Self::delete_with_conn(&mut conn, id)
+    }
+
+    fn delete_with_conn(conn: &mut Connection, id: i64) -> Result<usize, String> {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM athumbs WHERE file_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -4608,6 +4622,169 @@ mod query_builder_tests {
         assert_eq!(AFile::sj_bool(&serde_json::json!("yes")), Some(true));
         assert_eq!(AFile::sj_bool(&serde_json::json!(0)), Some(false));
         assert_eq!(AFile::sj_str(&serde_json::json!(12)), Some("12".into()));
+    }
+}
+
+#[cfg(test)]
+mod crud_tests {
+    use super::AFile;
+    use rusqlite::Connection;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture() -> (Connection, PathBuf, PathBuf) {
+        let token = format!(
+            "picaipic-crud-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let db_path = std::env::temp_dir().join(format!("{token}.db"));
+        let media_path = std::env::temp_dir().join(format!("{token}.txt"));
+        fs::write(&media_path, b"fixture media").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE afolders (
+                 id INTEGER PRIMARY KEY,
+                 album_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 is_excluded_from_search INTEGER DEFAULT 0
+             );
+             CREATE TABLE afiles (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 folder_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 name_pinyin TEXT,
+                 size INTEGER NOT NULL,
+                 file_type INTEGER,
+                 format_label TEXT,
+                 created_at INTEGER,
+                 modified_at INTEGER,
+                 inode INTEGER,
+                 taken_date INTEGER,
+                 width INTEGER,
+                 height INTEGER,
+                 duration INTEGER,
+                 is_favorite INTEGER,
+                 rating INTEGER NOT NULL DEFAULT 0,
+                 rotate INTEGER,
+                 comments TEXT,
+                 has_tags INTEGER,
+                 e_make TEXT,
+                 e_model TEXT,
+                 e_date_time TEXT,
+                 e_software TEXT,
+                 e_artist TEXT,
+                 e_copyright TEXT,
+                 e_description TEXT,
+                 e_lens_make TEXT,
+                 e_lens_model TEXT,
+                 e_exposure_bias TEXT,
+                 e_exposure_time TEXT,
+                 e_f_number TEXT,
+                 e_focal_length TEXT,
+                 e_iso_speed TEXT,
+                 e_flash TEXT,
+                 e_orientation INTEGER,
+                 gps_latitude REAL,
+                 gps_longitude REAL,
+                 gps_altitude REAL,
+                 geo_name TEXT,
+                 geo_admin1 TEXT,
+                 geo_admin2 TEXT,
+                 geo_cc TEXT,
+                 content_id TEXT,
+                 paired_file_id INTEGER,
+                 live_photo_type INTEGER DEFAULT 0,
+                 last_scan_time INTEGER DEFAULT 0,
+                 UNIQUE(folder_id, name),
+                 FOREIGN KEY(folder_id) REFERENCES afolders(id) ON DELETE CASCADE
+             );
+             CREATE TABLE athumbs (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 file_id INTEGER NOT NULL,
+                 error_code INTEGER NOT NULL,
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
+             );
+             INSERT INTO afolders (id, album_id, name, path) VALUES (1, 1, 'fixture', '/fixture');",
+        )
+        .unwrap();
+
+        (conn, db_path, media_path)
+    }
+
+    #[test]
+    fn header_pre_read_is_limited_to_image_and_raw_types() {
+        let media_path = std::env::temp_dir().join(format!(
+            "picaipic-header-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&media_path, b"header-fixture").unwrap();
+        let path = media_path.to_string_lossy();
+
+        assert_eq!(AFile::read_file_header(&path, 1).as_deref(), Some(b"header-fixture".as_slice()));
+        assert_eq!(AFile::read_file_header(&path, 3).as_deref(), Some(b"header-fixture".as_slice()));
+        assert!(AFile::read_file_header(&path, 0).is_none());
+
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn afile_crud_round_trip_uses_temporary_sqlite_fixture() {
+        let (mut conn, db_path, media_path) = fixture();
+        let path = media_path.to_string_lossy();
+        let mut file = AFile::new(1, &path, 0).expect("build fixture AFile");
+
+        assert_eq!(file.insert_with_conn(&conn).unwrap(), 1);
+        let file_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO athumbs (file_id, error_code) VALUES (?1, 0)",
+            [file_id],
+        )
+        .unwrap();
+
+        file.name = "renamed.txt".into();
+        file.rating = Some(4);
+        file.gps_latitude = Some(12.5);
+        assert_eq!(AFile::update_with_conn(&conn, file_id, &file).unwrap(), 1);
+
+        let (name, rating, latitude): (String, i32, f64) = conn
+            .query_row(
+                "SELECT name, rating, gps_latitude FROM afiles WHERE id = ?1",
+                [file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "renamed.txt");
+        assert_eq!(rating, 4);
+        assert!((latitude - 12.5).abs() < f64::EPSILON);
+
+        assert_eq!(AFile::delete_with_conn(&mut conn, file_id).unwrap(), 1);
+        assert!(conn
+            .query_row("SELECT COUNT(*) FROM afiles WHERE id = ?1", [file_id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 0);
+        assert!(conn
+            .query_row("SELECT COUNT(*) FROM athumbs WHERE file_id = ?1", [file_id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 0);
+
+        drop(conn);
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(media_path);
     }
 }
 
