@@ -1020,15 +1020,7 @@ impl AFile {
             // Some older JPEGs place EXIF after large APP segments (such as an
             // ICC profile), beyond this header buffer. Fall back to scanning
             // the full JPEG so their capture settings are indexed as well.
-            let exif = if let Some(hdr) = file_header_deref {
-                t_image::read_exif_from_bytes_permissive(hdr).or_else(|| {
-                    (file_type == 1 && t_image::is_jpeg_path(file_path))
-                        .then(|| t_image::read_exif_permissive(file_path))
-                        .flatten()
-                })
-            } else {
-                t_image::read_exif_permissive(file_path)
-            };
+            let exif = Self::read_image_exif(file_path, file_type, file_header_deref);
 
             // Extracts EXIF orientation field.
             // 1: Horizontal (normal)
@@ -1440,6 +1432,24 @@ impl AFile {
         let read = file.read(&mut buf).ok()?;
         buf.truncate(read);
         Some(buf)
+    }
+
+    fn read_image_exif(
+        file_path: &str,
+        file_type: i64,
+        file_header: Option<&[u8]>,
+    ) -> Option<exif::Exif> {
+        if file_type != 1 && file_type != 3 {
+            return None;
+        }
+        if let Some(hdr) = file_header {
+            return t_image::read_exif_from_bytes_permissive(hdr).or_else(|| {
+                (file_type == 1 && t_image::is_jpeg_path(file_path))
+                    .then(|| t_image::read_exif_permissive(file_path))
+                    .flatten()
+            });
+        }
+        t_image::read_exif_permissive(file_path)
     }
 
     fn extract_gps_data(exif: &Option<exif::Exif>) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -4735,6 +4745,23 @@ mod crud_tests {
         assert_eq!(AFile::read_file_header(&path, 3).as_deref(), Some(b"header-fixture".as_slice()));
         assert!(AFile::read_file_header(&path, 0).is_none());
 
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn exif_read_strategy_ignores_non_media_and_bad_headers() {
+        let media_path = std::env::temp_dir().join(format!(
+            "picaipic-exif-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&media_path, b"not-exif").unwrap();
+        let path = media_path.to_string_lossy();
+        assert!(AFile::read_image_exif(&path, 0, Some(b"not-exif")).is_none());
+        assert!(AFile::read_image_exif(&path, 1, Some(b"not-exif")).is_none());
         let _ = fs::remove_file(media_path);
     }
 

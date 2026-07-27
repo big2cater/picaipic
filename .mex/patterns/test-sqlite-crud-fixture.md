@@ -12,6 +12,7 @@ Use an explicit connection-backed SQL core for model methods that normally open 
 
 - Create only the tables and columns required by the SQL under test, including foreign keys and unique constraints that production migrations provide.
 - Build media fixtures through the existing model constructor when possible; use a small temporary source file and a non-decoding file type to avoid requiring bundled metadata assets.
+- Test metadata-read guards with deliberately invalid bytes before adding binary EXIF fixtures; this verifies routing without coupling CRUD tests to decoder behavior.
 - Verify the database row after insert and update, then verify dependent rows (for example thumbnails) are cleaned during delete.
 - Always drop the connection and remove both database and source fixture paths, including on assertion-free success paths.
 

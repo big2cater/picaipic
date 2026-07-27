@@ -324,3 +324,4 @@ last_updated: 2026-07-26
 - Extract only stable, local responsibilities from `AFile::new` first: image/RAW header pre-read remains behaviorally identical behind `read_file_header`.
 - Keep CRUD production entry points on the library connection path, but implement their SQL cores with an explicit `&Connection`/`&mut Connection` so temporary SQLite fixtures can exercise insert/update/delete without mutating global library configuration.
 - Defer the remaining metadata extraction split until representative EXIF/RAW fixtures exist.
+- The next increment isolates `read_image_exif` without changing the header-first/full-JPEG fallback policy; field mapping, RAW overlay, Live Photo detection, and geocoding remain in `AFile::new`.
