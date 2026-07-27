@@ -4859,12 +4859,17 @@ mod crud_tests {
         let copyright_offset = artist_offset + artist.len() as u32;
         let description_offset = copyright_offset + copyright.len() as u32;
         let exif_offset = description_offset + description.len() as u32;
-        let date_offset = exif_offset + 54;
+        let date_offset = exif_offset + 114;
         let user_comment_offset = date_offset + date.len() as u32;
         let lens_make_offset = user_comment_offset + user_comment.len() as u32;
         let lens_model_offset = lens_make_offset + lens_make.len() as u32;
+        let exposure_time_offset = lens_model_offset + lens_model.len() as u32;
+        let f_number_offset = exposure_time_offset + 8;
+        let exposure_bias_offset = f_number_offset + 8;
+        let focal_length_offset = exposure_bias_offset + 8;
         let push_u16 = |data: &mut Vec<u8>, value: u16| data.extend(value.to_le_bytes());
         let push_u32 = |data: &mut Vec<u8>, value: u32| data.extend(value.to_le_bytes());
+        let push_i32 = |data: &mut Vec<u8>, value: i32| data.extend(value.to_le_bytes());
 
         push_u16(&mut data, 7);
         for (tag, count, offset) in [
@@ -4891,11 +4896,31 @@ mod crud_tests {
         data.extend(artist);
         data.extend(copyright);
         data.extend(description);
-        push_u16(&mut data, 4);
+        push_u16(&mut data, 9);
+        push_u16(&mut data, 0x829a);
+        push_u16(&mut data, 5);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, exposure_time_offset);
+        push_u16(&mut data, 0x829d);
+        push_u16(&mut data, 5);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, f_number_offset);
+        push_u16(&mut data, 0x8827);
+        push_u16(&mut data, 3);
+        push_u32(&mut data, 1);
+        data.extend([200, 0, 0, 0]);
         push_u16(&mut data, 0x9003);
         push_u16(&mut data, 2);
         push_u32(&mut data, date.len() as u32);
         push_u32(&mut data, date_offset);
+        push_u16(&mut data, 0x9204);
+        push_u16(&mut data, 10);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, exposure_bias_offset);
+        push_u16(&mut data, 0x920a);
+        push_u16(&mut data, 5);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, focal_length_offset);
         push_u16(&mut data, 0x9286);
         push_u16(&mut data, 7);
         push_u32(&mut data, user_comment.len() as u32);
@@ -4913,6 +4938,14 @@ mod crud_tests {
         data.extend(user_comment);
         data.extend(lens_make);
         data.extend(lens_model);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, 125);
+        push_u32(&mut data, 28);
+        push_u32(&mut data, 10);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 1);
+        push_u32(&mut data, 50);
+        push_u32(&mut data, 1);
         data
     }
 
@@ -4961,10 +4994,11 @@ mod crud_tests {
         let capture = AFile::extract_exif_capture(&Some(exif));
         assert_eq!(capture.lens_make.as_deref(), Some("Canon"));
         assert_eq!(capture.lens_model.as_deref(), Some("RF50"));
-        assert!(capture.exposure_time.is_none());
-        assert!(capture.f_number.is_none());
-        assert!(capture.focal_length.is_none());
-        assert!(capture.iso_speed.is_none());
+        assert_eq!(capture.exposure_time.as_deref(), Some("1/125 s"));
+        assert_eq!(capture.f_number.as_deref(), Some("f/2.8"));
+        assert_eq!(capture.exposure_bias.as_deref(), Some("0 EV"));
+        assert_eq!(capture.focal_length.as_deref(), Some("50 mm"));
+        assert_eq!(capture.iso_speed.as_deref(), Some("200"));
     }
 
     #[test]

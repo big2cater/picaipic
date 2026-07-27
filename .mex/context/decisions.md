@@ -329,3 +329,4 @@ last_updated: 2026-07-26
 - Extend the byte fixture with IFD0 strings and an ExifIFD pointer before extracting camera/date identity. `taken_date` remains `DateTimeOriginal` parsed to local metadata time, then filesystem modified time as fallback.
 - Keep UserComment decoding in the extracted description helper with the existing charset-aware `t_ai_prompt` routine first and generic EXIF string fallback second.
 - LensMake/LensModel belong in ExifIFD, not IFD0. Keep little_exif JPEG fallback and LibRaw overlay outside `ExifCapture`; the extracted helper reads only the primary kamadak-exif values.
+- Capture fixture values lock the stored display contract: `1/125 s`, `f/2.8`, `0 EV`, `50 mm`, and ISO `200`. Rational payloads live after the ExifIFD; ISO SHORT remains inline.
