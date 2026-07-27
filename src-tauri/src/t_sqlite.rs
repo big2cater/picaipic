@@ -916,6 +916,14 @@ pub struct ImageSearchParams {
     pub search_file_type: i64,
 }
 
+struct ExifIdentity {
+    taken_date: Option<i64>,
+    make: Option<String>,
+    model: Option<String>,
+    date_time: Option<String>,
+    software: Option<String>,
+}
+
 impl AFile {
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
@@ -1053,14 +1061,12 @@ impl AFile {
             gps_longitude = lon;
             gps_altitude = alt;
 
-            taken_date = Self::get_exif_field(&exif, Tag::DateTimeOriginal)
-                .and_then(|exif_date| t_utils::meta_date_to_timestamp(&exif_date))
-                .or(file_info.modified);
-
-            e_make = Self::get_exif_field(&exif, Tag::Make);
-            e_model = Self::get_exif_field(&exif, Tag::Model);
-            e_date_time = Self::get_exif_field(&exif, Tag::DateTimeOriginal);
-            e_software = Self::get_exif_field(&exif, Tag::Software);
+            let identity = Self::extract_exif_identity(&exif, file_info.modified);
+            taken_date = identity.taken_date;
+            e_make = identity.make;
+            e_model = identity.model;
+            e_date_time = identity.date_time;
+            e_software = identity.software;
             e_artist = Self::get_exif_field(&exif, Tag::Artist);
             e_copyright = Self::get_exif_field(&exif, Tag::Copyright);
             e_description = Self::get_exif_field(&exif, Tag::ImageDescription);
@@ -1451,6 +1457,23 @@ impl AFile {
         }
 
         orientation.unwrap_or(1)
+    }
+
+    fn extract_exif_identity(
+        exif: &Option<exif::Exif>,
+        modified_at: Option<i64>,
+    ) -> ExifIdentity {
+        let date_time = Self::get_exif_field(exif, Tag::DateTimeOriginal);
+        ExifIdentity {
+            taken_date: date_time
+                .as_deref()
+                .and_then(t_utils::meta_date_to_timestamp)
+                .or(modified_at),
+            make: Self::get_exif_field(exif, Tag::Make),
+            model: Self::get_exif_field(exif, Tag::Model),
+            date_time,
+            software: Self::get_exif_field(exif, Tag::Software),
+        }
     }
 
     fn extract_gps_data(exif: &Option<exif::Exif>) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -4777,12 +4800,73 @@ mod crud_tests {
         ]
     }
 
+    fn identity_tiff_fixture() -> Vec<u8> {
+        let mut data = vec![b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
+        let make = b"Canon\0";
+        let model = b"EOS R\0";
+        let software = b"PicAiPic\0";
+        let date = b"2026:07:27 13:45:00\0";
+        let make_offset = 62u32;
+        let model_offset = make_offset + make.len() as u32;
+        let software_offset = model_offset + model.len() as u32;
+        let exif_offset = 84u32;
+        let date_offset = exif_offset + 18;
+        let push_u16 = |data: &mut Vec<u8>, value: u16| data.extend(value.to_le_bytes());
+        let push_u32 = |data: &mut Vec<u8>, value: u32| data.extend(value.to_le_bytes());
+
+        push_u16(&mut data, 4);
+        for (tag, count, offset) in [
+            (0x010f, make.len() as u32, make_offset),
+            (0x0110, model.len() as u32, model_offset),
+            (0x0131, software.len() as u32, software_offset),
+        ] {
+            push_u16(&mut data, tag);
+            push_u16(&mut data, 2);
+            push_u32(&mut data, count);
+            push_u32(&mut data, offset);
+        }
+        push_u16(&mut data, 0x8769);
+        push_u16(&mut data, 4);
+        push_u32(&mut data, 1);
+        push_u32(&mut data, exif_offset);
+        push_u32(&mut data, 0);
+        data.extend(make);
+        data.extend(model);
+        data.extend(software);
+        data.push(0);
+        push_u16(&mut data, 1);
+        push_u16(&mut data, 0x9003);
+        push_u16(&mut data, 2);
+        push_u32(&mut data, date.len() as u32);
+        push_u32(&mut data, date_offset);
+        push_u32(&mut data, 0);
+        data.extend(date);
+        data
+    }
+
     #[test]
     fn exif_fixture_drives_orientation_extraction() {
         let fixture = orientation_tiff_fixture();
         let exif = AFile::read_image_exif("missing.jpg", 1, Some(&fixture))
             .expect("minimal TIFF EXIF should parse");
         assert_eq!(AFile::extract_orientation(&Some(exif), Some(&fixture)), 6);
+    }
+
+    #[test]
+    fn exif_fixture_drives_identity_extraction() {
+        let fixture = identity_tiff_fixture();
+        let exif = AFile::read_image_exif("missing.jpg", 1, Some(&fixture))
+            .expect("identity TIFF EXIF should parse");
+        let identity = AFile::extract_exif_identity(&Some(exif), Some(7));
+        assert_eq!(identity.make.as_deref(), Some("Canon"));
+        assert_eq!(identity.model.as_deref(), Some("EOS R"));
+        assert_eq!(identity.software.as_deref(), Some("PicAiPic"));
+        assert_eq!(identity.date_time.as_deref(), Some("2026:07:27 13:45:00"));
+        assert!(identity.taken_date.is_some());
+        assert_ne!(identity.taken_date, Some(7));
+
+        let fallback = AFile::extract_exif_identity(&None, Some(7));
+        assert_eq!(fallback.taken_date, Some(7));
     }
 
     #[test]
