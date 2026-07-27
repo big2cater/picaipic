@@ -13,7 +13,7 @@ Updated: 2026-07-27
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 3 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
-| Large-library scan profiling | **Metadata + direct index/thumb measured; worker phases ready** — `D:\100k`: AFile **43.7 files/sec**; serial temp-DB + 200px thumbs **22.0 files/sec** at 10k, 0 failures, 51.6% index / 48.4% thumb |
+| Large-library scan profiling | **100k worker measured** — AI on: **9,548.281s** total; traversal **3,233.415s**, drain **6,313.095s**; single-permit embedding dominates. Task timers fixed to exclude semaphore waits; per-file embed logs opt-in |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |

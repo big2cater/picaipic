@@ -33,6 +33,20 @@ use tauri::{Emitter, State};
 
 static THUMB_GENERATION_LOCKS: OnceLock<ThumbGenerationLocks> = OnceLock::new();
 static THUMB_BACKGROUND_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static EMBED_FILE_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn embed_file_trace_enabled() -> bool {
+    *EMBED_FILE_TRACE_ENABLED.get_or_init(|| {
+        std::env::var("PICAIPIC_EMBED_FILE_TRACE")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
 
 struct ThumbGenerationLocks {
     active: Mutex<HashSet<String>>,
@@ -3207,9 +3221,11 @@ impl AFile {
                             engine.encode_image_from_bytes(&b)
                         })) {
                             Ok(Ok(emb)) => {
-                                println!(
-                                    "embed file_id={file_id} used=thumbnail (encode failed: {enc_err})"
-                                );
+                                if embed_file_trace_enabled() {
+                                    println!(
+                                        "embed file_id={file_id} used=thumbnail (encode failed: {enc_err})"
+                                    );
+                                }
                                 (emb, "thumbnail")
                             }
                             Ok(Err(t_err)) => {
@@ -3244,9 +3260,11 @@ impl AFile {
                     engine.encode_image_from_bytes(&b)
                 })) {
                     Ok(Ok(emb)) => {
-                        println!(
-                            "embed file_id={file_id} used=thumbnail (prepare failed; edge={edge})"
-                        );
+                        if embed_file_trace_enabled() {
+                            println!(
+                                "embed file_id={file_id} used=thumbnail (prepare failed; edge={edge})"
+                            );
+                        }
                         (emb, "thumbnail")
                     }
                     Ok(Err(e)) => return Err(e),
@@ -3265,7 +3283,9 @@ impl AFile {
         };
         drop(engine);
 
-        println!("embed file_id={file_id} used={source} edge={edge}");
+        if embed_file_trace_enabled() {
+            println!("embed file_id={file_id} used={source} edge={edge}");
+        }
 
         // 5. Save to DB
         let _ =

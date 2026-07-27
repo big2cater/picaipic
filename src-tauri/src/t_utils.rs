@@ -3118,14 +3118,13 @@ async fn process_thumbnail_task(
     tracker: Arc<Mutex<ProgressTracker>>,
     phase_stats: Option<Arc<Mutex<ScanPhaseStats>>>,
 ) -> Result<bool, String> {
-    let thumbnail_started = phase_stats.as_ref().map(|_| Instant::now());
     // --- Preview phase: hold thumb permit only while generating UI thumbnails ---
     let thumb_timeout = if task.is_heavy {
         HEAVY_THUMB_TIMEOUT
     } else {
         NORMAL_THUMB_TIMEOUT
     };
-    let thumb_ok = {
+    let (thumb_ok, thumbnail_elapsed) = {
         let thumb_semaphore = if task.is_heavy {
             budget.heavy_thumb.clone()
         } else {
@@ -3135,6 +3134,7 @@ async fn process_thumbnail_task(
             .acquire()
             .await
             .map_err(|e| format!("Failed to acquire thumbnail permit: {}", e))?;
+        let thumbnail_started = phase_stats.as_ref().map(|_| Instant::now());
 
         let task_for_thumb = task.clone();
         let join = tauri::async_runtime::spawn_blocking(move || {
@@ -3161,7 +3161,7 @@ async fn process_thumbnail_task(
             }
         });
 
-        match tokio::time::timeout(thumb_timeout, join).await {
+        let thumb_ok = match tokio::time::timeout(thumb_timeout, join).await {
             Ok(Ok(ok)) => ok,
             Ok(Err(e)) => {
                 eprintln!(
@@ -3178,15 +3178,16 @@ async fn process_thumbnail_task(
                 // Task may still be running in the blocking pool; progress must advance.
                 false
             }
-        }
+        };
+        (thumb_ok, thumbnail_started.map(|started| started.elapsed()))
     }; // thumb permit released here so other previews keep flowing during embed
 
     if let Some(stats) = &phase_stats {
         let mut stats = t_common::lock_mutex(stats);
         stats.thumbnail_attempts += 1;
         stats.thumbnail_successes += u64::from(thumb_ok);
-        if let Some(started) = thumbnail_started {
-            stats.thumbnail_elapsed += started.elapsed();
+        if let Some(elapsed) = thumbnail_elapsed {
+            stats.thumbnail_elapsed += elapsed;
         }
     }
 
@@ -3228,13 +3229,13 @@ async fn process_thumbnail_task(
         return Ok(true);
     }
 
-    let embedding_started = phase_stats.as_ref().map(|_| Instant::now());
     // --- Search-index phase: separate permit; does not block thumbnail workers ---
     let _embedding_permit = budget
         .embedding
         .acquire()
         .await
         .map_err(|e| format!("Failed to acquire embedding permit: {}", e))?;
+    let embedding_started = phase_stats.as_ref().map(|_| Instant::now());
 
     let app_handle_for_embedding = app_handle.clone();
     let file_id = task.file_id;

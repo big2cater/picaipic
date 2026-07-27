@@ -84,11 +84,19 @@ Set PICAIPIC_SCAN_PHASE_PROFILE=1 before starting PicAiPic, then run a normal al
 - traversal_seconds: traversal wall time while indexing and scheduling background work.
 - index_seconds: cumulative synchronous index_single_file time, including folder/file DB work and AFile::new.
 - drain_seconds: wall time spent waiting for thumbnail/embedding tasks after traversal ends.
-- thumbnail_task_seconds / embedding_task_seconds: cumulative task latency, including semaphore waits; these can exceed wall time because tasks overlap.
+- thumbnail_task_seconds / embedding_task_seconds: cumulative active service time after acquiring the phase semaphore; thumbnail work can exceed wall time because workers overlap, while the current single-permit embedding total should stay close to its occupied wall time.
 - finalize_seconds: stale-row cleanup, Live/Motion pairing, recount, progress finalization, and cover selection.
 - total_seconds: end-to-end worker wall time.
 
 Use the attempt/success counters beside each cumulative phase to identify failures and normalize averages. Keep the same thumbnail size and AI settings when comparing cold and warm runs.
+
+The first 100k production run on 2026-07-27 used AI search indexing and completed with no index, thumbnail, or embedding failures:
+
+| Files | Traversal | Index cumulative | Drain tail | Total | End-to-end throughput |
+|---:|---:|---:|---:|---:|---:|
+| 100,000 | 3,233.415s | 3,111.840s | 6,313.095s | 9,548.281s | 10.47 files/sec |
+
+The run showed a serial embedding bottleneck: traversal/indexing finished after about 54 minutes, then the worker spent another 105 minutes draining queued search-index work. Its historical `embedding_task_seconds=336550966.103` and `thumbnail_task_seconds=12544.523` included semaphore queue waits because the timers started before permit acquisition; do not use those two values. Later builds time active service only. Successful per-file embedding source logs are disabled by default; set `PICAIPIC_EMBED_FILE_TRACE=1` only for targeted diagnosis.
 
 ## Decision Rules
 
