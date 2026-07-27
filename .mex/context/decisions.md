@@ -327,3 +327,4 @@ last_updated: 2026-07-26
 - The next increment isolates `read_image_exif` without changing the header-first/full-JPEG fallback policy; field mapping, RAW overlay, Live Photo detection, and geocoding remain in `AFile::new`.
 - A minimal little-endian TIFF/EXIF byte fixture is sufficient to lock orientation behavior without committing media assets; orientation remains EXIF-first, binary-fallback, default-1.
 - Extend the byte fixture with IFD0 strings and an ExifIFD pointer before extracting camera/date identity. `taken_date` remains `DateTimeOriginal` parsed to local metadata time, then filesystem modified time as fallback.
+- Keep UserComment decoding in the extracted description helper with the existing charset-aware `t_ai_prompt` routine first and generic EXIF string fallback second.

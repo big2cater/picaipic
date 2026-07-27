@@ -924,6 +924,13 @@ struct ExifIdentity {
     software: Option<String>,
 }
 
+struct ExifDescription {
+    artist: Option<String>,
+    copyright: Option<String>,
+    description: Option<String>,
+    user_comment: Option<String>,
+}
+
 impl AFile {
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
@@ -1067,14 +1074,11 @@ impl AFile {
             e_model = identity.model;
             e_date_time = identity.date_time;
             e_software = identity.software;
-            e_artist = Self::get_exif_field(&exif, Tag::Artist);
-            e_copyright = Self::get_exif_field(&exif, Tag::Copyright);
-            e_description = Self::get_exif_field(&exif, Tag::ImageDescription);
-            // Prefer raw UserComment decode (charset header) over display_value stripping.
-            exif_user_comment = exif
-                .as_ref()
-                .and_then(crate::t_ai_prompt::extract_user_comment_from_exif)
-                .or_else(|| Self::get_exif_field(&exif, Tag::UserComment));
+            let description = Self::extract_exif_description(&exif);
+            e_artist = description.artist;
+            e_copyright = description.copyright;
+            e_description = description.description;
+            exif_user_comment = description.user_comment;
             e_lens_make = Self::get_exif_field(&exif, Tag::LensMake);
             e_lens_model = Self::get_exif_field(&exif, Tag::LensModel);
             e_exposure_bias = Self::get_exif_field(&exif, Tag::ExposureBiasValue);
@@ -1473,6 +1477,19 @@ impl AFile {
             model: Self::get_exif_field(exif, Tag::Model),
             date_time,
             software: Self::get_exif_field(exif, Tag::Software),
+        }
+    }
+
+    fn extract_exif_description(exif: &Option<exif::Exif>) -> ExifDescription {
+        ExifDescription {
+            artist: Self::get_exif_field(exif, Tag::Artist),
+            copyright: Self::get_exif_field(exif, Tag::Copyright),
+            description: Self::get_exif_field(exif, Tag::ImageDescription),
+            // Prefer raw UserComment decode (charset header) over display_value stripping.
+            user_comment: exif
+                .as_ref()
+                .and_then(crate::t_ai_prompt::extract_user_comment_from_exif)
+                .or_else(|| Self::get_exif_field(exif, Tag::UserComment)),
         }
     }
 
@@ -4805,20 +4822,31 @@ mod crud_tests {
         let make = b"Canon\0";
         let model = b"EOS R\0";
         let software = b"PicAiPic\0";
+        let artist = b"Alice\0";
+        let copyright = b"2026 Co\0";
+        let description = b"Sunset\0";
         let date = b"2026:07:27 13:45:00\0";
-        let make_offset = 62u32;
+        let user_comment = b"ASCII\0\0\0prompt text\0";
+        let make_offset = 98u32;
         let model_offset = make_offset + make.len() as u32;
         let software_offset = model_offset + model.len() as u32;
-        let exif_offset = 84u32;
-        let date_offset = exif_offset + 18;
+        let artist_offset = software_offset + software.len() as u32;
+        let copyright_offset = artist_offset + artist.len() as u32;
+        let description_offset = copyright_offset + copyright.len() as u32;
+        let exif_offset = description_offset + description.len() as u32;
+        let date_offset = exif_offset + 30;
+        let user_comment_offset = date_offset + date.len() as u32;
         let push_u16 = |data: &mut Vec<u8>, value: u16| data.extend(value.to_le_bytes());
         let push_u32 = |data: &mut Vec<u8>, value: u32| data.extend(value.to_le_bytes());
 
-        push_u16(&mut data, 4);
+        push_u16(&mut data, 7);
         for (tag, count, offset) in [
+            (0x010e, description.len() as u32, description_offset),
             (0x010f, make.len() as u32, make_offset),
             (0x0110, model.len() as u32, model_offset),
             (0x0131, software.len() as u32, software_offset),
+            (0x013b, artist.len() as u32, artist_offset),
+            (0x8298, copyright.len() as u32, copyright_offset),
         ] {
             push_u16(&mut data, tag);
             push_u16(&mut data, 2);
@@ -4833,14 +4861,21 @@ mod crud_tests {
         data.extend(make);
         data.extend(model);
         data.extend(software);
-        data.push(0);
-        push_u16(&mut data, 1);
+        data.extend(artist);
+        data.extend(copyright);
+        data.extend(description);
+        push_u16(&mut data, 2);
         push_u16(&mut data, 0x9003);
         push_u16(&mut data, 2);
         push_u32(&mut data, date.len() as u32);
         push_u32(&mut data, date_offset);
+        push_u16(&mut data, 0x9286);
+        push_u16(&mut data, 7);
+        push_u32(&mut data, user_comment.len() as u32);
+        push_u32(&mut data, user_comment_offset);
         push_u32(&mut data, 0);
         data.extend(date);
+        data.extend(user_comment);
         data
     }
 
@@ -4867,6 +4902,18 @@ mod crud_tests {
 
         let fallback = AFile::extract_exif_identity(&None, Some(7));
         assert_eq!(fallback.taken_date, Some(7));
+    }
+
+    #[test]
+    fn exif_fixture_drives_description_extraction() {
+        let fixture = identity_tiff_fixture();
+        let exif = AFile::read_image_exif("missing.jpg", 1, Some(&fixture))
+            .expect("description TIFF EXIF should parse");
+        let description = AFile::extract_exif_description(&Some(exif));
+        assert_eq!(description.artist.as_deref(), Some("Alice"));
+        assert_eq!(description.copyright.as_deref(), Some("2026 Co"));
+        assert_eq!(description.description.as_deref(), Some("Sunset"));
+        assert_eq!(description.user_comment.as_deref(), Some("prompt text"));
     }
 
     #[test]
