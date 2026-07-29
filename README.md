@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/public/icon.png" alt="PicAiPic Logo" width="120" style="border-radius: 20px">
   <h1>PicAiPic - Private Local Photo Manager</h1>
-  <h3>Open-source desktop photo manager for Windows and Linux.</h3>
+  <h3>Local-first desktop photo manager for Windows and Linux.</h3>
   <p>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/v/release/big2cater/picaipic" alt="GitHub release"></a>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/downloads/big2cater/picaipic/total" alt="GitHub all releases"></a>
@@ -12,8 +12,8 @@
 
 English | [简体中文](i18n/README.zh-CN.md)
 
-PicAiPic is an open-source, local-first photo manager for browsing family albums, finding old photos quickly, and managing large personal media libraries offline.
-It is a privacy-focused alternative to cloud photo services: no forced upload, local AI search, folder-first workflow, and free to use.
+PicAiPic is a local-first photo manager for browsing family albums, finding old photos quickly, and managing large personal media libraries offline.
+It works directly with your existing folders and keeps indexing, thumbnails, metadata, semantic search, face processing, and editing on your own computer. No cloud account or media upload is required.
 
 - Website: [https://big2cater.github.io/picaipic/](https://big2cater.github.io/picaipic/)
 - Demo: [https://youtu.be/RbKqNKhbVUs](https://youtu.be/RbKqNKhbVUs)
@@ -31,30 +31,53 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 ## Screenshots
 
 <p align="center">
-  <img src="docs/public/screenshots/lap-home-0.1.10_1.png" alt="PicAiPic local photo library manager screenshot" width="900">
-  </p>
-
-  <p align="center">
-  <img src="docs/public/screenshots/lap-home-0.1.10_2.png" alt="PicAiPic local AI photo search screenshot" width="900">
+  <img src="docs/public/screenshots/picaipic-v1.1-smart-tags.png" alt="PicAiPic v1.1 smart tags and large photo grid" width="1100">
 </p>
+
+<p align="center"><em>Smart Tags view with RAW/JPEG metadata badges, virtualized browsing, and the Black hole theme.</em></p>
 
 ## Why PicAiPic
 
 - **Local-first by design**: your photos stay on your own disk, with no required cloud account or upload.
 - **No library lock-in**: work directly with your existing folders instead of importing everything into a closed database.
-- **Private AI tools**: search, similarity, smart tags, and face features run locally on your machine.
-- **Built for large collections**: optimized for smooth browsing and organization across libraries with 100k+ files.
-- **Open source and free**: no subscription, no forced ecosystem, and code you can inspect.
+- **Private AI tools**: semantic search, similarity, smart tags, embeddings, and face features run locally on your machine.
+- **Built for large collections**: virtualized browsing, cached repeat scans, batched local inference, and exact vector search are designed for 10k-100k+ file libraries.
+- **No subscription or forced ecosystem**: the application and its local data remain under your control.
 
 ## Features
 
-- **Fast library browsing** with timeline, folder, location, camera, lens, tag, favorite, rating, and face filters.
-- **Local AI search** for text prompts, visual similarity, smart tags, face clustering, and optional multilingual search in 50+ languages.
-- **Folder-first workflow** with multiple libraries, drag-and-drop import, copy-paste import, filesystem sync, and safe move/copy/delete operations.
-- **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview, export/convert, optional confirmed JPEG keyframe replace, and album metadata repair without a full re-scan. See [Live Photo guide](docs/guide/live-photo.md).
-- **Cleanup tools** to find duplicates and batch move unwanted files to trash.
-- **Built-in editing** for crop, rotate, flip, resize, and basic image adjustments.
-- **Broad format support** for 60+ photo, RAW, and video formats.
+### Browse and Organize
+
+- **Fast virtualized photo grid** with configurable thumbnail size, metadata badges, date grouping, selection, sorting, and smooth scrollbar jumps.
+- **Multiple folder-based libraries** with incremental scanning, thumbnail/embedding reuse, drag-and-drop import, copy-paste import, and filesystem synchronization.
+- **Library views** for timeline, calendar, folders, location/map, camera, lens, tags, favorites, ratings, people, and file types.
+- **Smart Tags** for people, pets, scenery, architecture, plants, and other locally searchable visual groups.
+- **Smart Albums** with composable rules, all/any matching, dates, size, people, camera/lens, sorting, and saved dynamic results.
+- **Collections** for manually grouping files without moving the originals.
+- **Duplicate cleanup** with exact hashing and visual similarity modes, plus guarded trash/permanent-delete workflows.
+
+### Local AI and Plugins
+
+- **On-device semantic search** with English/Chinese text search, visual similarity, smart tags, and 512-dimensional local image embeddings.
+- **Face detection and clustering** with local ONNX models and large-set nearest-neighbor support.
+- **Independent AI plugins** with signed packages, publisher trust, explicit permissions, bearer-token loopback authentication, runtime profiles, model bindings, input staging, progress/cancellation, and controlled output adoption.
+- **Lifecycle-aware plugin actions**: contributed tools such as SA-LUT appear only while their managed runtime is reachable.
+
+### Edit and Create
+
+- **Image editor** with crop presets, rotate, flip, resize, exposure/color adjustments, and non-destructive save-as workflows.
+- **Collage maker** with equal, magazine, strip, and free-canvas layouts.
+- **Batch processing** for crop/resize/borders, expansion, watermarks, text, and optional EXIF capture-time stamps.
+- **Photo styles and LUTs** with a local `.cube` library, manual controls, recipes, and batch application.
+- **Traditional color match** for matching the global Lab color character of a reference image and exporting a reusable style LUT.
+- **Photo frames and print layouts** with EXIF information bars, float/sink blur layouts, optional logos, DPI-aware output, and system printing.
+
+### Media and Experience
+
+- **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview, export/convert, confirmed JPEG keyframe replacement, and album metadata repair. See the [Live Photo guide](docs/guide/live-photo.md).
+- **Broad media support** for 60+ image, RAW, and video formats through LibRaw, libheif, libjpeg-turbo, jxl-oxide, FFmpeg, and Rust image codecs.
+- **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects.
+- **Windows and Linux releases only**, with x64/ARM64 Windows packages and x86_64/ARM64 Linux packages.
 
 ## Uninstall PicAiPic
 

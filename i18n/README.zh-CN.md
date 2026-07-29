@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="PicAiPic Logo" width="120" style="border-radius: 20px">
   <h1>PicAiPic - 私人本地照片管理器</h1>
-  <h3>适用于 Windows 和 Linux 的开源桌面照片管理工具。</h3>
+  <h3>适用于 Windows 和 Linux 的本地优先桌面照片管理工具。</h3>
   <p>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/v/release/big2cater/picaipic" alt="GitHub release"></a>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/downloads/big2cater/picaipic/total" alt="GitHub all releases"></a>
@@ -11,8 +11,8 @@
 
 [English](../README.md) | 简体中文
 
-PicAiPic 是一款开源、本地优先的照片管理器，旨在帮助您轻松浏览家庭相册、快速找回旧照片，并离线管理庞大的个人多媒体库。
-它是云端照片服务的隐私替代方案：无强制上传、内置本地 AI 搜索、以文件夹为中心的工作流，且完全免费使用。
+PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览家庭相册、快速找回旧照片，并离线管理庞大的个人多媒体库。
+它直接使用现有文件夹，索引、缩略图、元数据、语义搜索、人脸处理与编辑均在本机完成，不要求云账号或上传媒体。
 
 - 官方网站: [https://big2cater.github.io/picaipic/](https://big2cater.github.io/picaipic/)
 - 演示视频: [https://youtu.be/RbKqNKhbVUs](https://youtu.be/RbKqNKhbVUs)
@@ -30,30 +30,50 @@ PicAiPic 是一款开源、本地优先的照片管理器，旨在帮助您轻�
 ## 界面预览
 
 <p align="center">
-  <img src="../docs/public/screenshots/lap-home-0.1.10_1.png" alt="PicAiPic 本地照片管理界面" width="900">
+  <img src="../docs/public/screenshots/picaipic-v1.1-smart-tags.png" alt="PicAiPic v1.1 智能标签与大图库界面" width="1100">
 </p>
 
-<p align="center">
-  <img src="../docs/public/screenshots/lap-home-0.1.10_2.png" alt="PicAiPic 本地 AI 搜索界面" width="900">
-</p>
+<p align="center"><em>智能标签视图：RAW/JPEG 参数徽标、虚拟化浏览与黑洞主题。</em></p>
 
 ## 为什么选择 PicAiPic
 
 - **本地优先设计**：照片保存在您自己的硬盘上，无需云账号或强制上传。
 - **不锁定媒体库**：直接使用现有文件夹，而不是把所有内容导入封闭数据库。
-- **私有 AI 工具**：搜索、相似图片、智能标签和人脸功能都在本机运行。
-- **面向大图库构建**：针对 100k+ 文件的媒体库进行流畅浏览和整理优化。
-- **开源且免费**：无订阅、无强制生态绑定，代码可自行审查。
+- **私有 AI 工具**：语义搜索、相似图片、智能标签、embedding 和人脸功能都在本机运行。
+- **面向大图库构建**：虚拟化浏览、暖重扫缓存、批量本地推理与精确向量搜索面向 10k-100k+ 文件图库。
+- **无订阅或强制生态**：应用与本地数据始终由用户掌控。
 
 ## 功能特性
 
-- **快速图库浏览**：支持时间线、文件夹、地点、相机、镜头、标签、收藏、评分和人脸筛选。
-- **本地 AI 搜索**：支持文本搜索、视觉相似搜索、智能标签、人脸聚类，以及可选的 50+ 语言多语言搜索。
-- **文件夹优先工作流**：支持多个媒体库、拖放导入、复制粘贴导入、文件系统同步，以及安全的移动/复制/删除操作。
-- **Live Photo / 动态照片**：支持 Apple 图+视频配对、Google Motion Photo 内嵌视频、HEIC 容器内视频；长按预览、导出/转换、可选二次确认后的 JPEG 关键帧覆盖，以及相册级元数据修复（无需全量重扫）。说明见 [Live Photo 指南](../docs/guide/live-photo.md)。
-- **清理工具**：查找重复文件，并批量移动不需要的文件到废纸篓。
-- **内置编辑**：支持裁剪、旋转、翻转、缩放和基础图像调整。
-- **广泛格式支持**：支持 60+ 种照片、RAW 和视频格式。
+### 浏览与整理
+
+- **流畅虚拟化网格**：缩略图尺寸、拍摄参数徽标、日期分组、多选、排序与滚动条快速跳转。
+- **多文件夹图库**：增量扫描、缩略图/embedding 复用、拖放与粘贴导入、文件系统同步。
+- **丰富视图**：时间线、日历、文件夹、地点/地图、相机、镜头、标签、收藏、评分、人物与文件类型。
+- **智能标签**：人物、宠物、风景、建筑、植物等本地视觉分类。
+- **智能相册**：all/any 组合规则、日期、尺寸、人物、相机/镜头与排序。
+- **集合与去重**：不移动原文件的手动集合，以及精确哈希/视觉相似去重。
+
+### 本地 AI 与插件
+
+- **本机语义搜索**：中英文文本搜索、找相似图、智能标签与 512 维本地图像向量。
+- **人脸检测与聚类**：本地 ONNX 模型与大规模近邻支持。
+- **独立 AI 插件**：签名包、发布者信任、权限、bearer token、运行时/模型绑定、输入 staging、进度取消与受控结果导入。
+- **生命周期联动**：SA-LUT 等插件动作只在托管运行时可达时出现。
+
+### 编辑与创作
+
+- **图片编辑器**：裁剪预设、旋转、翻转、缩放、曝光与色彩调整。
+- **拼图、批处理和冲印**：等分/杂志/长条/自由画布，批量裁剪、扩边、水印、文字与 EXIF 时间戳，DPI 输出和系统打印。
+- **照片格调与 LUT**：本地 `.cube` 库、配方、手动参数和批量应用。
+- **追色与相框**：全局 Lab 参考图追色、风格 LUT 导出、EXIF 信息条、浮动/下沉模糊布局与自定义 Logo。
+
+### 媒体体验
+
+- **Live Photo / Motion Photo**：Apple 图+视频配对、Google 内嵌 MP4、HEIC 容器视频；长按预览、导出/转换、确认后的关键帧替换与元数据修复。详见 [Live Photo 指南](../docs/guide/live-photo.md)。
+- **60+ 媒体格式**：通过 LibRaw、libheif、libjpeg-turbo、jxl-oxide、FFmpeg 与 Rust codec 支持图片、RAW 和视频。
+- **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效。
+- **仅发布 Windows 与 Linux**：Windows x64/ARM64、Linux x86_64/ARM64。
 
 ## 当前开发状态
 
