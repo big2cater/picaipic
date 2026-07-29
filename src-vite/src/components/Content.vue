@@ -4625,9 +4625,14 @@ function cycleGridStyle() {
 }
 
 // Track pending requests to avoid duplicates
-const pendingRequests = new Set();
+const pendingRequests = new Map<string, Promise<void>>();
 
-async function fetchDataRange(start: number, end: number, reverse = false) {
+async function fetchDataRange(
+  start: number,
+  end: number,
+  reverse = false,
+  viewportSeqId: number | null = null,
+) {
   const requestId = currentContentRequestId;
 
   // Clamp range
@@ -4663,11 +4668,11 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
 
     if (chunkNeedsLoad) {
       const key = `${requestId}:${chunkStart}-${chunkSize}`;
-      if (pendingRequests.has(key)) {
+      const existingRequest = pendingRequests.get(key);
+      if (existingRequest) {
+        chunkPromises.push(existingRequest);
         continue;
       }
-      
-      pendingRequests.add(key);
       
       const promise = (
         currentQuerySource.value === 'collection' && currentCollectionId.value
@@ -4736,7 +4741,7 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
             // Fetch thumbnails for these files; await so the phase completes only when images are ready
             if (filesToFetch.length > 0) {
               if (reverse) filesToFetch.reverse();
-              await getFileListThumb(filesToFetch);
+              await getFileListThumb(filesToFetch, 0, 4, false, viewportSeqId);
             }
           }
         })
@@ -4744,9 +4749,12 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
             console.error(`Error fetching chunk ${key}:`, err);
         })
         .finally(() => {
-          pendingRequests.delete(key);
+          if (pendingRequests.get(key) === promise) {
+            pendingRequests.delete(key);
+          }
         });
 
+      pendingRequests.set(key, promise);
       chunkPromises.push(promise);
     } else {
         // console.log(`Chunk already loaded or invalid: ${chunkStart}`);
@@ -4866,28 +4874,28 @@ function handleVisibleRangeUpdate({ startIndex, endIndex }: { startIndex: number
   const seqId = ++visibleRangeSeqId;
 
   // Phase 1: viewport rows first (placeholders → real + thumbs)
-  fetchDataRange(startIndex, endIndex + 1).then(() => {
+  fetchDataRange(startIndex, endIndex + 1, false, seqId).then(() => {
     if (seqId !== visibleRangeSeqId) return;
     // Semantic/similar search hydrates full rows up front — still need thumbs
     // for the visible window without bulk-thumbing the entire hit list.
-    fetchMissingVisibleThumbnails(startIndex, endIndex + 1);
+    fetchMissingVisibleThumbnails(startIndex, endIndex + 1, seqId);
 
     // Phase 2: below viewport (most likely scroll direction)
-    fetchDataRange(endIndex + 1, endIndex + 1 + buffer).then(() => {
+    fetchDataRange(endIndex + 1, endIndex + 1 + buffer, false, seqId).then(() => {
       if (seqId !== visibleRangeSeqId) return;
-      fetchMissingVisibleThumbnails(endIndex + 1, endIndex + 1 + buffer);
+      fetchMissingVisibleThumbnails(endIndex + 1, endIndex + 1 + buffer, seqId);
 
       // Phase 3: above viewport (least likely, reverse: load closest to viewport first)
-      fetchDataRange(Math.max(0, startIndex - buffer), startIndex, true).then(() => {
+      fetchDataRange(Math.max(0, startIndex - buffer), startIndex, true, seqId).then(() => {
         if (seqId !== visibleRangeSeqId) return;
-        fetchMissingVisibleThumbnails(Math.max(0, startIndex - buffer), startIndex);
+        fetchMissingVisibleThumbnails(Math.max(0, startIndex - buffer), startIndex, seqId);
       });
     });
   });
 }
 
 /** Warm thumbs for already-hydrated real rows missing `thumbnail` (search/similar). */
-function fetchMissingVisibleThumbnails(start: number, end: number) {
+function fetchMissingVisibleThumbnails(start: number, end: number, viewportSeqId: number | null = null) {
   const lo = Math.max(0, start);
   const hi = Math.min(fileList.value.length, end);
   if (lo >= hi) return;
@@ -4899,7 +4907,7 @@ function fetchMissingVisibleThumbnails(start: number, end: number) {
     }
   }
   if (pending.length > 0) {
-    getFileListThumb(pending);
+    getFileListThumb(pending, 0, 4, false, viewportSeqId);
   }
 }
 
@@ -7625,6 +7633,7 @@ const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // Track current thumbnail request to enable cancellation when switching folders
 let currentThumbRequestId = 0;
+const pendingThumbnailKeys = new Set<string>();
 
 function preserveLoadedThumbnails(files: any[]) {
   const thumbnailsById = new Map<number, string>();
@@ -7647,11 +7656,19 @@ function preserveLoadedThumbnails(files: any[]) {
 
 // Get the thumbnail for the files (non-blocking, runs in background)
 // Automatically cancels when a new request starts (e.g., switching folders)
-async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, bustCache = false) {
+async function getFileListThumb(
+  files: any[],
+  offset = 0,
+  concurrencyLimit = 4,
+  bustCache = false,
+  viewportSeqId: number | null = null,
+) {
   // Use current request ID to check for cancellation
   const requestId = currentThumbRequestId;
   const thumbnailSize = config.settings.thumbnailSize;
   const batchSize = Math.max(1, concurrencyLimit);
+  const isCurrentRequest = () => requestId === currentThumbRequestId
+    && (viewportSeqId == null || viewportSeqId === visibleRangeSeqId);
 
   const applyThumbToFile = (file: any, thumb: any) => {
     if (!thumb) return;
@@ -7665,10 +7682,11 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
   };
 
   const processBatch = async (startIndex: number) => {
-    if (requestId !== currentThumbRequestId) return;
+    if (!isCurrentRequest()) return;
 
     const endIndex = Math.min(startIndex + batchSize, files.length);
     const batchFiles: any[] = [];
+    const batchKeys: string[] = [];
 
     for (let i = startIndex; i < endIndex; i++) {
       const file = files[i];
@@ -7681,7 +7699,11 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
         continue;
       }
 
+      const pendingKey = `${requestId}:${viewportSeqId ?? 'global'}:${file.id}`;
+      if (pendingThumbnailKeys.has(pendingKey)) continue;
+      pendingThumbnailKeys.add(pendingKey);
       batchFiles.push(file);
+      batchKeys.push(pendingKey);
     }
 
     if (batchFiles.length === 0) return;
@@ -7697,13 +7719,17 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
     try {
       const thumbs = await getFileThumbs(requests, thumbnailSize, false);
 
-      if (requestId !== currentThumbRequestId) return;
+      if (!isCurrentRequest()) return;
 
       for (let j = 0; j < batchFiles.length; j++) {
         applyThumbToFile(batchFiles[j], Array.isArray(thumbs) ? thumbs[j] : null);
       }
     } catch (error) {
       console.error('Error fetching thumbnails:', error);
+    } finally {
+      for (const key of batchKeys) {
+        pendingThumbnailKeys.delete(key);
+      }
     }
   };
 
@@ -7712,7 +7738,7 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
     let activeRequests = 0;
 
     for (let i = offset; i < files.length; i += batchSize) {
-      if (requestId !== currentThumbRequestId) {
+      if (!isCurrentRequest()) {
         return;
       }
 
@@ -7741,7 +7767,7 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
     }
 
     // Wait for remaining batches (only if not cancelled)
-    if (requestId === currentThumbRequestId && queue.length > 0) {
+    if (isCurrentRequest() && queue.length > 0) {
       await Promise.all(queue);
     }
   };

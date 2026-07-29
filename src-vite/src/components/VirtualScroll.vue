@@ -9,7 +9,7 @@
       <div 
         v-for="poolItem in visibleItems" 
         :key="getItemKey(poolItem)"
-        class="absolute"
+        class="virtual-item absolute"
         :class="{ 'transition-all duration-500 ease-in-out': transition }"
         :style="getItemStyle(poolItem)"
       >
@@ -173,10 +173,11 @@ function getItemStyle(poolItem: { item: any, index: number }): CSSProperties {
     const box = props.geometry[index];
     return {
       position: 'absolute',
-      top: `${box.y}px`,
-      left: `${box.x}px`,
+      top: '0',
+      left: '0',
       width: `${box.width}px`,
       height: `${box.height}px`,
+      transform: `translate3d(${box.x}px, ${box.y}px, 0)`,
     };
   }
 
@@ -196,10 +197,11 @@ function getItemStyle(poolItem: { item: any, index: number }): CSSProperties {
     
     return {
       position: 'absolute',
-      top: `${top}px`,
-      left: `${left}px`,
+      top: '0',
+      left: '0',
       width: props.itemSecondarySize ? `${props.itemSecondarySize}px` : undefined,
       height: `${props.itemSize}px`,
+      transform: `translate3d(${left}px, ${top}px, 0)`,
     };
   } else {
     // Horizontal
@@ -210,10 +212,11 @@ function getItemStyle(poolItem: { item: any, index: number }): CSSProperties {
     
     return {
       position: 'absolute',
-      left: `${left}px`,
-      top: `${top}px`,
+      left: '0',
+      top: '0',
       height: '100%',
       width: `${props.itemSize}px`,
+      transform: `translate3d(${left}px, ${top}px, 0)`,
     };
   }
 }
@@ -409,5 +412,9 @@ defineExpose({
   position: relative;
   /* Hide scrollbar if requested by class in parent, but component itself needs auto */
   /* .no-scrollbar usually handles hiding webkit-scrollbar */
+}
+
+.virtual-item {
+  contain: layout paint style;
 }
 </style>

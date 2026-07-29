@@ -1,5 +1,21 @@
 import { defineStore } from 'pinia';
+import { emit, listen } from '@tauri-apps/api/event';
 import { getAiPluginStatus, listAiPlugins } from '@/common/api';
+
+let pluginStatusListenerPromise = null;
+
+function ensurePluginStatusListener(store) {
+  if (pluginStatusListenerPromise) return;
+  pluginStatusListenerPromise = listen('ai-plugin-status-changed', (event) => {
+    const payload = event?.payload || {};
+    if (payload.pluginId && payload.status) {
+      store.setStatus(payload.pluginId, payload.status);
+    }
+  }).catch((error) => {
+    pluginStatusListenerPromise = null;
+    console.error('Failed to listen for plugin status changes:', error);
+  });
+}
 
 export const usePluginStore = defineStore('pluginStore', {
   state: () => ({
@@ -23,6 +39,7 @@ export const usePluginStore = defineStore('pluginStore', {
 
   actions: {
     async loadPlugins(force = false) {
+      ensurePluginStatusListener(this);
       if (this.loading) return this.plugins;
       if (this.loaded && !force) return this.plugins;
 
@@ -55,12 +72,17 @@ export const usePluginStore = defineStore('pluginStore', {
       return this.plugins;
     },
 
-    setStatus(pluginId, status) {
+    setStatus(pluginId, status, broadcast = false) {
       if (!pluginId) return;
       this.statuses = {
         ...this.statuses,
         [pluginId]: status,
       };
+      if (broadcast) {
+        void emit('ai-plugin-status-changed', { pluginId, status }).catch((error) => {
+          console.error('Failed to broadcast plugin status change:', error);
+        });
+      }
     },
 
     removePlugin(pluginId) {
@@ -72,7 +94,9 @@ export const usePluginStore = defineStore('pluginStore', {
     },
 
     getMenuItems(context, placement) {
+      const runningPluginIds = this.runningPluginIds;
       return this.validPlugins
+        .filter((plugin) => runningPluginIds.has(plugin.id))
         .flatMap((plugin) => {
           const menus = plugin?.contributes?.menus || [];
           return menus

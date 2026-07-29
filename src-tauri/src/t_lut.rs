@@ -143,7 +143,10 @@ fn sanitize_stem(name: &str) -> String {
 }
 
 /// Import a .cube file into the app LUT library. Returns the new entry.
-pub fn import_lut_file(source_path: &str, display_name: Option<String>) -> Result<LutLibraryEntry, String> {
+pub fn import_lut_file(
+    source_path: &str,
+    display_name: Option<String>,
+) -> Result<LutLibraryEntry, String> {
     let src = Path::new(source_path);
     if !src.is_file() {
         return Err("LUT source file not found".to_string());
@@ -152,10 +155,7 @@ pub fn import_lut_file(source_path: &str, display_name: Option<String>) -> Resul
     let cube = parse_cube_file(src)?;
     let _ = cube;
 
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("lut");
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("lut");
     let name = display_name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -166,7 +166,11 @@ pub fn import_lut_file(source_path: &str, display_name: Option<String>) -> Resul
         now_secs(),
         &uuid::Uuid::new_v4().to_string()[..8]
     );
-    let file_name = format!("{}_{}.cube", sanitize_stem(&name), &id[id.len().saturating_sub(8)..]);
+    let file_name = format!(
+        "{}_{}.cube",
+        sanitize_stem(&name),
+        &id[id.len().saturating_sub(8)..]
+    );
     let dest = lut_library_dir()?.join(&file_name);
     std::fs::copy(src, &dest).map_err(|e| format!("copy lut: {}", e))?;
 
@@ -321,7 +325,10 @@ fn extract_title(line: &str) -> String {
             }
         }
     }
-    line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")
+    line.split_whitespace()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn parse_triple(s: &str) -> Option<[f32; 3]> {
@@ -437,9 +444,19 @@ pub fn apply_photo_style(img: DynamicImage, style: &PhotoStyleParams) -> Dynamic
 
     // 2) LUT
     if style.lut_intensity > 0.0 {
-        let lut_path = if let Some(path) = style.lut_path.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let lut_path = if let Some(path) = style
+            .lut_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             Some(PathBuf::from(path))
-        } else if let Some(id) = style.lut_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        } else if let Some(id) = style
+            .lut_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             resolve_lut_path(id).ok()
         } else {
             None

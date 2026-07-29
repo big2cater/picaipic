@@ -85,7 +85,9 @@ pub fn start_scan(
     let is_scanning_clone = dedup_state.is_scanning.clone();
     let cancel_flag_clone = dedup_state.cancel_flag.clone();
     let similar = matches!(
-        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        mode.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("similar")
     );
 
@@ -173,7 +175,10 @@ fn scan_and_hash_files(
         status.total = total_files;
         status.processed = 0;
     }
-    let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+    let _ = app_handle.emit(
+        "dedup-scan-progress",
+        t_common::lock_mutex(&status_mutex).clone(),
+    );
 
     // Step 3: Hash them
     let mut processed = 0;
@@ -219,7 +224,10 @@ fn scan_and_hash_files(
                 let mut status = t_common::lock_mutex(&status_mutex);
                 status.processed = processed;
             }
-            let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+            let _ = app_handle.emit(
+                "dedup-scan-progress",
+                t_common::lock_mutex(&status_mutex).clone(),
+            );
         }
     }
 
@@ -241,7 +249,10 @@ fn scan_and_hash_files(
             status.processed = processed;
             status.groups = groups_count as u64;
         }
-        let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+        let _ = app_handle.emit(
+            "dedup-scan-progress",
+            t_common::lock_mutex(&status_mutex).clone(),
+        );
     }
 
     Ok(())
@@ -564,7 +575,10 @@ fn scan_and_phash_files(
         status.total = total_files;
         status.processed = 0;
     }
-    let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+    let _ = app_handle.emit(
+        "dedup-scan-progress",
+        t_common::lock_mutex(&status_mutex).clone(),
+    );
 
     let mut processed = 0u64;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -595,7 +609,10 @@ fn scan_and_phash_files(
                 let mut status = t_common::lock_mutex(&status_mutex);
                 status.processed = processed;
             }
-            let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+            let _ = app_handle.emit(
+                "dedup-scan-progress",
+                t_common::lock_mutex(&status_mutex).clone(),
+            );
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -603,18 +620,19 @@ fn scan_and_phash_files(
     if !cancel_flag.load(Ordering::SeqCst) {
         rebuild_similar_groups(&mut conn, scoped_file_ids.as_deref())?;
         let groups_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM similar_duplicate_groups",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM similar_duplicate_groups", [], |row| {
+                row.get(0)
+            })
             .unwrap_or(0);
         {
             let mut status = t_common::lock_mutex(&status_mutex);
             status.processed = processed;
             status.groups = groups_count as u64;
         }
-        let _ = app_handle.emit("dedup-scan-progress", t_common::lock_mutex(&status_mutex).clone());
+        let _ = app_handle.emit(
+            "dedup-scan-progress",
+            t_common::lock_mutex(&status_mutex).clone(),
+        );
     }
     Ok(())
 }
@@ -756,11 +774,7 @@ fn rebuild_similar_groups(
 
         // Representative hash string + max size for reclaimable estimate
         let rep_hash = format!("{:016x}", rows[members[0]].1);
-        let max_size = members
-            .iter()
-            .map(|&i| rows[i].2)
-            .max()
-            .unwrap_or(0);
+        let max_size = members.iter().map(|&i| rows[i].2).max().unwrap_or(0);
         let count = members.len() as i64;
         let total_size = members.iter().map(|&i| rows[i].2).sum::<i64>();
 
@@ -1254,9 +1268,7 @@ fn set_keep_in(
 
     let changed = tx
         .execute(
-            &format!(
-                "UPDATE {items_table} SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2"
-            ),
+            &format!("UPDATE {items_table} SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2"),
             params![group_id, file_id],
         )
         .map_err(|e| e.to_string())?;
@@ -1421,10 +1433,7 @@ pub fn delete_selected(
                 ),
                 [],
             ) {
-                failures.push(format!(
-                    "Failed to clean up empty {groups_table}: {}",
-                    e
-                ));
+                failures.push(format!("Failed to clean up empty {groups_table}: {}", e));
             }
             // Also drop groups that no longer have 2+ members.
             let _ = conn.execute(
@@ -1489,6 +1498,10 @@ mod dhash_tests {
         let a = compute_dhash_u64_from_gray(&a_img);
         let b = compute_dhash_u64_from_gray(&b_img);
         // Flat image → all gradients 0; checkerboard → many 1 bits.
-        assert!(hamming64(a, b) > super::DHASH_HAMMING_THRESHOLD, "dist={}", hamming64(a, b));
+        assert!(
+            hamming64(a, b) > super::DHASH_HAMMING_THRESHOLD,
+            "dist={}",
+            hamming64(a, b)
+        );
     }
 }

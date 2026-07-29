@@ -431,9 +431,7 @@ where
             Ok(lists) => Ok((lists, "ann")),
             Err(e) if e.starts_with("cancelled") => Err(e),
             Err(e) => {
-                eprintln!(
-                    "[cluster] ann failed ({e}); falling back to blocked exact tiles"
-                );
+                eprintln!("[cluster] ann failed ({e}); falling back to blocked exact tiles");
                 let lists = build_knn_graph_blocked(
                     file_ids,
                     embeddings,
@@ -530,11 +528,7 @@ fn graph_edge_parity_report(
 
     GraphParityReport {
         n,
-        mean_neighbor_jaccard: if n == 0 {
-            1.0
-        } else {
-            jaccard_sum / n as f64
-        },
+        mean_neighbor_jaccard: if n == 0 { 1.0 } else { jaccard_sum / n as f64 },
         nodes_identical: nodes_equal,
         directed_edge_count_ref: ref_edges,
         directed_edge_count_other: other_edges,
@@ -854,7 +848,10 @@ where
 
     // Check for cancellation before assignment
     if is_cancelled_fn() {
-        eprintln!("[cluster] cancelled before assign total_ms={}", cluster_start.elapsed().as_millis());
+        eprintln!(
+            "[cluster] cancelled before assign total_ms={}",
+            cluster_start.elapsed().as_millis()
+        );
         return Err("cancelled".to_string());
     }
 
@@ -1049,15 +1046,8 @@ mod tests {
         };
         let file_ids = vec![1i64, 1];
         let embeddings = vec![Some(emb.clone()), Some(emb)];
-        let lists = build_knn_graph_exact(
-            &file_ids,
-            &embeddings,
-            0.5,
-            10,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let lists =
+            build_knn_graph_exact(&file_ids, &embeddings, 0.5, 10, |_| {}, || false).unwrap();
         assert!(lists[0].is_empty());
         assert!(lists[1].is_empty());
     }
@@ -1091,15 +1081,9 @@ mod tests {
             let n = clusters * per;
             let (file_ids, embeddings) = synthetic_unit_vectors(clusters, per, 512, 42);
             let t0 = Instant::now();
-            let lists = build_knn_graph_exact(
-                &file_ids,
-                &embeddings,
-                threshold,
-                k,
-                |_| {},
-                || false,
-            )
-            .expect("graph build");
+            let lists =
+                build_knn_graph_exact(&file_ids, &embeddings, threshold, k, |_| {}, || false)
+                    .expect("graph build");
             let ms = t0.elapsed().as_millis();
             let edges: usize = lists.iter().map(|c| c.len()).sum();
             eprintln!(
@@ -1134,10 +1118,7 @@ mod tests {
         lists
             .iter()
             .map(|c| {
-                let mut v: Vec<(usize, u32)> = c
-                    .iter()
-                    .map(|&(to, w)| (to, w.to_bits()))
-                    .collect();
+                let mut v: Vec<(usize, u32)> = c.iter().map(|&(to, w)| (to, w.to_bits())).collect();
                 v.sort_by_key(|&(to, bits)| (to, bits));
                 v
             })
@@ -1151,26 +1132,12 @@ mod tests {
         let threshold = 0.55f32;
         // k = n keeps every qualifying edge so equal-weight Top-K insert order cannot diverge.
         let k = n;
-        let exact = build_knn_graph_exact(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let exact =
+            build_knn_graph_exact(&file_ids, &embeddings, threshold, k, |_| {}, || false).unwrap();
         // Force multi-block path with tiny tiles.
-        let blocked = build_knn_graph_blocked(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            8,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let blocked =
+            build_knn_graph_blocked(&file_ids, &embeddings, threshold, k, 8, |_| {}, || false)
+                .unwrap();
         assert_eq!(
             neighbor_sets(&exact),
             neighbor_sets(&blocked),
@@ -1180,15 +1147,9 @@ mod tests {
         // Also with tight Top-K: edge *counts* per node should match even if rare equal-weight
         // ties could reorder which neighbor wins (strict > in insert_top_k).
         let k_tight = 15usize;
-        let exact_k = build_knn_graph_exact(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k_tight,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let exact_k =
+            build_knn_graph_exact(&file_ids, &embeddings, threshold, k_tight, |_| {}, || false)
+                .unwrap();
         let blocked_k = build_knn_graph_blocked(
             &file_ids,
             &embeddings,
@@ -1217,16 +1178,8 @@ mod tests {
         };
         let file_ids = vec![1i64, 1, 2];
         let embeddings = vec![Some(emb.clone()), Some(emb.clone()), Some(emb)];
-        let lists = build_knn_graph_blocked(
-            &file_ids,
-            &embeddings,
-            0.5,
-            10,
-            2,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let lists =
+            build_knn_graph_blocked(&file_ids, &embeddings, 0.5, 10, 2, |_| {}, || false).unwrap();
         // Indices 0 and 1 share file_id → no edge between them.
         assert!(!lists[0].iter().any(|&(to, _)| to == 1));
         assert!(!lists[1].iter().any(|&(to, _)| to == 0));
@@ -1319,15 +1272,8 @@ mod tests {
         // Force first two faces same file.
         file_ids[0] = 1;
         file_ids[1] = 1;
-        let lists = build_knn_graph_ann(
-            &file_ids,
-            &embeddings,
-            0.55,
-            20,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let lists =
+            build_knn_graph_ann(&file_ids, &embeddings, 0.55, 20, |_| {}, || false).unwrap();
         let edges: usize = lists.iter().map(|c| c.len()).sum();
         assert!(edges > 0, "ANN should find neighbors in synthetic clusters");
         assert!(!lists[0].iter().any(|&(to, _)| to == 1));
@@ -1340,24 +1286,10 @@ mod tests {
         let (file_ids, embeddings) = synthetic_unit_vectors(6, 20, 128, 17);
         let threshold = 0.5f32;
         let k = 30usize;
-        let exact = build_knn_graph_exact(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            |_| {},
-            || false,
-        )
-        .unwrap();
-        let ann = build_knn_graph_ann(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let exact =
+            build_knn_graph_exact(&file_ids, &embeddings, threshold, k, |_| {}, || false).unwrap();
+        let ann =
+            build_knn_graph_ann(&file_ids, &embeddings, threshold, k, |_| {}, || false).unwrap();
         let report = graph_edge_parity_report(&exact, &ann);
         eprintln!("[cluster-parity-ann] {}", report.summary_line());
         // Soft quality floor for in-process HNSW on tight synthetic clusters.
@@ -1378,25 +1310,11 @@ mod tests {
         let threshold = 0.5f32;
         let k = t_common::K_NEIGHBORS.min(n);
 
-        let exact = build_knn_graph_exact(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            |_| {},
-            || false,
-        )
-        .unwrap();
-        let blocked = build_knn_graph_blocked(
-            &file_ids,
-            &embeddings,
-            threshold,
-            k,
-            16,
-            |_| {},
-            || false,
-        )
-        .unwrap();
+        let exact =
+            build_knn_graph_exact(&file_ids, &embeddings, threshold, k, |_| {}, || false).unwrap();
+        let blocked =
+            build_knn_graph_blocked(&file_ids, &embeddings, threshold, k, 16, |_| {}, || false)
+                .unwrap();
         let report = graph_edge_parity_report(&exact, &blocked);
         eprintln!("[cluster-parity] {}", report.summary_line());
         // Blocked is exact-distance; Jaccard should be ~1. Equal-weight Top-K ties may

@@ -1,8 +1,8 @@
 # PicAiPic Progress
 
-Updated: 2026-07-27
+Updated: 2026-07-29
 
-## Status board (2026-07-27)
+## Status board (2026-07-28)
 
 | Track | Status |
 |-------|--------|
@@ -13,7 +13,11 @@ Updated: 2026-07-27
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 3 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
-| Large-library scan profiling | **100k worker measured** — AI on: **9,548.281s** total; traversal **3,233.415s**, drain **6,313.095s**; single-permit embedding dominates. Task timers fixed to exclude semaphore waits; per-file embed logs opt-in |
+| Large-library scan profiling | **Warm path and cold metadata phase accepted** — `D:\Desktop` warm rescan: **2.016s -> 1.068s** (-47.0%); copied 1,000-file cold import reduced metadata to **4.347s** and synchronous index to **7.197s**, with 970/970 derived-media successes. Further wall-time work belongs to embedding, not parser micro-optimization. |
+| AI prompt JPEG import I/O | **Optimized** — complete pre-read headers no longer trigger a second COM scan/open; EXIF UserComment is reused; truncated headers retain fallback; regression tests added |
+| DirectML in-process embedding | **Paused** — native `STATUS_ACCESS_VIOLATION` during provider/model probing; CPU remains the supported path |
+| Image decode robustness | **Shipped** — content-sniffing fallback handles misnamed RIFF/WebP and generic decoder fallback handles unsupported JPEG color conversions |
+| Embedding matrix startup warm | **110k validated** — `n=110343 ... ann=disabled`; repeated text searches use exact `matrix=1`, return 30 results, and schedule no background HNSW. No reimport or `embed_ann ready` wait is required |
 | Scan preview stuck at N-2 | **Fixed** — always advance `processed`; thumb/embed timeouts |
 | RAW grid thumbs | **Embedded JPEG first**, demosaic fallback (`t_libraw`) |
 | Built-in A/B/C1/C2 + print layout | Shipped |
@@ -41,7 +45,7 @@ Updated: 2026-07-27
 | Search ranking: **abs primary + thr_cap Top-K; smart tags follow slider** | **Shipped** (2026-07-24) — `change-ai-search-filters.md` |
 | Similar-from-file: **image→image floors/caps + exclude self** | **Shipped** (2026-07-24) — Low ≠ VH on Find similar |
 | Track C bilingual int8 **product default (option C)** | **Shipped** (2026-07-24) — bundled EN+CN text; no model switch |
-| Embed matrix + rayon + optional HNSW ANN | **Shipped** (2026-07-24) — `change-library-perf.md` |
+| Embed matrix + rayon + optional HNSW ANN | **Shipped; exact is product default** — HNSW requires `PICAIPIC_EMBED_ANN=1` and is diagnostic-only until persistence makes rebuild cost acceptable — `change-library-perf.md` |
 | Dedup Similar (dHash) + exact blake3 | **Shipped** (2026-07-24) — schema v9; mode-aware |
 | Image-search model Track A stop-bleed | **Shipped** |
 | Image-search model Track B0 CLIP B/16 default | **Abandoned** (2026-07-23) |
@@ -52,6 +56,93 @@ Updated: 2026-07-27
 	| Smart tags 6-bucket + default High thr + thr re-run | **Shipped** (2026-07-24) — people/pets prompts owner-tuned — `change-smart-tags.md` |
 	
 Chinese status: `docs/guide/目前的开发情况.md`. Session router: `.mex/ROUTER.md`. Patterns: `change-black-hole-theme.md`, `change-cyberpunk-theme.md`, `fix-library-scan-selection.md`.
+
+## AI scan performance plan
+
+Completed work is CPU-first: prompt-import duplicate JPEG I/O is removed, dynamic batch embedding (default 8) commits successful vectors in one transaction, preprocessing writes directly to contiguous NCHW, and the 1024px longest-edge embedding source cap remains. `PICAIPIC_AI_INTRA_THREADS=4/8` and batch 16 did not improve end-to-end time, so defaults stay at 2 threads and batch 8.
+
+Matrix-warm instrumentation is implemented. The final 110,343-row profile completed in 2.876s (SQLite 1.062s, vector/norm build 1.804s), 8.7% faster than the original 3.150s baseline; post-settle CPU was 0.00%, closing the persistent 90% CPU issue. A `COUNT(*) + try_reserve_exact` follow-up reduced allocation but regressed warm to 5.846s, so that double-scan design was removed. The accepted one-scan borrowed-BLOB + final-shrink path holds the matrix at 216.8 MiB, 40.7 MiB below baseline. Disk persistence stays deferred. Scan work now focuses on bounded decode/NCHW prefetch around the single ONNX session.
+
+Engine timing split measured the first complete baseline at 687.636s: source preparation 239.678s, NCHW preprocessing 130.617s, ONNX inference 299.305s, write 1.937s, fallback 0, with 10,150/10,150 successes. The worker now carries scan metadata directly and holds a bounded second batch for decode/NCHW prefetch outside the AI mutex. The real heterogeneous `D:\Desktop` import verified 1,255/1,255 embeddings, fallback 0, and 36 prefetched batches. Its 668.406s synchronous index time dominated the 672.863s wall clock.
+
+The homogeneous 1,000-file follow-up completed in 47.788s with 970/970 embeddings, fallback 0, 123 batches, and 80 prefetched batches (7.89 items/batch). Its 65.071s cumulative prepare + engine + write work exceeding wall time confirms overlap, but no exact speedup is claimed without a matched prefetch-off A/B. `index_single_file` opt-in profiling splits folder/fetch/stat/metadata/refresh/write/refetch/assemble/other, and `PICAIPIC_SCAN_SLOW_FILE_MS=250` limits per-file logs to slow outliers.
+
+A fresh copied 1,000-file cold import completed in 44.662s: synchronous index was 39.991s and `AFile::new` metadata 37.379s, while 40.972s of cumulative embedding engine work overlapped traversal. The next profiling revision subdivides metadata into file-info/inode, header, dimensions, EXIF, fallbacks, Motion XMP, HEIC, geocode, prompt, and assembly only when phase profiling is enabled. The next clean copied import decides the optimization; no existing album is deleted or recreated.
+
+The matching subphase import completed in 45.172s and isolated the largest metadata cost: binary EXIF fallback 17.172s, versus EXIF parse 7.998s and Motion XMP 4.731s. The fallback now scans the pre-read header once to collect all requested fields rather than repeating a full scan per tag; complete EXIF remains authoritative and Apple Live Photo/Sony orientation fallbacks remain covered. Validate it on one new copied cold sample before pursuing Motion XMP.
+
+That validation passed its primary metric: binary fallback fell to 2.372s (86.2%), index fell to 24.591s, and 970/970 thumbnail/embedding successes remained. The producer is now fast enough to expose a 16.693s drain tail, so wall time only fell to 43.387s. Motion XMP now reuses a complete pre-read JPEG header through SOS/EOI; incomplete JPEG headers and HEIC retain the old file-read path. The next copied sample verifies this I/O reduction before changing EXIF parsing or concurrency.
+
+The Motion-header sample measured 43.739s: index improved to 22.618s and Motion XMP to 3.067s, but its 18.967s drain tail became the wall-time constraint. The attempted fill-during-inference follow-up is rejected and reverted: it reached 121/122 prefetched batches but regressed to 100.724s total, 73.209s drain, and 962/970 task replies. An open tail batch waited for eight inputs and delayed replies past the 60s embedding timeout. A 0.758s warm rescan had zero derived-media tasks, confirming all vectors had nevertheless persisted. The accepted worker remains opportunistic full-batch prefetch with the normal 3ms tail coalescer.
+
+The next profile adds no behavior change: it splits each post-thumbnail embedding request into permit wait, channel-send wait, worker-reply wait, and send/reply timeout counts. One new copied cold import will decide the next safe optimization.
+
+That sample identified 10,088.257s cumulative embedding-permit wait with zero send/reply timeout, only 0.002s send time, 720.324s reply time, and 19.902s drain. The matched three-batch probe retained 970/970 and zero timeout, reduced permit wait to 5,816.884s, drain to 13.601s (-31.7%), and total to 41.239s (-11.0%). Three in-flight batches are now the default; no second ONNX session is created.
+
+The subsequent metadata series is closed. Marker-aware JPEG paths skip only
+provably empty work: permissive EXIF parsing and binary orientation fallback for
+complete no-EXIF headers, generic Motion XMP search where APP1 has no XMP
+candidate, and binary TIFF fallback for the same no-EXIF group after profiling
+confirmed zero TIFF bases. The final copied 1,000-file import reached metadata
+`4.347s` and synchronous index `7.197s` while retaining 970/970 thumbnails and
+embeddings. Its `37.443s` wall time included a separate `28.296s` drain tail, so
+the cold metadata lane is complete; future end-to-end work must isolate embedding
+preprocessing, inference, or reply latency rather than continue parser tuning.
+
+The same 1,000-file album was then warm-rescanned in `2.022s`: all rows were
+indexed, with zero thumbnail/embedding tasks. Folder lookup took `0.380s`, DB
+fetch `0.461s`, stat `0.115s`, and required write-back `0.455s`; metadata and
+refresh were zero. Existing derived media is therefore reused correctly. The
+next measurement is the existing `D:\Desktop` album's warm split.
+
+That pair of warm profiles isolated repeated sibling folder lookup as a safe
+target. The scan worker now caches `folder path -> folder id` only for the active
+scan; the cache is discarded afterwards and preserves the first lookup/insert
+behavior. `[scan-profile]` adds `index_folder_cache_hits/misses`. Its performance
+effect is intentionally pending the same 1,000-file and `D:\Desktop` warm
+rescans, rather than inferred from the prior timings.
+
+The matched 1,000-file rerun completed in 1.677s: total improved 17.1% from
+2.022s and synchronous index improved 25.3% from 1.417s to 1.059s. It reported
+985 folder-cache hits and 15 misses; folder DB time fell from 0.380s to 0.008s.
+The next warm bottleneck is SQLite fetch plus required timestamp write (0.926s),
+but `D:\Desktop` must validate the cache before changing that correctness path.
+
+Both warm profiles confirmed the same remaining path, so unchanged-file scan
+timestamps now collect into bounded 50-item transactions. A batch commits before
+the scan progress checkpoint, and failure marks the traversal failed before stale
+cleanup; new/changed/missing-thumbnail paths remain immediate. The new profile
+fields `index_seen_batch_items/batches/seconds` make the next matched warm rescan
+the deciding measurement.
+
+That measurement completed: 1,000 unchanged rows flushed as 20 transactions.
+Write time fell 93.6% from 0.454s to 0.029s; index fell 37.8% from 1.059s to
+0.659s and total fell 22.3% from 1.677s to 1.303s. SQLite fetch is now the
+largest warm phase at 0.510s, pending the `D:\Desktop` cross-layout validation.
+
+The fetch follow-up is implemented pending a matched measurement: a scan-local,
+per-album cache preloads only file state needed by the unchanged-row path. It
+does not retain full metadata or embeddings, is released after traversal, and
+falls back to the established full lookup/update path for cache misses, changed
+files, missing thumbnails, or preload failure. Profile output adds cache preload
+time/rows and file-cache hit/miss counters.
+
+`D:\Desktop` accepted it: 1,293 preloaded rows produced 1,293 hits and no misses
+in 0.014s. Its warm total fell from 2.016s to 1.068s and index time from 0.954s
+to 0.182s; per-file SQLite fetch fell to 0.000s. The remaining warm index time is
+primarily filesystem stat (0.153s), with 26 bounded seen writes taking 0.047s.
+
+The 10,343-file `D:\MultiModalKaggleDataset` warm rescan also reached 100% cache
+hits after a 0.111s preload and no per-file fetch. Its 207 seen transactions cost
+1.130s, so unchanged seen writes and their crash-recovery checkpoint now advance
+in 500-file windows. The write still precedes the checkpoint; the new maximum
+recovery rework is 499 files. Await the matched rerun before reporting a gain.
+
+The matched 10,343-file rerun accepted the window: seen batches fell from 207 to
+21, seen-write time from 1.130s to 0.605s, and total from 10.164s to 8.786s
+(13.6%). All rows remained cache hits with no derived-media work. File stat is
+now the largest warm component at 1.311s, and remains deliberately retained for
+correct changed-file detection.
 	
 	## 2026-07-24 Smart Albums UX + smart tags product set
 	

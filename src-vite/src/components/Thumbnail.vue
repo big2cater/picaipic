@@ -9,6 +9,8 @@
         : 'border-transparent',
       config.settings.grid.style === 0 && isSelected ? 'bg-base-100 hover:bg-base-100' : 'hover:bg-base-100/30 hover:text-base-content ',
     ]"
+    @pointerenter="handlePointerEnter"
+    @pointerleave="handlePointerLeave"
     @click="(event: MouseEvent) => $emit('clicked', { shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey })"
     @dblclick="(event: MouseEvent) => $emit('dblclicked', { shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey })"
     @contextmenu="handleContextMenu"
@@ -17,8 +19,6 @@
       ref="containerRef"
       class="rounded-box relative flex items-center justify-center overflow-hidden bg-base-200/70"
       :style="layoutStyle"
-      @pointerenter="startVideoPreview"
-      @pointerleave="stopVideoPreview"
     >
       <!-- image -->
       <img
@@ -145,7 +145,7 @@
       </div>
 
       <!-- context menu -->
-      <div v-if="!selectMode" class="absolute right-0.5 top-0.5">
+      <div v-if="!selectMode && (isHovered || isContextMenuOpen || isActive)" class="absolute right-0.5 top-0.5">
         <ContextMenu
           ref="contextMenuRef"
           :class="[
@@ -154,6 +154,7 @@
           :iconMenu="IconMore"
           :menuItems="menuItems"
           :smallIcon="true"
+          @open-change="isContextMenuOpen = $event"
         />
       </div>
     </div>
@@ -186,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, toRef, onBeforeUnmount, onMounted, type CSSProperties, type Component } from 'vue';
+import { computed, nextTick, ref, watch, toRef, onBeforeUnmount, type CSSProperties, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { usePluginStore } from '@/stores/pluginStore';
@@ -244,10 +245,16 @@ let resizeObserver: ResizeObserver | null = null;
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
 const showVideoPreview = ref(false);
 const isVideoPreviewReady = ref(false);
+const isHovered = ref(false);
+const isContextMenuOpen = ref(false);
 const isVideoFile = computed(() => props.file?.file_type === 2);
 const isLivePhoto = computed(() => {
   const type = props.file?.live_photo_type;
   return type != null && type > 0;
+});
+const normalizedRotate = computed(() => {
+  const rotate = Number(props.file.rotate || 0) % 360;
+  return rotate < 0 ? rotate + 360 : rotate;
 });
 const isGeometryGridStyle = computed(() => config.settings.grid.style === 2 || config.settings.grid.style === 3);
 const shouldScaleThumbnail = computed(() => config.settings.grid.style === 1 || isGeometryGridStyle.value);
@@ -277,13 +284,17 @@ function retryThumbnail() {
   thumbnailSrc.value = getThumbUrl(props.file.id, true, config.settings.thumbnailSize);
 }
 
-// Robust ResizeObserver setup using watch to handle v-if
-watch(containerRef, (el) => {
+// Only rotated, responsive cards need measured dimensions. Keeping one
+// ResizeObserver on every visible thumbnail makes fast scrolling needlessly busy.
+watch([containerRef, normalizedRotate, () => config.settings.grid.style], ([el, rotate, style]) => {
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
   }
-  if (el) {
+  containerWidth.value = 0;
+  containerHeight.value = 0;
+
+  if (el && Number(rotate) % 180 !== 0 && Number(style) !== 0) {
     resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         containerWidth.value = entry.contentRect.width;
@@ -297,6 +308,9 @@ watch(containerRef, (el) => {
 onBeforeUnmount(() => {
   if (resizeObserver) {
     resizeObserver.disconnect();
+  }
+  if (transitionTimeout) {
+    clearTimeout(transitionTimeout);
   }
   stopVideoPreview();
 });
@@ -325,6 +339,10 @@ watch(() => props.file.file_path, () => {
   stopVideoPreview();
 });
 
+watch(() => props.selectMode, (selectMode) => {
+  if (selectMode) isContextMenuOpen.value = false;
+});
+
 function startVideoPreview() {
   if (!isVideoFile.value || !props.file?.file_path || previewTimer || showVideoPreview.value) return;
 
@@ -348,6 +366,16 @@ function startVideoPreview() {
       stopVideoPreview();
     }
   }, 400);
+}
+
+function handlePointerEnter() {
+  isHovered.value = true;
+  startVideoPreview();
+}
+
+function handlePointerLeave() {
+  isHovered.value = false;
+  stopVideoPreview();
 }
 
 function stopVideoPreview() {
@@ -445,10 +473,6 @@ const pluginContextMenuItems = computed(() =>
   pluginStore.getMenuItems('image.selection.single', 'image.contextMenu')
 );
 
-onMounted(() => {
-  void pluginStore.loadPlugins();
-});
-
 const menuItems = useFileMenuItems(
   toRef(props, 'file'),
   localeMsg,
@@ -491,11 +515,6 @@ type ThumbnailBadge = {
   highlight?: boolean;
   iconStyle?: CSSProperties;
 };
-
-const normalizedRotate = computed(() => {
-  const rotate = Number(props.file.rotate || 0) % 360;
-  return rotate < 0 ? rotate + 360 : rotate;
-});
 
 function resolveFormatLabel(file: any): string {
   const formatLabel = String(file?.format_label || file?.formatLabel || '').trim();

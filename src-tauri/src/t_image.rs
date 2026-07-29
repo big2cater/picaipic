@@ -19,15 +19,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -188,23 +188,60 @@ fn get_raw_dimensions_from_exif(file_path: &str) -> Result<Option<(u32, u32)>, S
     Ok(None)
 }
 
+#[derive(Default)]
+pub struct ExifReadProfile {
+    pub container_attempts: u64,
+    pub container_elapsed: Duration,
+    pub signature_scan_elapsed: Duration,
+    pub raw_attempts: u64,
+    pub raw_elapsed: Duration,
+}
+
 pub fn read_exif_from_bytes_permissive(data: &[u8]) -> Option<exif::Exif> {
+    read_exif_from_bytes_permissive_inner(data, None)
+}
+
+/// Profile the permissive header reader without changing its recovery order.
+pub fn read_exif_from_bytes_permissive_profiled(
+    data: &[u8],
+    profile: &mut ExifReadProfile,
+) -> Option<exif::Exif> {
+    read_exif_from_bytes_permissive_inner(data, Some(profile))
+}
+
+fn read_exif_from_bytes_permissive_inner(
+    data: &[u8],
+    mut profile: Option<&mut ExifReadProfile>,
+) -> Option<exif::Exif> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut cursor = Cursor::new(data);
-        if let Some(exif) = read_exif_container_with_recovery(&mut cursor) {
+        let container_started = profile.as_deref_mut().map(|profile| {
+            profile.container_attempts += 1;
+            Instant::now()
+        });
+        let container_exif = read_exif_container_with_recovery(&mut cursor);
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), container_started) {
+            profile.container_elapsed += started.elapsed();
+        }
+        if let Some(exif) = container_exif {
             return Some(exif);
         }
-        if let Some(pos) = data.windows(6).position(|w| w == b"Exif\0\0") {
+
+        if let Some(pos) = find_exif_signature(data, b"Exif\0\0", profile.as_deref_mut()) {
             let exif_start = pos + 6;
             if exif_start < data.len() {
-                if let Some(exif) = read_exif_raw_with_recovery(data[exif_start..].to_vec()) {
+                if let Some(exif) =
+                    read_exif_raw_slice_with_profile(&data[exif_start..], profile.as_deref_mut())
+                {
                     return Some(exif);
                 }
             }
         }
         for sig in [b"II\x2a\x00", b"MM\x00\x2a"] {
-            if let Some(pos) = data.windows(4).position(|w| w == sig) {
-                if let Some(exif) = read_exif_raw_with_recovery(data[pos..].to_vec()) {
+            if let Some(pos) = find_exif_signature(data, sig, profile.as_deref_mut()) {
+                if let Some(exif) =
+                    read_exif_raw_slice_with_profile(&data[pos..], profile.as_deref_mut())
+                {
                     return Some(exif);
                 }
             }
@@ -212,6 +249,75 @@ pub fn read_exif_from_bytes_permissive(data: &[u8]) -> Option<exif::Exif> {
         None
     }))
     .unwrap_or_else(|_| None)
+}
+
+fn find_exif_signature(
+    data: &[u8],
+    signature: &[u8],
+    profile: Option<&mut ExifReadProfile>,
+) -> Option<usize> {
+    let started = profile.as_ref().map(|_| Instant::now());
+    let position = data
+        .windows(signature.len())
+        .position(|window| window == signature);
+    if let (Some(profile), Some(started)) = (profile, started) {
+        profile.signature_scan_elapsed += started.elapsed();
+    }
+    position
+}
+
+fn read_exif_raw_slice_with_profile(
+    data: &[u8],
+    profile: Option<&mut ExifReadProfile>,
+) -> Option<exif::Exif> {
+    let started = profile.as_ref().map(|_| Instant::now());
+    let exif = read_exif_raw_with_recovery(data.to_vec());
+    if let (Some(profile), Some(started)) = (profile, started) {
+        profile.raw_attempts += 1;
+        profile.raw_elapsed += started.elapsed();
+    }
+    exif
+}
+
+/// True when a JPEG header reaches SOS/EOI without an EXIF APP1 segment.
+/// The complete-file EXIF scanner cannot find metadata absent from this header.
+pub fn jpeg_header_complete_without_exif(data: &[u8]) -> bool {
+    if data.len() < 2 || data[0] != 0xff || data[1] != 0xd8 {
+        return false;
+    }
+
+    let mut offset = 2usize;
+    while offset + 2 <= data.len() {
+        if data[offset] != 0xff {
+            return false;
+        }
+        while offset < data.len() && data[offset] == 0xff {
+            offset += 1;
+        }
+        if offset >= data.len() {
+            return false;
+        }
+        let marker = data[offset];
+        offset += 1;
+        if marker == 0xd9 || marker == 0xda {
+            return true;
+        }
+        if marker == 0x00 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if offset + 2 > data.len() {
+            return false;
+        }
+        let length = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        if length < 2 || offset + length > data.len() {
+            return false;
+        }
+        if marker == 0xe1 && data[offset + 2..offset + length].starts_with(b"Exif\0\0") {
+            return false;
+        }
+        offset += length;
+    }
+    false
 }
 
 fn read_exif_container_with_recovery(cursor: &mut Cursor<&[u8]>) -> Option<exif::Exif> {
@@ -424,12 +530,26 @@ pub fn is_jpeg_path(file_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn has_jpeg_signature(file_path: &str) -> bool {
+    let mut header = [0u8; 3];
+    let Ok(mut file) = fs::File::open(file_path) else {
+        return false;
+    };
+    file.read_exact(&mut header).is_ok() && header[0..2] == [0xFF, 0xD8] && header[2] == 0xFF
+}
+
+fn open_image_by_content(file_path: &str) -> Result<DynamicImage, image::ImageError> {
+    ImageReader::open(file_path)?
+        .with_guessed_format()?
+        .decode()
+}
+
 pub(crate) fn decode_scaled_jpeg_image(
     file_path: &str,
     _orientation: i32,
     thumbnail_size: u32,
 ) -> Result<Option<DynamicImage>, String> {
-    if !is_jpeg_path(file_path) || thumbnail_size == 0 {
+    if !is_jpeg_path(file_path) || thumbnail_size == 0 || !has_jpeg_signature(file_path) {
         return Ok(None);
     }
 
@@ -483,14 +603,16 @@ pub fn load_image_for_clip_embed(
         }
     }
 
-    if is_jpeg_path(file_path) {
+    if is_jpeg_path(file_path) && has_jpeg_signature(file_path) {
         if let Some(img) = decode_scaled_jpeg_image(file_path, orientation, edge)? {
             let img = apply_orientation(img, orientation);
             return Ok((cap_longest_edge(img, edge), "jpeg_scaled"));
         }
     }
 
-    let img = image::open(file_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    // Guess from the file header so misnamed RIFF/WebP files do not get forced
+    // through the JPEG decoder based solely on their extension.
+    let img = open_image_by_content(file_path).map_err(|e| format!("Failed to open image: {e}"))?;
     let img = apply_orientation(img, orientation);
     Ok((cap_longest_edge(img, edge), "original_capped"))
 }
@@ -2132,9 +2254,8 @@ async fn load_image_for_layout(file_path: &str, max_edge: u32) -> Result<Dynamic
         // libjpeg-turbo scale-on-decode: avoid full-res RGBA peak on 50MP+ JPEGs.
         match crate::t_jpeg::decode_rgb8_scaled(file_path, max_edge, max_edge) {
             Ok((bytes, w, h)) => {
-                let rgb = image::RgbImage::from_raw(w, h, bytes).ok_or_else(|| {
-                    "libjpeg-turbo returned buffer size mismatch".to_string()
-                })?;
+                let rgb = image::RgbImage::from_raw(w, h, bytes)
+                    .ok_or_else(|| "libjpeg-turbo returned buffer size mismatch".to_string())?;
                 let img = DynamicImage::ImageRgb8(rgb);
                 apply_orientation(img, get_image_orientation(file_path))
             }
@@ -2458,8 +2579,6 @@ pub async fn color_match_preview(params: ColorMatchPreviewParams) -> Result<Vec<
     Ok(bytes)
 }
 
-
-
 /// Export a single-image style `.cube` LUT (default 33^3).
 ///
 /// `sourceFilePath` is the image whose look is baked into the LUT
@@ -2518,7 +2637,6 @@ pub struct PreviewGeometry {
     #[serde(rename = "fullHeight")]
     pub full_height: Option<u32>,
 }
-
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PreviewCropRect {
@@ -2607,7 +2725,11 @@ async fn load_image_for_color_preview(
         .as_ref()
         .map(|c| c.width.max(c.height).max(1))
         .unwrap_or(full_long);
-    let decode_edge = if geom.crop.as_ref().is_some_and(|c| c.width > 0 && c.height > 0) {
+    let decode_edge = if geom
+        .crop
+        .as_ref()
+        .is_some_and(|c| c.width > 0 && c.height > 0)
+    {
         // full_long / crop_long * max_edge  => crop region ≈ max_edge on its long side
         let needed = ((full_long as u64) * (max_edge as u64) / (crop_long as u64))
             .clamp(max_edge as u64, 8192);
@@ -2623,7 +2745,6 @@ async fn load_image_for_color_preview(
     img = apply_preview_geometry(img, geom, full_w, full_h);
     Ok(downscale_for_preview(img, max_edge))
 }
-
 
 fn geometry_cache_bits(geom: &PreviewGeometry) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -2660,12 +2781,8 @@ pub struct PhotoStylePreviewParams {
 pub async fn apply_photo_style_preview(params: PhotoStylePreviewParams) -> Result<Vec<u8>, String> {
     let max_edge = params.max_edge.unwrap_or(1600).clamp(256, 4096);
     let geom = params.geometry.clone().unwrap_or_default();
-    let cache_key = photo_style_preview_cache_key(
-        &params.source_file_path,
-        max_edge,
-        &params.style,
-        &geom,
-    );
+    let cache_key =
+        photo_style_preview_cache_key(&params.source_file_path, max_edge, &params.style, &geom);
     if let Ok(mut cache) = PREVIEW_JPEG_CACHE.lock() {
         if let Some(bytes) = cache.get(cache_key) {
             return Ok(bytes);
@@ -2679,8 +2796,6 @@ pub async fn apply_photo_style_preview(params: PhotoStylePreviewParams) -> Resul
     }
     Ok(bytes)
 }
-
-
 
 /// Choose a resize filter that balances quality vs cost for the edit/export path.
 /// Heavy downscales (common for photo-size exports) use Triangle; mild changes use CatmullRom.
@@ -2974,12 +3089,15 @@ impl LayoutImageCache {
         }
     }
 
-    fn get(&mut self, path: &str, max_edge: u32, len: u64, modified_ms: u128) -> Option<DynamicImage> {
+    fn get(
+        &mut self,
+        path: &str,
+        max_edge: u32,
+        len: u64,
+        modified_ms: u128,
+    ) -> Option<DynamicImage> {
         let idx = self.entries.iter().position(|e| {
-            e.path == path
-                && e.max_edge == max_edge
-                && e.len == len
-                && e.modified_ms == modified_ms
+            e.path == path && e.max_edge == max_edge && e.len == len && e.modified_ms == modified_ms
         })?;
         if idx > 0 {
             if let Some(entry) = self.entries.remove(idx) {
@@ -2989,8 +3107,16 @@ impl LayoutImageCache {
         self.entries.front().map(|e| e.image.clone())
     }
 
-    fn put(&mut self, path: String, max_edge: u32, len: u64, modified_ms: u128, image: DynamicImage) {
-        self.entries.retain(|e| !(e.path == path && e.max_edge == max_edge));
+    fn put(
+        &mut self,
+        path: String,
+        max_edge: u32,
+        len: u64,
+        modified_ms: u128,
+        image: DynamicImage,
+    ) {
+        self.entries
+            .retain(|e| !(e.path == path && e.max_edge == max_edge));
         self.entries.push_front(LayoutImageCacheEntry {
             path,
             max_edge,
@@ -3006,7 +3132,6 @@ impl LayoutImageCache {
 
 static LAYOUT_IMAGE_CACHE: Lazy<Mutex<LayoutImageCache>> =
     Lazy::new(|| Mutex::new(LayoutImageCache::new(6)));
-
 
 /// Short LRU of encoded interactive preview JPEGs (slider repeats / undo-ish ticks).
 struct PreviewJpegCacheEntry {
@@ -3039,7 +3164,8 @@ impl PreviewJpegCache {
 
     fn put(&mut self, key: u64, bytes: Vec<u8>) {
         self.entries.retain(|e| e.key != key);
-        self.entries.push_front(PreviewJpegCacheEntry { key, bytes });
+        self.entries
+            .push_front(PreviewJpegCacheEntry { key, bytes });
         while self.entries.len() > self.cap {
             self.entries.pop_back();
         }
@@ -3069,21 +3195,9 @@ fn hash_photo_style_params(style: &t_lut::PhotoStyleParams) -> u64 {
     style.fade.to_bits().hash(&mut h);
     style.vignette.to_bits().hash(&mut h);
     style.grain.to_bits().hash(&mut h);
-    style
-        .filter
-        .as_deref()
-        .unwrap_or("")
-        .hash(&mut h);
-    style
-        .lut_id
-        .as_deref()
-        .unwrap_or("")
-        .hash(&mut h);
-    style
-        .lut_path
-        .as_deref()
-        .unwrap_or("")
-        .hash(&mut h);
+    style.filter.as_deref().unwrap_or("").hash(&mut h);
+    style.lut_id.as_deref().unwrap_or("").hash(&mut h);
+    style.lut_path.as_deref().unwrap_or("").hash(&mut h);
     style.lut_intensity.to_bits().hash(&mut h);
     h.finish()
 }
@@ -3121,7 +3235,10 @@ fn color_match_preview_cache_key(params: &ColorMatchPreviewParams, max_edge: u32
     let mut h = DefaultHasher::new();
     hash_mix_u64(&mut h, 0x434D_5052); // "CMPR"
     hash_mix_u64(&mut h, preview_file_fingerprint(&params.source_file_path));
-    hash_mix_u64(&mut h, preview_file_fingerprint(&params.reference_file_path));
+    hash_mix_u64(
+        &mut h,
+        preview_file_fingerprint(&params.reference_file_path),
+    );
     hash_mix_u64(&mut h, max_edge as u64);
     params.intensity.to_bits().hash(&mut h);
     params.tone_preservation.to_bits().hash(&mut h);
@@ -3139,7 +3256,10 @@ fn color_match_preview_cache_key(params: &ColorMatchPreviewParams, max_edge: u32
     h.finish()
 }
 
-async fn load_image_for_layout_cached(file_path: &str, max_edge: u32) -> Result<DynamicImage, String> {
+async fn load_image_for_layout_cached(
+    file_path: &str,
+    max_edge: u32,
+) -> Result<DynamicImage, String> {
     let signature = get_file_signature(file_path).ok();
     if let Some((len, modified_ms)) = signature {
         if let Ok(mut cache) = LAYOUT_IMAGE_CACHE.lock() {
@@ -4142,7 +4262,7 @@ fn apply_batch_action(
                 &img, reference, &cm,
             ))
         }
-                "photostyle" | "photo_style" => {
+        "photostyle" | "photo_style" => {
             let style = t_lut::PhotoStyleParams {
                 brightness: action
                     .style_brightness
@@ -4320,7 +4440,6 @@ fn apply_batch_watermark(
     }
     Ok(out)
 }
-
 
 /// Read EXIF capture datetime label for watermark/text stamping.
 /// Uses the same ISO/EXIF normalizer as photo-frame (`format_frame_date_time`).
@@ -5099,11 +5218,7 @@ fn read_file_head(file_path: &str, max_bytes: usize) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; max_bytes];
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
-    if buf.is_empty() {
-        None
-    } else {
-        Some(buf)
-    }
+    if buf.is_empty() { None } else { Some(buf) }
 }
 
 fn format_frame_iso_label(raw: &str) -> String {
@@ -5148,7 +5263,8 @@ fn fill_frame_summary_from_kamadak(summary: &mut FrameExifSummary, exif: &exif::
         summary.focal_length = exif_field_string(exif, Tag::FocalLength);
     }
     if summary.aperture.is_none() {
-        summary.aperture = exif_field_string(exif, Tag::FNumber).map(|s| format_frame_aperture_label(&s));
+        summary.aperture =
+            exif_field_string(exif, Tag::FNumber).map(|s| format_frame_aperture_label(&s));
     }
     if summary.shutter.is_none() {
         summary.shutter = exif_field_string(exif, Tag::ExposureTime);
@@ -5187,11 +5303,10 @@ fn read_capture_settings_from_jpeg_bytes(data: &[u8]) -> CaptureSettings {
     }
     panic::catch_unwind(AssertUnwindSafe(|| {
         let file_buffer = data.to_vec();
-        let metadata =
-            match LittleExifMetadata::new_from_vec(&file_buffer, FileExtension::JPEG) {
-                Ok(m) => m,
-                Err(_) => return CaptureSettings::default(),
-            };
+        let metadata = match LittleExifMetadata::new_from_vec(&file_buffer, FileExtension::JPEG) {
+            Ok(m) => m,
+            Err(_) => return CaptureSettings::default(),
+        };
         CaptureSettings {
             exposure_time: metadata
                 .get_tag_by_hex(0x829a, Some(ExifTagGroup::EXIF))
@@ -5245,12 +5360,22 @@ fn fill_frame_summary_from_libraw(summary: &mut FrameExifSummary, file_path: &st
         return;
     };
     if summary.make.is_none() {
-        if let Some(m) = meta.make.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(m) = meta
+            .make
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             summary.make = Some(normalize_camera_make(m));
         }
     }
     if summary.model.is_none() {
-        if let Some(m) = meta.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(m) = meta
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             summary.model = Some(m.to_string());
         }
     }
@@ -5399,12 +5524,10 @@ fn resolve_frame_palette(options: &PhotoFrameOptions) -> ([u8; 3], [u8; 3], [u8;
             ([20, 20, 20], [250, 250, 250], [210, 210, 210])
         }
     };
-    let bg = parse_hex_color(options.background_color.as_deref().unwrap_or(""))
-        .unwrap_or(def_bg);
-    let text =
-        parse_hex_color(options.text_color.as_deref().unwrap_or("")).unwrap_or(def_text);
-    let sec = parse_hex_color(options.secondary_text_color.as_deref().unwrap_or(""))
-        .unwrap_or(def_sec);
+    let bg = parse_hex_color(options.background_color.as_deref().unwrap_or("")).unwrap_or(def_bg);
+    let text = parse_hex_color(options.text_color.as_deref().unwrap_or("")).unwrap_or(def_text);
+    let sec =
+        parse_hex_color(options.secondary_text_color.as_deref().unwrap_or("")).unwrap_or(def_sec);
     (bg, text, sec)
 }
 
@@ -5440,12 +5563,7 @@ fn make_cover_blur_bg(img: &DynamicImage, out_w: u32, out_h: u32, sigma: f32) ->
     }
 }
 
-fn make_soft_shadow(
-    photo_w: u32,
-    photo_h: u32,
-    blur_sigma: f32,
-    opacity: f32,
-) -> RgbaImage {
+fn make_soft_shadow(photo_w: u32, photo_h: u32, blur_sigma: f32, opacity: f32) -> RgbaImage {
     let pad = ((blur_sigma * 3.0).ceil() as u32).max(8).saturating_mul(2);
     let sw = photo_w.saturating_add(pad).max(1);
     let sh = photo_h.saturating_add(pad).max(1);
@@ -5592,7 +5710,10 @@ fn place_frame_logo(
                 .saturating_sub(margin),
             photo_y.saturating_add(margin),
         ),
-        "top-left" => (photo_x.saturating_add(margin), photo_y.saturating_add(margin)),
+        "top-left" => (
+            photo_x.saturating_add(margin),
+            photo_y.saturating_add(margin),
+        ),
         // bar-center (default) + legacy bar-left / bar-right
         _ => {
             let by = if bar_h > 0 {
@@ -5600,11 +5721,7 @@ fn place_frame_logo(
             } else {
                 photo_y.saturating_add(photo_h).saturating_add(margin / 2)
             };
-            let bx = if cw > lw {
-                (cw - lw) / 2
-            } else {
-                0
-            };
+            let bx = if cw > lw { (cw - lw) / 2 } else { 0 };
             (bx.min(cw.saturating_sub(lw)), by.min(ch.saturating_sub(lh)))
         }
     };
@@ -5617,12 +5734,22 @@ fn build_frame_corner_texts(
 ) -> (String, String, String, String) {
     let mut left_top_parts = Vec::new();
     if frame_opt_bool(options.show_brand, true) {
-        if let Some(m) = summary.make.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(m) = summary
+            .make
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             left_top_parts.push(m.to_string());
         }
     }
     if frame_opt_bool(options.show_model, true) {
-        if let Some(m) = summary.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(m) = summary
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             left_top_parts.push(m.to_string());
         }
     }
@@ -5767,11 +5894,7 @@ fn draw_frame_text_line(
     }
     let scaled = font.as_scaled(scale);
     let total_w = measure_text_width(font, scale, text);
-    let mut caret = if align_right {
-        x - total_w
-    } else {
-        x
-    };
+    let mut caret = if align_right { x - total_w } else { x };
     // Keep glyphs inside canvas; fit_frame_text should already constrain width.
     caret = caret.max(0.0);
     let (cw, ch) = (canvas.width(), canvas.height());
@@ -5875,14 +5998,7 @@ fn draw_frame_info_bar(
         let baseline = if single { bar_mid } else { text_top_y };
         let (text, scale) = fit_frame_text(font, left_top, size, left_max);
         draw_frame_text_line(
-            canvas,
-            font,
-            &text,
-            left_x,
-            baseline,
-            scale,
-            text_color,
-            false,
+            canvas, font, &text, left_x, baseline, scale, text_color, false,
         );
     }
     if !left_bottom.is_empty() {
@@ -6020,8 +6136,7 @@ fn apply_photo_frame(
                 .saturating_add(margin_px.saturating_mul(2))
                 .saturating_add(bar_h)
                 .max(1);
-            let mut canvas =
-                RgbaImage::from_pixel(out_w, out_h, Rgba([bg[0], bg[1], bg[2], 255]));
+            let mut canvas = RgbaImage::from_pixel(out_w, out_h, Rgba([bg[0], bg[1], bg[2], 255]));
             let photo_x = margin_px;
             let photo_y = margin_px;
             image::imageops::overlay(&mut canvas, &photo_rgba, photo_x as i64, photo_y as i64);
@@ -6041,14 +6156,14 @@ fn apply_photo_frame(
             let blur_sigma = options.blur_sigma.unwrap_or(18.0).clamp(2.0, 48.0);
             let shadow_blur = options.shadow_blur.unwrap_or(16.0).clamp(2.0, 40.0);
             let shadow_opacity = options.shadow_opacity.unwrap_or(0.42).clamp(0.05, 0.9);
-            let shadow_off_ratio = options.shadow_offset_ratio.unwrap_or(
-                if layout == FrameLayoutKind::SinkBlur {
+            let shadow_off_ratio = options
+                .shadow_offset_ratio
+                .unwrap_or(if layout == FrameLayoutKind::SinkBlur {
                     0.06
                 } else {
                     0.035
-                },
-            )
-            .clamp(0.0, 0.12);
+                })
+                .clamp(0.0, 0.12);
             let shadow_dy = ((ih as f32) * shadow_off_ratio).round() as i64;
 
             let out_w = iw.saturating_add(pad.saturating_mul(2)).max(1);
@@ -6298,7 +6413,12 @@ pub async fn export_photo_frame(
             let dest_for_task = dest.clone();
             set.spawn(async move {
                 if photo_frame_is_cancelled() {
-                    return (index, src, Some(dest_for_task), Err("cancelled".to_string()));
+                    return (
+                        index,
+                        src,
+                        Some(dest_for_task),
+                        Err("cancelled".to_string()),
+                    );
                 }
                 let result = async {
                     // Decode already capped to export max edge (avoids full-res peak then downscale).
@@ -6501,5 +6621,31 @@ mod photo_frame_tests {
             format_frame_date_time("2023-08-15T14:30:00-05:00"),
             "2023-08-15 14:30:00"
         );
+    }
+}
+
+#[cfg(test)]
+mod exif_profile_tests {
+    use super::{ExifReadProfile, read_exif_from_bytes_permissive_profiled};
+
+    #[test]
+    fn profile_records_tiff_signature_scan_and_raw_parse() {
+        let mut tiff = vec![b'x', b'x', b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
+        tiff.extend_from_slice(&[
+            0x01, 0x00, // one IFD entry
+            0x12, 0x01, 0x03, 0x00, // Orientation, SHORT
+            0x01, 0x00, 0x00, 0x00, // count
+            0x06, 0x00, 0x00, 0x00, // value: rotate 90 CW
+            0x00, 0x00, 0x00, 0x00, // next IFD
+        ]);
+        let mut profile = ExifReadProfile::default();
+
+        let exif = read_exif_from_bytes_permissive_profiled(&tiff, &mut profile);
+
+        assert!(exif.is_some());
+        assert_eq!(profile.container_attempts, 1);
+        assert!(profile.signature_scan_elapsed > std::time::Duration::ZERO);
+        assert_eq!(profile.raw_attempts, 1);
+        assert!(profile.raw_elapsed > std::time::Duration::ZERO);
     }
 }

@@ -186,28 +186,30 @@ fn extract_jpeg_prompt(
     exif_user_comment: Option<&str>,
     exif_image_description: Option<&str>,
 ) -> Option<String> {
-    let mut com_notes: Vec<String> = Vec::new();
-    if let Some(h) = header {
-        if is_jpeg_bytes(h) {
-            collect_jpeg_com_from_bytes(h, &mut com_notes);
-        }
+    // AFile::new already parsed EXIF. UserComment has highest precedence, so
+    // return before any second JPEG marker walk when it contains a prompt.
+    if let Some(prompt) = parse_jpeg_prompt_fields(exif_user_comment, None, &[]) {
+        return Some(prompt);
     }
-    if com_notes.is_empty() {
+
+    let mut com_notes: Vec<String> = Vec::new();
+    let header_scan_complete = if let Some(h) = header {
+        if is_jpeg_bytes(h) {
+            collect_jpeg_com_from_bytes(h, &mut com_notes)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if com_notes.is_empty() && !header_scan_complete {
         if let Ok(extra) = extract_jpeg_com_from_file(file_path) {
             com_notes.extend(extra);
         }
     }
 
-    // If scanner did not pass EXIF strings, try a lightweight EXIF UserComment read.
-    let owned_user_comment = if exif_user_comment.is_none() {
-        extract_jpeg_user_comment_from_file(file_path)
-    } else {
-        None
-    };
-    let user_comment = exif_user_comment.or(owned_user_comment.as_deref());
-
     let com_refs: Vec<&str> = com_notes.iter().map(|s| s.as_str()).collect();
-    parse_jpeg_prompt_fields(user_comment, exif_image_description, &com_refs)
+    parse_jpeg_prompt_fields(None, exif_image_description, &com_refs)
 }
 
 /// Parse prompt candidates from JPEG-side metadata strings.
@@ -252,30 +254,33 @@ pub fn parse_jpeg_prompt_fields(
     None
 }
 
-fn collect_jpeg_com_from_bytes(data: &[u8], out: &mut Vec<String>) {
+/// Returns true when the buffer reaches the first scan or end marker. The
+/// file-based scanner stops at the same boundary, so reopening cannot find
+/// additional pre-scan COM metadata in that case.
+fn collect_jpeg_com_from_bytes(data: &[u8], out: &mut Vec<String>) -> bool {
     if !is_jpeg_bytes(data) {
-        return;
+        return false;
     }
     let mut i = 2usize;
-    while i + 4 <= data.len() {
+    while i + 2 <= data.len() {
         if data[i] != 0xFF {
-            break;
+            return false;
         }
         let marker = data[i + 1];
         i += 2;
         if marker == 0xD9 || marker == 0xDA {
-            break;
+            return true;
         }
         // Standalone markers without length
         if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
             continue;
         }
         if i + 2 > data.len() {
-            break;
+            return false;
         }
         let len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
         if len < 2 || i + len > data.len() {
-            break;
+            return false;
         }
         let payload = &data[i + 2..i + len];
         i += len;
@@ -290,6 +295,7 @@ fn collect_jpeg_com_from_bytes(data: &[u8], out: &mut Vec<String>) {
             }
         }
     }
+    false
 }
 
 fn extract_jpeg_com_from_file(file_path: &str) -> Result<Vec<String>, String> {
@@ -355,11 +361,6 @@ fn extract_jpeg_com_from_file(file_path: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
-}
-
-fn extract_jpeg_user_comment_from_file(file_path: &str) -> Option<String> {
-    let exif = crate::t_image::read_exif_permissive(file_path)?;
-    extract_user_comment_from_exif(&exif)
 }
 
 /// Pull UserComment text from a parsed EXIF object without aggressive punctuation stripping.
@@ -992,9 +993,28 @@ mod tests {
         jpeg.push(0xFF);
         jpeg.push(0xD9); // EOI
         let mut com = Vec::new();
-        collect_jpeg_com_from_bytes(&jpeg, &mut com);
+        assert!(collect_jpeg_com_from_bytes(&jpeg, &mut com));
         assert_eq!(com.len(), 1);
         let p = parse_jpeg_prompt_fields(None, None, &[com[0].as_str()]).unwrap();
         assert!(p.contains("sunset"));
+    }
+
+    #[test]
+    fn jpeg_header_scan_is_complete_at_start_of_scan() {
+        // SOI + empty APP0 + SOS. The file scanner also stops at SOS, so an
+        // in-memory header containing it never needs a second file open.
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xDA, 0x00, 0x02];
+        let mut com = Vec::new();
+        assert!(collect_jpeg_com_from_bytes(&jpeg, &mut com));
+        assert!(com.is_empty());
+    }
+
+    #[test]
+    fn jpeg_header_scan_is_incomplete_for_truncated_segment() {
+        // APP0 claims a payload that is not present in the header buffer.
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x01, 0x02];
+        let mut com = Vec::new();
+        assert!(!collect_jpeg_com_from_bytes(&jpeg, &mut com));
+        assert!(com.is_empty());
     }
 }

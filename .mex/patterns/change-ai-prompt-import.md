@@ -1,7 +1,7 @@
 ---
 name: change-ai-prompt-import
 description: AI PNG/JPEG prompt import into empty comments during library scan.
-last_updated: 2026-07-20
+last_updated: 2026-07-28
 ---
 
 # Change AI prompt import (PNG + JPEG)
@@ -34,6 +34,7 @@ last_updated: 2026-07-20
 8. Bound PNG ancillary scan (≤4 MiB) and JPEG marker walk (≤2 MiB).
 9. Truncate stored prompt to 4000 chars.
 10. Prefer EXIF already opened in `AFile::new` (pass UserComment / ImageDescription into extractor).
+11. JPEG prompt import reuses the pre-read header scan when it reaches SOS/EOI; only truncated/incomplete headers reopen the file for COM markers. EXIF `UserComment` is consumed directly before any marker scan.
 
 ## Verify
 ```bash

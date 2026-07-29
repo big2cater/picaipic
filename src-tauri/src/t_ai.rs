@@ -19,12 +19,10 @@ use std::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
-use tokenizers::{
-    TruncationDirection, TruncationParams, TruncationStrategy, Tokenizer,
-};
+use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 use tokio::io::AsyncWriteExt;
 
 /// CLIP-aligned bilingual text tower max length (bundled int8 + cloud pack).
@@ -40,12 +38,18 @@ pub struct AiEngine {
 }
 
 const AI_INTRA_THREADS: usize = 2;
+
+fn ai_intra_threads() -> usize {
+    std::env::var("PICAIPIC_AI_INTRA_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| (1..=64).contains(&value))
+        .unwrap_or(AI_INTRA_THREADS)
+}
 // CLIP-B/32-aligned bilingual text (Track C) — self-hosted dynamic int8 on picaipic-binaries.
 // Asset names on release tag `models` (not the local install filenames).
-const MULTILINGUAL_TEXT_MODEL_URL: &str =
-    "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-int8.onnx";
-const MULTILINGUAL_TOKENIZER_URL: &str =
-    "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-tokenizer.json";
+const MULTILINGUAL_TEXT_MODEL_URL: &str = "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-int8.onnx";
+const MULTILINGUAL_TOKENIZER_URL: &str = "https://github.com/big2cater/picaipic-binaries/releases/download/models/clip-vit-b32-multilingual-v1-text-tokenizer.json";
 const MULTILINGUAL_RELEASE_API_URL: &str =
     "https://api.github.com/repos/big2cater/picaipic-binaries/releases/tags/models";
 /// Expected sha256 of self-hosted int8 text tower (Phase 0 quantize_dynamic).
@@ -79,8 +83,7 @@ impl ImageSearchTextModel {
 }
 
 /// Old sentence-embedding packs without CLIP projection (wrong space). Kept for error matching.
-pub const ERR_MULTILINGUAL_TEXT_ONLY_DISABLED: &str =
-    "MULTILINGUAL_TEXT_ONLY_DISABLED: text tower is not CLIP-B/32-aligned (missing sentence_embedding 512-d). Stay on default model or re-download the bilingual pack.";
+pub const ERR_MULTILINGUAL_TEXT_ONLY_DISABLED: &str = "MULTILINGUAL_TEXT_ONLY_DISABLED: text tower is not CLIP-B/32-aligned (missing sentence_embedding 512-d). Stay on default model or re-download the bilingual pack.";
 
 pub fn assert_text_model_activatable(model: ImageSearchTextModel) -> Result<(), String> {
     match model {
@@ -157,7 +160,7 @@ impl AiEngine {
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
-            .with_intra_threads(AI_INTRA_THREADS)
+            .with_intra_threads(ai_intra_threads())
             .map_err(|e| e.to_string())?
             .commit_from_file(path)
             .map_err(|e| format!("Failed to load {} model from {:?}: {}", model_name, path, e))
@@ -349,15 +352,12 @@ impl AiEngine {
             return t.to_string();
         }
         // Bare short EN label (letters/digits/hyphen/space only): wrap.
-        let is_simple_latin = t.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '-' || c == '\''
-        });
+        let is_simple_latin = t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '-' || c == '\'');
         if is_simple_latin && word_count >= 1 {
             // "a bird" / "an insect" already have an article → "a photo of a bird".
-            if lower.starts_with("a ")
-                || lower.starts_with("an ")
-                || lower.starts_with("the ")
-            {
+            if lower.starts_with("a ") || lower.starts_with("an ") || lower.starts_with("the ") {
                 return format!("a photo of {t}");
             }
             // Bare "bird" / "insect": choose a/an for the first letter.
@@ -502,11 +502,47 @@ impl AiEngine {
         if !self.is_loaded() {
             return Err("AI models not loaded".to_string());
         }
-        let image_input = self.preprocess_dynamic_image(img)?;
-        self.run_vision_model(image_input)
+        self.encode_images_from_dynamic(vec![img])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Vision model returned no embedding".to_string())
     }
 
-    fn run_vision_model(&mut self, image_input: Array4<f32>) -> Result<Vec<f32>, String> {
+    pub fn encode_images_from_dynamic(
+        &mut self,
+        images: Vec<DynamicImage>,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if !self.is_loaded() {
+            return Err("AI models not loaded".to_string());
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch_size = images.len();
+        let image_input = Self::preprocess_dynamic_images(images)?;
+        self.encode_preprocessed_images_profiled(image_input, batch_size)
+            .map(|(embeddings, _)| embeddings)
+    }
+
+    pub(crate) fn encode_preprocessed_images_profiled(
+        &mut self,
+        image_input: Array4<f32>,
+        batch_size: usize,
+    ) -> Result<(Vec<Vec<f32>>, Duration), String> {
+        if !self.is_loaded() {
+            return Err("AI models not loaded".to_string());
+        }
+        let inference_started = Instant::now();
+        let embeddings = self.run_vision_model_batch(image_input, batch_size)?;
+        let inference_elapsed = inference_started.elapsed();
+        Ok((embeddings, inference_elapsed))
+    }
+
+    fn run_vision_model_batch(
+        &mut self,
+        image_input: Array4<f32>,
+        batch_size: usize,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let image_input_value = Value::from_array(image_input).map_err(|e| e.to_string())?;
 
         let outputs = self
@@ -530,7 +566,17 @@ impl AiEngine {
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("Failed to extract tensor: {}", e))?;
 
-        Ok(embedding_data.to_vec())
+        if embedding_data.len() != batch_size * CLIP_EMBED_DIM {
+            return Err(format!(
+                "Vision embedding shape has {} values; expected {}",
+                embedding_data.len(),
+                batch_size * CLIP_EMBED_DIM
+            ));
+        }
+        Ok(embedding_data
+            .chunks_exact(CLIP_EMBED_DIM)
+            .map(|chunk| chunk.to_vec())
+            .collect())
     }
 
     /// Cap longest edge before the final 224 square (defense in depth if caller
@@ -544,29 +590,49 @@ impl AiEngine {
         img.thumbnail(max_edge, max_edge)
     }
 
-    fn preprocess_dynamic_image(&self, img: DynamicImage) -> Result<Array4<f32>, String> {
-        let img = Self::downscale_for_embed(img);
-        // Final square for CLIP (Triangle ≈ product / offline compare BILINEAR)
-        let img = img.resize_exact(224, 224, image::imageops::FilterType::Triangle);
-        let rgb_img = img.to_rgb8();
-
-        // Normalize
+    pub(crate) fn preprocess_dynamic_images(
+        images: Vec<DynamicImage>,
+    ) -> Result<Array4<f32>, String> {
         let mean = [0.48145466, 0.4578275, 0.40821073];
         let std = [0.26862954, 0.26130258, 0.27577711];
-
-        let mut array = Array::zeros((1, 3, 224, 224));
-
-        for (x, y, pixel) in rgb_img.enumerate_pixels() {
-            let r = (pixel[0] as f32 / 255.0 - mean[0]) / std[0];
-            let g = (pixel[1] as f32 / 255.0 - mean[1]) / std[1];
-            let b = (pixel[2] as f32 / 255.0 - mean[2]) / std[2];
-
-            array[[0, 0, y as usize, x as usize]] = r;
-            array[[0, 1, y as usize, x as usize]] = g;
-            array[[0, 2, y as usize, x as usize]] = b;
+        let mut array = Array::zeros((images.len(), 3, 224, 224));
+        let plane_len = 224 * 224;
+        let data = array
+            .as_slice_mut()
+            .ok_or_else(|| "CLIP input array is not contiguous".to_string())?;
+        for (batch, source) in images.into_iter().enumerate() {
+            let img = Self::downscale_for_embed(source)
+                .resize_exact(224, 224, image::imageops::FilterType::Triangle)
+                .to_rgb8();
+            let batch_offset = batch * 3 * plane_len;
+            for (index, pixel) in img.pixels().enumerate() {
+                data[batch_offset + index] = (pixel[0] as f32 / 255.0 - mean[0]) / std[0];
+                data[batch_offset + plane_len + index] =
+                    (pixel[1] as f32 / 255.0 - mean[1]) / std[1];
+                data[batch_offset + 2 * plane_len + index] =
+                    (pixel[2] as f32 / 255.0 - mean[2]) / std[2];
+            }
         }
-
         Ok(array)
+    }
+}
+
+#[cfg(test)]
+mod image_preprocess_tests {
+    use super::AiEngine;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    #[test]
+    fn batch_preprocess_keeps_nchw_channel_layout() {
+        let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 2, Rgb([255, 0, 0])));
+        let green = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 4, Rgb([0, 255, 0])));
+        let input = AiEngine::preprocess_dynamic_images(vec![red, green]).unwrap();
+
+        assert_eq!(input.shape(), &[2, 3, 224, 224]);
+        assert!((input[[0, 0, 0, 0]] - ((1.0 - 0.48145466) / 0.26862954)).abs() < 1e-6);
+        assert!((input[[0, 1, 0, 0]] - ((0.0 - 0.4578275) / 0.26130258)).abs() < 1e-6);
+        assert!((input[[1, 1, 223, 223]] - ((1.0 - 0.4578275) / 0.26130258)).abs() < 1e-6);
+        assert!((input[[1, 2, 223, 223]] - ((0.0 - 0.40821073) / 0.27577711)).abs() < 1e-6);
     }
 }
 
@@ -615,9 +681,9 @@ async fn get_release_asset_total_size(
     // Match release asset names from URL path (self-hosted names differ from install filenames).
     for (url, _install_name, _) in files {
         let asset_name = url.rsplit('/').next()?;
-        let asset = assets.iter().find(|asset| {
-            asset.get("name").and_then(|name| name.as_str()) == Some(asset_name)
-        })?;
+        let asset = assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(|name| name.as_str()) == Some(asset_name))?;
         total_size += asset.get("size")?.as_u64()?;
     }
 

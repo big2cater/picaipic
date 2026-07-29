@@ -17,7 +17,7 @@ edges:
     condition: when provisioning or testing plugin runtimes
   - target: patterns/release-build.md
     condition: when producing app or plugin artifacts
-last_updated: 2026-07-18
+last_updated: 2026-07-29
 ---
 
 # Setup
@@ -49,6 +49,11 @@ last_updated: 2026-07-18
 - `PICAIPIC_ALLOW_UNSIGNED_PLUGINS=1` (developer only) — bypasses release plugin signature enforcement.
 - `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1` (developer/debug only) — disables input staging and optional ACL behavior.
 - `PICAIPIC_ENABLE_PLUGIN_ACL_SANDBOX=1` (targeted Windows testing only) — enables deny-ACL write confinement.
+- `PICAIPIC_AI_INTRA_THREADS` (optional, 1-64) — ONNX intra-op CPU threads; default is 2 and 4/8-thread runs must be judged by scan wall time, not CPU percentage.
+- `PICAIPIC_SCAN_PHASE_PROFILE=1` (optional) — prints traversal/index/drain/thumbnail/embedding phase timings for a scan.
+- With phase profiling, `index_metadata_*_seconds` further splits cold `AFile::new` work, including EXIF/header, binary TIFF, Motion XMP, and extraction paths; normal scans do not pay for these stage clocks. Use a newly copied media directory for cold comparisons and never delete/recreate an existing album just to profile it.
+- `PICAIPIC_SCAN_SLOW_FILE_MS` (optional, 1-600000) — with phase profiling, emits only slow per-file index records above this millisecond threshold.
+- `PICAIPIC_EMBED_FILE_TRACE=1` (optional targeted diagnosis) — logs per-file embedding source and success.
 - `PICAIPIC_SANDBOX_DENY_PATHS` (optional targeted test) — adds directories to the Windows deny list.
 - Plugin runtime variables such as `PICAIPIC_PLUGIN_PORT`, `PICAIPIC_PLUGIN_AUTH_TOKEN`, roots, output/task directories, profile/runtime ids, Python/env paths, and requirements paths are normally injected by the host, not configured globally by users.
 

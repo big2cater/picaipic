@@ -1762,10 +1762,7 @@ pub fn remove_untracked_file(file_path: &str) -> Result<(), String> {
     }
     // Safety: only remove if not already indexed in the current library.
     if AFile::exists_by_path(path).unwrap_or(false) {
-        return Err(format!(
-            "Refusing to remove tracked library file: {}",
-            path
-        ));
+        return Err(format!("Refusing to remove tracked library file: {}", path));
     }
     std::fs::remove_file(path)
         .map_err(|e| format!("Failed to remove untracked file {}: {}", path, e))
@@ -2208,7 +2205,9 @@ pub fn dedup_list_groups(
     mode: Option<String>,
 ) -> Result<Vec<crate::t_dedup::DedupGroup>, String> {
     if matches!(
-        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        mode.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("similar")
     ) {
         crate::t_dedup::list_similar_groups(page, page_size, &sort_by, &filter)
@@ -2220,7 +2219,9 @@ pub fn dedup_list_groups(
 #[tauri::command]
 pub fn dedup_get_overview(mode: Option<String>) -> Result<crate::t_dedup::DedupOverview, String> {
     if matches!(
-        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        mode.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("similar")
     ) {
         crate::t_dedup::get_similar_overview()
@@ -2230,13 +2231,11 @@ pub fn dedup_get_overview(mode: Option<String>) -> Result<crate::t_dedup::DedupO
 }
 
 #[tauri::command]
-pub fn dedup_set_keep(
-    group_id: i64,
-    file_id: i64,
-    mode: Option<String>,
-) -> Result<(), String> {
+pub fn dedup_set_keep(group_id: i64, file_id: i64, mode: Option<String>) -> Result<(), String> {
     if matches!(
-        mode.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        mode.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("similar")
     ) {
         crate::t_dedup::set_similar_keep(group_id, file_id)

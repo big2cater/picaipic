@@ -520,10 +520,7 @@ pub fn get_raw_preview_image(file_path: &str) -> Result<Option<Vec<u8>>, String>
     }
 }
 
-fn encode_embedded_jpeg_thumb(
-    data: &[u8],
-    thumbnail_size: u32,
-) -> Result<Vec<u8>, String> {
+fn encode_embedded_jpeg_thumb(data: &[u8], thumbnail_size: u32) -> Result<Vec<u8>, String> {
     let orient = jpeg_exif_orientation(data);
     let image = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode embedded RAW JPEG preview: {}", e))?;

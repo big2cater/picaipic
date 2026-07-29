@@ -14,7 +14,7 @@ edges:
     condition: when reviewing cross-layer contract and verification
   - target: patterns/debug-plugin-runtime.md
     condition: when the changed lifecycle or task flow fails
-last_updated: 2026-07-18
+last_updated: 2026-07-29
 ---
 
 # Change an AI Plugin or Host Contract
@@ -32,6 +32,7 @@ Read `context/plugin-runtime.md`, the v1 contract, author checklist, current-sta
 7. Package the plugin and, for release-sensitive changes, validate install/trust/setup/start/smoke/task/stop/uninstall in a packaged host.
 
 ## Gotchas
+- A valid installed manifest is not enough to expose contributed runtime menus. Gate actions on `reachable && managed`, and keep status synchronized between Settings and the main/viewer webviews.
 - `entry.defaultPort` is not guaranteed; honor `PICAIPIC_PLUGIN_PORT` in start, backend, and stop cleanup.
 - Release packages require canonical Ed25519 signing; do not test only with unsigned developer mode.
 - Shared runtimes belong to multiple plugins and survive uninstall.

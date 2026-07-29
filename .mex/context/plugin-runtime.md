@@ -17,7 +17,7 @@ edges:
     condition: when adding or changing plugin behavior
   - target: patterns/debug-plugin-runtime.md
     condition: when setup, start, health, smoke, task, or output behavior fails
-last_updated: 2026-07-20
+last_updated: 2026-07-29
 ---
 
 
@@ -60,6 +60,7 @@ last_updated: 2026-07-20
 
 ## Runtime Rules
 
+- Manifest-contributed capability menus are runtime actions, not install indicators. Show them only while plugin status is `reachable && managed`; broadcast lifecycle status across webviews so start/stop changes update menus immediately.
 - Profiles describe backend/support level, requirements, hardware, and binding. Sample runtimes cover CUDA, ROCm, CPU, and for SA-LUT DirectML.
 - Runtime probes and requirement comparison detect missing/version-mismatched packages. Blocking conflicts prevent capability invocation and advise private runtime or setup repair.
 - Confirmed shared→plugin-private switch (2026-07-17): Settings shows **Use private runtime** on blocking conflicts; host command `switch_ai_plugin_profile_to_private_runtime` persists a synthetic `scope: "plugin"` binding (`plugin-private:<profileId>`), clears that profile's probe cache, and marks `needsVerify`. Shared runtimes are never modified. Do not switch without user confirmation, and do not auto-run Setup after the switch.

@@ -13,22 +13,26 @@ use crate::t_libraw;
 use crate::t_storage;
 use crate::t_utils;
 use crate::t_video;
-use instant_distance::{Builder as HnswBuilder, HnswMap, Search as HnswSearch};
 use base64::{Engine, engine::general_purpose};
 use exif::{In, Tag, Value};
 use image::{GenericImageView, ImageFormat};
-use rusqlite::{Connection, OptionalExtension, Result, ToSql, params, params_from_iter};
+use instant_distance::{Builder as HnswBuilder, HnswMap, Search as HnswSearch};
+use ndarray::Array4;
+use rayon::{ThreadPoolBuilder, prelude::*};
+use rusqlite::{
+    Connection, OptionalExtension, Result, ToSql, params, params_from_iter, types::ValueRef,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
+use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use rayon::prelude::*;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 
 static THUMB_GENERATION_LOCKS: OnceLock<ThumbGenerationLocks> = OnceLock::new();
@@ -955,6 +959,19 @@ struct ExifCapture {
     iso_speed: Option<String>,
 }
 
+#[derive(Clone, Default)]
+struct BinaryExifFallback {
+    make: Option<String>,
+    model: Option<String>,
+    date_time_original: Option<String>,
+    date_time: Option<String>,
+    software: Option<String>,
+    lens_make: Option<String>,
+    lens_model: Option<String>,
+    content_id: Option<String>,
+    sony_orientation: Option<u16>,
+}
+
 struct RawMetadataTarget<'a> {
     make: &'a mut Option<String>,
     model: &'a mut Option<String>,
@@ -1018,6 +1035,265 @@ impl RawMetadataTarget<'_> {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct EmbeddingBatchOutcome {
+    pub results: Vec<(i64, Result<(), String>)>,
+    pub prepared_items: usize,
+    pub prepare_elapsed: Duration,
+    pub engine_elapsed: Duration,
+    pub preprocess_elapsed: Duration,
+    pub inference_elapsed: Duration,
+    pub write_elapsed: Duration,
+}
+
+pub(crate) struct EmbeddingBatchSource {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: i64,
+    pub orientation: i32,
+}
+
+#[derive(Default)]
+pub(crate) struct PreparedEmbeddingBatch {
+    ids: Vec<i64>,
+    image_input: Option<Array4<f32>>,
+    preprocess_error: Option<String>,
+    prepare_elapsed: Duration,
+    preprocess_elapsed: Duration,
+}
+
+#[derive(Default)]
+pub(crate) struct AFileAddProfile {
+    enabled: bool,
+    pub fetch_elapsed: Duration,
+    pub stat_elapsed: Duration,
+    pub metadata_elapsed: Duration,
+    pub metadata_file_info_elapsed: Duration,
+    pub metadata_header_elapsed: Duration,
+    pub metadata_dimensions_elapsed: Duration,
+    pub metadata_exif_elapsed: Duration,
+    pub metadata_exif_header_attempts: u64,
+    pub metadata_exif_header_elapsed: Duration,
+    pub metadata_exif_container_attempts: u64,
+    pub metadata_exif_container_elapsed: Duration,
+    pub metadata_exif_signature_scan_elapsed: Duration,
+    pub metadata_exif_raw_attempts: u64,
+    pub metadata_exif_raw_elapsed: Duration,
+    pub metadata_exif_file_fallback_attempts: u64,
+    pub metadata_exif_file_fallback_elapsed: Duration,
+    pub metadata_exif_extract_elapsed: Duration,
+    pub metadata_exif_extract_basic_elapsed: Duration,
+    pub metadata_exif_extract_orientation_elapsed: Duration,
+    pub metadata_exif_extract_flash_elapsed: Duration,
+    pub metadata_exif_extract_gps_elapsed: Duration,
+    pub metadata_exif_extract_identity_elapsed: Duration,
+    pub metadata_exif_extract_description_elapsed: Duration,
+    pub metadata_exif_extract_capture_elapsed: Duration,
+    pub metadata_capture_fallback_elapsed: Duration,
+    pub metadata_raw_elapsed: Duration,
+    pub metadata_binary_fallback_elapsed: Duration,
+    pub metadata_binary_tiff_signature_attempts: u64,
+    pub metadata_binary_tiff_signature_elapsed: Duration,
+    pub metadata_binary_tiff_bases_found: u64,
+    pub metadata_binary_complete_jpeg_without_exif_attempts: u64,
+    pub metadata_binary_complete_jpeg_without_exif_tiff_bases_found: u64,
+    pub metadata_binary_entry_scan_attempts: u64,
+    pub metadata_binary_entry_scan_elapsed: Duration,
+    pub metadata_binary_value_decode_elapsed: Duration,
+    pub metadata_motion_elapsed: Duration,
+    pub metadata_motion_header_xmp_attempts: u64,
+    pub metadata_motion_header_xmp_elapsed: Duration,
+    pub metadata_motion_header_complete_check_attempts: u64,
+    pub metadata_motion_header_complete_check_elapsed: Duration,
+    pub metadata_motion_file_fallback_attempts: u64,
+    pub metadata_motion_file_fallback_elapsed: Duration,
+    pub metadata_motion_parse_attempts: u64,
+    pub metadata_motion_parse_elapsed: Duration,
+    pub metadata_heic_elapsed: Duration,
+    pub metadata_geocode_elapsed: Duration,
+    pub metadata_prompt_elapsed: Duration,
+    pub metadata_assemble_elapsed: Duration,
+    pub refresh_elapsed: Duration,
+    pub write_elapsed: Duration,
+    pub refetch_elapsed: Duration,
+    pub deferred_seen_file_id: Option<i64>,
+}
+
+/// Per-scan subset of an indexed file. Warm rescans only need these fields to
+/// decide whether a row needs work; keeping full `AFile` rows here would retain
+/// unrelated text metadata for every file in a large album.
+#[derive(Clone, Debug)]
+pub(crate) struct ScanFileState {
+    id: i64,
+    modified_at: Option<i64>,
+    has_thumbnail: bool,
+    has_embedding: bool,
+    orientation: i32,
+    size: i64,
+    width: u32,
+    height: u32,
+    duration: Option<u64>,
+}
+
+pub(crate) type ScanFileStateCache = HashMap<(i64, String), ScanFileState>;
+
+pub(crate) struct ScanFileIndexResult {
+    pub file_id: i64,
+    pub has_thumbnail: bool,
+    pub has_embedding: bool,
+    pub orientation: i32,
+    pub size: i64,
+    pub width: u32,
+    pub height: u32,
+    pub duration: Option<u64>,
+    pub deferred_seen_file_id: Option<i64>,
+    pub cache_hit: bool,
+}
+
+impl AFileAddProfile {
+    pub(crate) fn scan_enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn started(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn elapsed(started: Option<Instant>) -> Duration {
+        started.map(|started| started.elapsed()).unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AFileMetadataPhase {
+    FileInfo,
+    Header,
+    Dimensions,
+    ExifHeader,
+    ExifFileFallback,
+    ExifExtractOrientation,
+    ExifExtractFlash,
+    ExifExtractGps,
+    ExifExtractIdentity,
+    ExifExtractDescription,
+    ExifExtractCapture,
+    CaptureFallback,
+    Raw,
+    BinaryFallback,
+    Motion,
+    Heic,
+    Geocode,
+    Prompt,
+    Assemble,
+}
+
+/// Records cold-import metadata stages only when scan profiling is enabled.
+struct AFileMetadataProfiler<'a> {
+    profile: Option<&'a mut AFileAddProfile>,
+}
+
+/// Optional internal timing for the one-pass binary EXIF fallback.
+#[derive(Default)]
+struct BinaryExifFallbackProfile {
+    tiff_signature_attempts: u64,
+    tiff_signature_elapsed: Duration,
+    tiff_bases_found: u64,
+    complete_jpeg_without_exif_attempts: u64,
+    complete_jpeg_without_exif_tiff_bases_found: u64,
+    entry_scan_attempts: u64,
+    entry_scan_elapsed: Duration,
+    value_decode_elapsed: Duration,
+}
+
+impl<'a> AFileMetadataProfiler<'a> {
+    fn new(profile: Option<&'a mut AFileAddProfile>) -> Self {
+        Self { profile }
+    }
+
+    fn enabled(&self) -> bool {
+        self.profile.as_ref().is_some_and(|profile| profile.enabled)
+    }
+
+    fn measure<T>(&mut self, phase: AFileMetadataPhase, work: impl FnOnce() -> T) -> T {
+        let started = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.enabled.then(Instant::now));
+        let result = work();
+        if let (Some(profile), Some(started)) = (self.profile.as_deref_mut(), started) {
+            let elapsed = started.elapsed();
+            match phase {
+                AFileMetadataPhase::FileInfo => profile.metadata_file_info_elapsed += elapsed,
+                AFileMetadataPhase::Header => profile.metadata_header_elapsed += elapsed,
+                AFileMetadataPhase::Dimensions => profile.metadata_dimensions_elapsed += elapsed,
+                AFileMetadataPhase::ExifHeader => {
+                    profile.metadata_exif_header_attempts += 1;
+                    profile.metadata_exif_header_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifFileFallback => {
+                    profile.metadata_exif_file_fallback_attempts += 1;
+                    profile.metadata_exif_file_fallback_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractOrientation => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_basic_elapsed += elapsed;
+                    profile.metadata_exif_extract_orientation_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractFlash => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_basic_elapsed += elapsed;
+                    profile.metadata_exif_extract_flash_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractGps => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_basic_elapsed += elapsed;
+                    profile.metadata_exif_extract_gps_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractIdentity => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_identity_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractDescription => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_description_elapsed += elapsed;
+                }
+                AFileMetadataPhase::ExifExtractCapture => {
+                    profile.metadata_exif_extract_elapsed += elapsed;
+                    profile.metadata_exif_extract_capture_elapsed += elapsed;
+                }
+                AFileMetadataPhase::CaptureFallback => {
+                    profile.metadata_capture_fallback_elapsed += elapsed
+                }
+                AFileMetadataPhase::Raw => profile.metadata_raw_elapsed += elapsed,
+                AFileMetadataPhase::BinaryFallback => {
+                    profile.metadata_binary_fallback_elapsed += elapsed
+                }
+                AFileMetadataPhase::Motion => profile.metadata_motion_elapsed += elapsed,
+                AFileMetadataPhase::Heic => profile.metadata_heic_elapsed += elapsed,
+                AFileMetadataPhase::Geocode => profile.metadata_geocode_elapsed += elapsed,
+                AFileMetadataPhase::Prompt => profile.metadata_prompt_elapsed += elapsed,
+                AFileMetadataPhase::Assemble => profile.metadata_assemble_elapsed += elapsed,
+            }
+        }
+        result
+    }
+
+    fn measure_exif<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        let started = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.enabled.then(Instant::now));
+        let result = work(self);
+        if let (Some(profile), Some(started)) = (self.profile.as_deref_mut(), started) {
+            profile.metadata_exif_elapsed += started.elapsed();
+        }
+        result
+    }
+}
+
 impl AFile {
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
@@ -1038,7 +1314,19 @@ impl AFile {
     }
 
     fn new(folder_id: i64, file_path: &str, file_type: i64) -> Result<Self, String> {
-        let file_info = t_utils::FileInfo::new(file_path)?;
+        Self::new_profiled(folder_id, file_path, file_type, None)
+    }
+
+    fn new_profiled(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        profile: Option<&mut AFileAddProfile>,
+    ) -> Result<Self, String> {
+        let mut metadata_profile = AFileMetadataProfiler::new(profile);
+        let file_info = metadata_profile.measure(AFileMetadataPhase::FileInfo, || {
+            t_utils::FileInfo::new(file_path)
+        })?;
 
         // get dimensions and duration based on file type
         let (mut width, mut height, mut duration) = (0u32, 0u32, 0u64);
@@ -1072,40 +1360,45 @@ impl AFile {
         let mut exif_user_comment: Option<String> = None;
 
         // Pre-read file header once for images (saves 3-4 redundant File::open per file).
-        let file_header = Self::read_file_header(file_path, file_type);
+        let file_header = metadata_profile.measure(AFileMetadataPhase::Header, || {
+            Self::read_file_header(file_path, file_type)
+        });
         let file_header_deref = file_header.as_deref();
 
-        match file_type {
-            1 => {
-                let (w, h) = t_image::get_image_dimensions(file_path)?;
-                width = w;
-                height = h;
-            }
-            2 => {
-                let video_metadata = t_video::get_video_metadata(file_path)?;
-                width = video_metadata.width;
-                height = video_metadata.height;
-                duration = video_metadata.duration;
-                e_make = video_metadata.e_make;
-                e_model = video_metadata.e_model;
-                e_date_time = video_metadata.e_date_time;
-                e_software = video_metadata.e_software;
-                gps_latitude = video_metadata.gps_latitude;
-                gps_longitude = video_metadata.gps_longitude;
-                gps_altitude = video_metadata.gps_altitude;
-                // Apple Live Photo video: content identifier from MOV metadata
-                content_id = video_metadata.content_id;
-                if content_id.is_some() {
-                    live_photo_type = 2; // Apple Live Photo video
+        metadata_profile.measure(AFileMetadataPhase::Dimensions, || {
+            match file_type {
+                1 => {
+                    let (w, h) = t_image::get_image_dimensions(file_path)?;
+                    width = w;
+                    height = h;
                 }
+                2 => {
+                    let video_metadata = t_video::get_video_metadata(file_path)?;
+                    width = video_metadata.width;
+                    height = video_metadata.height;
+                    duration = video_metadata.duration;
+                    e_make = video_metadata.e_make;
+                    e_model = video_metadata.e_model;
+                    e_date_time = video_metadata.e_date_time;
+                    e_software = video_metadata.e_software;
+                    gps_latitude = video_metadata.gps_latitude;
+                    gps_longitude = video_metadata.gps_longitude;
+                    gps_altitude = video_metadata.gps_altitude;
+                    // Apple Live Photo video: content identifier from MOV metadata
+                    content_id = video_metadata.content_id;
+                    if content_id.is_some() {
+                        live_photo_type = 2; // Apple Live Photo video
+                    }
+                }
+                3 => {
+                    let (w, h) = t_image::get_raw_dimensions(file_path)?;
+                    width = w;
+                    height = h;
+                }
+                _ => {}
             }
-            3 => {
-                let (w, h) = t_image::get_raw_dimensions(file_path)?;
-                width = w;
-                height = h;
-            }
-            _ => {}
-        };
+            Ok::<(), String>(())
+        })?;
 
         let format_label = if let Some(hdr) = file_header_deref {
             if file_type == 3 {
@@ -1122,7 +1415,47 @@ impl AFile {
             // Some older JPEGs place EXIF after large APP segments (such as an
             // ICC profile), beyond this header buffer. Fall back to scanning
             // the full JPEG so their capture settings are indexed as well.
-            let exif = Self::read_image_exif(file_path, file_type, file_header_deref);
+            let exif = if metadata_profile.enabled() {
+                metadata_profile.measure_exif(|metadata_profile| {
+                    Self::read_image_exif_profiled(
+                        file_path,
+                        file_type,
+                        file_header_deref,
+                        metadata_profile,
+                    )
+                })
+            } else {
+                Self::read_image_exif(file_path, file_type, file_header_deref)
+            };
+            // One binary pass feeds both missing EXIF fields and Apple Live
+            // ContentIdentifier fallback below.
+            let mut binary_profile = BinaryExifFallbackProfile::default();
+            let profile_binary = metadata_profile.enabled();
+            let binary_exif = metadata_profile.measure(AFileMetadataPhase::BinaryFallback, || {
+                file_header_deref
+                    .filter(|header| Self::should_scrape_binary_exif_fallback(header))
+                    .map(|header| {
+                        Self::scrape_binary_exif_fallback_profiled(
+                            header,
+                            profile_binary.then_some(&mut binary_profile),
+                        )
+                    })
+                    .unwrap_or_default()
+            });
+            if let Some(profile) = metadata_profile.profile.as_deref_mut() {
+                profile.metadata_binary_tiff_signature_attempts +=
+                    binary_profile.tiff_signature_attempts;
+                profile.metadata_binary_tiff_signature_elapsed +=
+                    binary_profile.tiff_signature_elapsed;
+                profile.metadata_binary_tiff_bases_found += binary_profile.tiff_bases_found;
+                profile.metadata_binary_complete_jpeg_without_exif_attempts +=
+                    binary_profile.complete_jpeg_without_exif_attempts;
+                profile.metadata_binary_complete_jpeg_without_exif_tiff_bases_found +=
+                    binary_profile.complete_jpeg_without_exif_tiff_bases_found;
+                profile.metadata_binary_entry_scan_attempts += binary_profile.entry_scan_attempts;
+                profile.metadata_binary_entry_scan_elapsed += binary_profile.entry_scan_elapsed;
+                profile.metadata_binary_value_decode_elapsed += binary_profile.value_decode_elapsed;
+            }
 
             // Extracts EXIF orientation field.
             // 1: Horizontal (normal)
@@ -1133,47 +1466,60 @@ impl AFile {
             // 6: Rotate 90 CW
             // 7: Mirror horizontal and rotate 90 CW
             // 8: Rotate 270 CW
-            e_orientation = Some(Self::extract_orientation(&exif, file_header_deref));
-
-            // Process flash data
-            e_flash = exif.as_ref().and_then(|exif_data| {
-                exif_data
-                    .get_field(Tag::Flash, In::PRIMARY)
-                    .and_then(|field| field.value.get_uint(0))
-                    .map(|val| {
-                        if val & 1 == 1 {
-                            "Fired".to_string()
-                        } else {
-                            "Not fired".to_string()
-                        }
-                    })
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractOrientation, || {
+                e_orientation = Some(Self::extract_orientation(&exif, file_header_deref));
             });
 
-            // Extract GPS data
-            let (lat, lon, alt) = Self::extract_gps_data(&exif);
-            gps_latitude = lat;
-            gps_longitude = lon;
-            gps_altitude = alt;
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractFlash, || {
+                // Process flash data
+                e_flash = exif.as_ref().and_then(|exif_data| {
+                    exif_data
+                        .get_field(Tag::Flash, In::PRIMARY)
+                        .and_then(|field| field.value.get_uint(0))
+                        .map(|val| {
+                            if val & 1 == 1 {
+                                "Fired".to_string()
+                            } else {
+                                "Not fired".to_string()
+                            }
+                        })
+                });
+            });
 
-            let identity = Self::extract_exif_identity(&exif, file_info.modified);
-            taken_date = identity.taken_date;
-            e_make = identity.make;
-            e_model = identity.model;
-            e_date_time = identity.date_time;
-            e_software = identity.software;
-            let description = Self::extract_exif_description(&exif);
-            e_artist = description.artist;
-            e_copyright = description.copyright;
-            e_description = description.description;
-            exif_user_comment = description.user_comment;
-            let capture = Self::extract_exif_capture(&exif);
-            e_lens_make = capture.lens_make;
-            e_lens_model = capture.lens_model;
-            e_exposure_bias = capture.exposure_bias;
-            e_exposure_time = capture.exposure_time;
-            e_f_number = capture.f_number;
-            e_focal_length = capture.focal_length;
-            e_iso_speed = capture.iso_speed;
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractGps, || {
+                let (lat, lon, alt) = Self::extract_gps_data(&exif);
+                gps_latitude = lat;
+                gps_longitude = lon;
+                gps_altitude = alt;
+            });
+
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractIdentity, || {
+                let identity = Self::extract_exif_identity(&exif, file_info.modified);
+                taken_date = identity.taken_date;
+                e_make = identity.make;
+                e_model = identity.model;
+                e_date_time = identity.date_time;
+                e_software = identity.software;
+            });
+
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractDescription, || {
+                let description = Self::extract_exif_description(&exif);
+                e_artist = description.artist;
+                e_copyright = description.copyright;
+                e_description = description.description;
+                exif_user_comment = description.user_comment;
+            });
+
+            metadata_profile.measure(AFileMetadataPhase::ExifExtractCapture, || {
+                let capture = Self::extract_exif_capture(&exif);
+                e_lens_make = capture.lens_make;
+                e_lens_model = capture.lens_model;
+                e_exposure_bias = capture.exposure_bias;
+                e_exposure_time = capture.exposure_time;
+                e_f_number = capture.f_number;
+                e_focal_length = capture.focal_length;
+                e_iso_speed = capture.iso_speed;
+            });
 
             // The editor uses little_exif to preserve metadata. Some legacy
             // JPEGs are accepted by that reader but rejected by kamadak-exif,
@@ -1187,7 +1533,10 @@ impl AFile {
                 && e_focal_length.is_none()
                 && e_iso_speed.is_none()
             {
-                let capture_settings = t_image::read_capture_settings_with_little_exif(file_path);
+                let capture_settings = metadata_profile
+                    .measure(AFileMetadataPhase::CaptureFallback, || {
+                        t_image::read_capture_settings_with_little_exif(file_path)
+                    });
                 e_exposure_time = e_exposure_time.or(capture_settings.exposure_time);
                 e_f_number = e_f_number.or(capture_settings.f_number);
                 e_focal_length = e_focal_length.or(capture_settings.focal_length);
@@ -1206,7 +1555,9 @@ impl AFile {
             // that the permissive EXIF reader scans, so it is robust against
             // RAW files whose EXIF data is stored outside the preview image.
             if file_type == 3 {
-                if let Ok(meta) = t_libraw::get_raw_meta(file_path) {
+                if let Ok(meta) = metadata_profile.measure(AFileMetadataPhase::Raw, || {
+                    t_libraw::get_raw_meta(file_path)
+                }) {
                     RawMetadataTarget {
                         make: &mut e_make,
                         model: &mut e_model,
@@ -1235,34 +1586,33 @@ impl AFile {
                 || e_lens_make.is_none()
                 || e_lens_model.is_none()
             {
-                if let Some(data) = file_header_deref {
-                    if e_make.is_none() {
-                        e_make = Self::scrape_ascii_from_tag(data, 0x010f);
-                    }
-                    if e_model.is_none() {
-                        e_model = Self::scrape_ascii_from_tag(data, 0x0110);
-                    }
-                    if e_date_time.is_none() {
-                        e_date_time = Self::scrape_ascii_from_tag(data, 0x9003)
-                            .or_else(|| Self::scrape_ascii_from_tag(data, 0x0132));
-                    }
-                    if e_software.is_none() {
-                        e_software = Self::scrape_ascii_from_tag(data, 0x0131);
-                    }
-                    if e_lens_model.is_none() {
-                        e_lens_model = Self::scrape_ascii_from_tag(data, 0xa434);
-                    }
-                    if e_lens_make.is_none() {
-                        e_lens_make = Self::scrape_ascii_from_tag(data, 0xa433);
-                    }
-                    // Extra Orientation fallback for Sony MakerNotes (Tag 0x2000)
-                    if e_orientation.is_none() || e_orientation == Some(1) {
-                        if let Some(so) = Self::scrape_u16_from_tag(data, 0x2000) {
-                            if (1..=8).contains(&so) {
-                                e_orientation = Some(so as u32);
-                            }
-                        }
-                    }
+                if e_make.is_none() {
+                    e_make = binary_exif.make.clone();
+                }
+                if e_model.is_none() {
+                    e_model = binary_exif.model.clone();
+                }
+                if e_date_time.is_none() {
+                    e_date_time = binary_exif
+                        .date_time_original
+                        .clone()
+                        .or_else(|| binary_exif.date_time.clone());
+                }
+                if e_software.is_none() {
+                    e_software = binary_exif.software.clone();
+                }
+                if e_lens_model.is_none() {
+                    e_lens_model = binary_exif.lens_model.clone();
+                }
+                if e_lens_make.is_none() {
+                    e_lens_make = binary_exif.lens_make.clone();
+                }
+                // Extra Orientation fallback for Sony MakerNotes (Tag 0x2000)
+                if (e_orientation.is_none() || e_orientation == Some(1))
+                    && let Some(so) = binary_exif.sony_orientation
+                    && (1..=8).contains(&so)
+                {
+                    e_orientation = Some(so as u32);
                 }
             }
 
@@ -1298,9 +1648,7 @@ impl AFile {
             });
             // Binary fallback for ContentIdentifier
             if content_id.is_none() {
-                if let Some(hdr) = file_header_deref {
-                    content_id = Self::scrape_ascii_from_tag(hdr, 0x0011);
-                }
+                content_id = binary_exif.content_id;
             }
             if content_id.is_some() {
                 live_photo_type = 1; // Apple Live Photo image
@@ -1310,16 +1658,39 @@ impl AFile {
             // Guard with catch_unwind so a bad XMP packet never aborts indexing
             // for an otherwise normal JPEG/HEIC.
             if content_id.is_none() {
-                let motion_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::t_xmp::detect_motion_photo(file_path)
-                }))
-                .unwrap_or_else(|_| {
-                    eprintln!(
-                        "Motion Photo detection panicked for {}; continuing without live metadata",
-                        file_path
-                    );
-                    None
+                let mut motion_profile = crate::t_xmp::MotionPhotoReadProfile::default();
+                let profile_motion = metadata_profile.enabled();
+                let motion_info = metadata_profile.measure(AFileMetadataPhase::Motion, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::t_xmp::detect_motion_photo_with_header_profiled(
+                            file_path,
+                            file_header_deref,
+                            profile_motion.then_some(&mut motion_profile),
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        eprintln!(
+                            "Motion Photo detection panicked for {}; continuing without live metadata",
+                            file_path
+                        );
+                        None
+                    })
                 });
+                if let Some(profile) = metadata_profile.profile.as_deref_mut() {
+                    profile.metadata_motion_header_xmp_attempts +=
+                        motion_profile.header_xmp_attempts;
+                    profile.metadata_motion_header_xmp_elapsed += motion_profile.header_xmp_elapsed;
+                    profile.metadata_motion_header_complete_check_attempts +=
+                        motion_profile.header_complete_check_attempts;
+                    profile.metadata_motion_header_complete_check_elapsed +=
+                        motion_profile.header_complete_check_elapsed;
+                    profile.metadata_motion_file_fallback_attempts +=
+                        motion_profile.file_fallback_attempts;
+                    profile.metadata_motion_file_fallback_elapsed +=
+                        motion_profile.file_fallback_elapsed;
+                    profile.metadata_motion_parse_attempts += motion_profile.parse_attempts;
+                    profile.metadata_motion_parse_elapsed += motion_profile.parse_elapsed;
+                }
                 if let Some(motion_info) = motion_info {
                     // Encode the video offset in content_id as "motion:<offset>:<length>"
                     let length_str = motion_info
@@ -1338,15 +1709,17 @@ impl AFile {
             // classified as Apple Live (paired MOV) or Motion Photo.
             #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
             if content_id.is_none() && t_image::is_heic_path(file_path) {
-                let heic_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::t_heif::detect_heic_embedded_video(file_path)
-                }))
-                .unwrap_or_else(|_| {
-                    eprintln!(
-                        "HEIC embedded-video detect panicked for {}; continuing",
-                        file_path
-                    );
-                    None
+                let heic_info = metadata_profile.measure(AFileMetadataPhase::Heic, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::t_heif::detect_heic_embedded_video(file_path)
+                    }))
+                    .unwrap_or_else(|_| {
+                        eprintln!(
+                            "HEIC embedded-video detect panicked for {}; continuing",
+                            file_path
+                        );
+                        None
+                    })
                 });
                 if let Some(info) = heic_info {
                     content_id = Some(info.content_id_marker());
@@ -1362,37 +1735,41 @@ impl AFile {
 
         // Geocoding based on GPS coordinates from any source
         let (geo_name, geo_admin1, geo_admin2, geo_cc) =
-            if let (Some(lat), Some(lon)) = (gps_latitude, gps_longitude) {
-                match t_utils::GEOCODER.search((lat, lon)) {
-                    Some(result) => (
-                        Some(result.record.name.clone()),
-                        Some(result.record.admin1.clone()),
-                        Some(result.record.admin2.clone()),
-                        Some(result.record.cc.clone()),
-                    ),
-                    None => (None, None, None, None),
+            metadata_profile.measure(AFileMetadataPhase::Geocode, || {
+                if let (Some(lat), Some(lon)) = (gps_latitude, gps_longitude) {
+                    match t_utils::GEOCODER.search((lat, lon)) {
+                        Some(result) => (
+                            Some(result.record.name.clone()),
+                            Some(result.record.admin1.clone()),
+                            Some(result.record.admin2.clone()),
+                            Some(result.record.cc.clone()),
+                        ),
+                        None => (None, None, None, None),
+                    }
+                } else {
+                    (None, None, None, None)
                 }
-            } else {
-                (None, None, None, None)
-            };
+            });
 
         // RAW dimensions are already orientation-adjusted in `get_raw_dimensions`.
         let should_swap_dimensions_for_orientation =
             file_type != 3 && !t_image::is_heic_path(file_path);
 
         // Optional AI PNG/JPEG prompt → comments (empty-only fill on insert / change rescan).
-        let comments = if file_type == 1 {
-            crate::t_ai_prompt::extract_prompt_for_path(
-                file_path,
-                file_header_deref,
-                exif_user_comment.as_deref(),
-                e_description.as_deref(),
-            )
-        } else {
-            None
-        };
+        let comments = metadata_profile.measure(AFileMetadataPhase::Prompt, || {
+            if file_type == 1 {
+                crate::t_ai_prompt::extract_prompt_for_path(
+                    file_path,
+                    file_header_deref,
+                    exif_user_comment.as_deref(),
+                    e_description.as_deref(),
+                )
+            } else {
+                None
+            }
+        });
 
-        let file = Self {
+        let file = metadata_profile.measure(AFileMetadataPhase::Assemble, || Self {
             id: None,
             folder_id,
 
@@ -1471,7 +1848,7 @@ impl AFile {
             has_thumbnail: None,
             has_embedding: None,
             last_scan_time: Some(0),
-        };
+        });
 
         Ok(file)
     }
@@ -1498,6 +1875,12 @@ impl AFile {
             return None;
         }
         if let Some(hdr) = file_header {
+            if file_type == 1
+                && t_image::is_jpeg_path(file_path)
+                && t_image::jpeg_header_complete_without_exif(hdr)
+            {
+                return None;
+            }
             return t_image::read_exif_from_bytes_permissive(hdr).or_else(|| {
                 (file_type == 1 && t_image::is_jpeg_path(file_path))
                     .then(|| t_image::read_exif_permissive(file_path))
@@ -1505,6 +1888,54 @@ impl AFile {
             });
         }
         t_image::read_exif_permissive(file_path)
+    }
+
+    fn read_image_exif_profiled(
+        file_path: &str,
+        file_type: i64,
+        file_header: Option<&[u8]>,
+        metadata_profile: &mut AFileMetadataProfiler<'_>,
+    ) -> Option<exif::Exif> {
+        if file_type != 1 && file_type != 3 {
+            return None;
+        }
+        if let Some(hdr) = file_header {
+            // A complete JPEG marker walk proves the header has reached SOS/EOI
+            // without an EXIF APP1 segment, so neither reader recovery path can
+            // find EXIF metadata. Keep all incomplete and EXIF-bearing headers
+            // on the permissive path below.
+            if file_type == 1
+                && t_image::is_jpeg_path(file_path)
+                && t_image::jpeg_header_complete_without_exif(hdr)
+            {
+                return None;
+            }
+            let mut exif_profile = t_image::ExifReadProfile::default();
+            let exif = metadata_profile.measure(AFileMetadataPhase::ExifHeader, || {
+                t_image::read_exif_from_bytes_permissive_profiled(hdr, &mut exif_profile)
+            });
+            if let Some(profile) = metadata_profile.profile.as_deref_mut() {
+                profile.metadata_exif_container_attempts += exif_profile.container_attempts;
+                profile.metadata_exif_container_elapsed += exif_profile.container_elapsed;
+                profile.metadata_exif_signature_scan_elapsed += exif_profile.signature_scan_elapsed;
+                profile.metadata_exif_raw_attempts += exif_profile.raw_attempts;
+                profile.metadata_exif_raw_elapsed += exif_profile.raw_elapsed;
+            }
+            return exif.or_else(|| {
+                (file_type == 1
+                    && t_image::is_jpeg_path(file_path)
+                    && !t_image::jpeg_header_complete_without_exif(hdr))
+                .then(|| {
+                    metadata_profile.measure(AFileMetadataPhase::ExifFileFallback, || {
+                        t_image::read_exif_permissive(file_path)
+                    })
+                })
+                .flatten()
+            });
+        }
+        metadata_profile.measure(AFileMetadataPhase::ExifFileFallback, || {
+            t_image::read_exif_permissive(file_path)
+        })
     }
 
     fn extract_orientation(exif: &Option<exif::Exif>, file_header: Option<&[u8]>) -> u32 {
@@ -1517,7 +1948,9 @@ impl AFile {
         });
 
         if orientation.is_none() || orientation == Some(1) {
-            if let Some(hdr) = file_header {
+            if let Some(hdr) =
+                file_header.filter(|hdr| !t_image::jpeg_header_complete_without_exif(hdr))
+            {
                 if let Some(binary_orientation) = t_image::scan_orientation_binary(hdr) {
                     orientation = Some(binary_orientation as u32);
                 }
@@ -1527,10 +1960,7 @@ impl AFile {
         orientation.unwrap_or(1)
     }
 
-    fn extract_exif_identity(
-        exif: &Option<exif::Exif>,
-        modified_at: Option<i64>,
-    ) -> ExifIdentity {
+    fn extract_exif_identity(exif: &Option<exif::Exif>, modified_at: Option<i64>) -> ExifIdentity {
         let date_time = Self::get_exif_field(exif, Tag::DateTimeOriginal);
         ExifIdentity {
             taken_date: date_time
@@ -1693,73 +2123,128 @@ impl AFile {
         }
     }
 
-    fn scrape_ascii_from_tag(data: &[u8], tag_id: u16) -> Option<String> {
+    fn scrape_binary_exif_fallback(data: &[u8]) -> BinaryExifFallback {
+        Self::scrape_binary_exif_fallback_profiled(data, None)
+    }
+
+    /// A complete JPEG header without EXIF APP1 cannot contain the TIFF base
+    /// sought by this fallback. Keep incomplete, non-JPEG, and EXIF-bearing
+    /// headers on the tolerant scan path.
+    fn should_scrape_binary_exif_fallback(data: &[u8]) -> bool {
+        !t_image::jpeg_header_complete_without_exif(data)
+    }
+
+    fn scrape_binary_exif_fallback_profiled(
+        data: &[u8],
+        mut profile: Option<&mut BinaryExifFallbackProfile>,
+    ) -> BinaryExifFallback {
+        let complete_jpeg_without_exif = profile
+            .as_ref()
+            .is_some_and(|_| t_image::jpeg_header_complete_without_exif(data));
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.complete_jpeg_without_exif_attempts += 1;
+        }
         // Find the TIFF base (where the EXIF/TIFF header starts)
-        let tiff_base = data
+        let started = profile.as_ref().map(|_| Instant::now());
+        let Some(tiff_base) = data
             .windows(4)
-            .position(|w| w == b"II\x2a\x00" || w == b"MM\x00\x2a")?;
+            .position(|w| w == b"II\x2a\x00" || w == b"MM\x00\x2a")
+        else {
+            if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                profile.tiff_signature_attempts += 1;
+                profile.tiff_signature_elapsed += started.elapsed();
+            }
+            return BinaryExifFallback::default();
+        };
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+            profile.tiff_signature_attempts += 1;
+            profile.tiff_signature_elapsed += started.elapsed();
+            profile.tiff_bases_found += 1;
+            profile.complete_jpeg_without_exif_tiff_bases_found +=
+                u64::from(complete_jpeg_without_exif);
+        }
 
-        let target_le = [(tag_id & 0xFF) as u8, (tag_id >> 8) as u8, 0x02, 0x00];
-        let target_be = [(tag_id >> 8) as u8, (tag_id & 0xFF) as u8, 0x00, 0x02];
-
-        for (is_le, target) in [(true, target_le), (false, target_be)] {
-            if let Some(pos) = data.windows(12).position(|w| w.starts_with(&target)) {
-                let count = if is_le {
-                    u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?)
+        let mut fallback = BinaryExifFallback::default();
+        let entry_scan_started = profile.as_ref().map(|_| Instant::now());
+        for (pos, entry) in data.windows(12).enumerate() {
+            let (tag, field_type, count, offset, little_endian) =
+                if entry[2..4] == [0x02, 0x00] || entry[2..4] == [0x03, 0x00] {
+                    (
+                        u16::from_le_bytes([entry[0], entry[1]]),
+                        u16::from_le_bytes([entry[2], entry[3]]),
+                        u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize,
+                        u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize,
+                        true,
+                    )
+                } else if entry[2..4] == [0x00, 0x02] || entry[2..4] == [0x00, 0x03] {
+                    (
+                        u16::from_be_bytes([entry[0], entry[1]]),
+                        u16::from_be_bytes([entry[2], entry[3]]),
+                        u32::from_be_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize,
+                        u32::from_be_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize,
+                        false,
+                    )
                 } else {
-                    u32::from_be_bytes(data[pos + 4..pos + 8].try_into().ok()?)
-                } as usize;
+                    continue;
+                };
 
-                if count > 1 && count < 256 {
-                    let mut start = if is_le {
-                        u32::from_le_bytes(data[pos + 8..pos + 12].try_into().ok()?)
-                    } else {
-                        u32::from_be_bytes(data[pos + 8..pos + 12].try_into().ok()?)
-                    } as usize;
-
-                    // If count <= 4, the value is stored directly in the offset field
-                    if count <= 4 {
-                        start = pos + 8;
-                    } else {
-                        // Offset is relative to TIFF header start
-                        start += tiff_base;
-                    }
-
-                    if start + count <= data.len() {
-                        let bytes = &data[start..start + (count - 1).min(count)]; // Skip null terminator
-                        let s = String::from_utf8_lossy(bytes)
+            if field_type == 2
+                && count > 1
+                && count < 256
+                && matches!(
+                    tag,
+                    0x010f | 0x0110 | 0x9003 | 0x0132 | 0x0131 | 0xa434 | 0xa433 | 0x0011
+                )
+            {
+                let start = if count <= 4 {
+                    pos + 8
+                } else {
+                    tiff_base + offset
+                };
+                let value_started = profile.as_ref().map(|_| Instant::now());
+                let value = data
+                    .get(start..start.saturating_add(count.saturating_sub(1)))
+                    .and_then(|bytes| {
+                        let value = String::from_utf8_lossy(bytes)
                             .trim()
                             .trim_matches('\0')
                             .trim()
                             .to_string();
-                        if !s.is_empty()
-                            && s.chars().all(|c| c.is_ascii_graphic() || c.is_whitespace())
-                        {
-                            return Some(s);
-                        }
-                    }
+                        (!value.is_empty()
+                            && value
+                                .chars()
+                                .all(|c| c.is_ascii_graphic() || c.is_whitespace()))
+                        .then_some(value)
+                    });
+                if let (Some(profile), Some(started)) = (profile.as_deref_mut(), value_started) {
+                    profile.value_decode_elapsed += started.elapsed();
                 }
-            }
-        }
-        None
-    }
-
-    /// Helper to scrape U16 values (like Orientation) from raw bytes
-    fn scrape_u16_from_tag(data: &[u8], tag_id: u16) -> Option<u16> {
-        let target_le = [(tag_id & 0xFF) as u8, (tag_id >> 8) as u8, 0x03, 0x00];
-        let target_be = [(tag_id >> 8) as u8, (tag_id & 0xFF) as u8, 0x00, 0x03];
-
-        for (is_le, target) in [(true, target_le), (false, target_be)] {
-            if let Some(pos) = data.windows(12).position(|w| w.starts_with(&target)) {
-                let val = if is_le {
-                    u16::from_le_bytes(data[pos + 8..pos + 10].try_into().ok()?)
-                } else {
-                    u16::from_be_bytes(data[pos + 8..pos + 10].try_into().ok()?)
+                match tag {
+                    0x010f if fallback.make.is_none() => fallback.make = value,
+                    0x0110 if fallback.model.is_none() => fallback.model = value,
+                    0x9003 if fallback.date_time_original.is_none() => {
+                        fallback.date_time_original = value
+                    }
+                    0x0132 if fallback.date_time.is_none() => fallback.date_time = value,
+                    0x0131 if fallback.software.is_none() => fallback.software = value,
+                    0xa434 if fallback.lens_model.is_none() => fallback.lens_model = value,
+                    0xa433 if fallback.lens_make.is_none() => fallback.lens_make = value,
+                    0x0011 if fallback.content_id.is_none() => fallback.content_id = value,
+                    _ => {}
+                }
+            } else if tag == 0x2000 && field_type == 3 && fallback.sony_orientation.is_none() {
+                fallback.sony_orientation = match count {
+                    0 => None,
+                    _ if little_endian => Some(u16::from_le_bytes([entry[8], entry[9]])),
+                    _ => Some(u16::from_be_bytes([entry[8], entry[9]])),
                 };
-                return Some(val);
             }
         }
-        None
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), entry_scan_started) {
+            profile.entry_scan_attempts += 1;
+            profile.entry_scan_elapsed += started.elapsed();
+        }
+        fallback
     }
 
     /// insert a file into db
@@ -2230,6 +2715,95 @@ impl AFile {
         .map_err(|e| e.to_string())
     }
 
+    fn scan_file_state_from_file(file: &Self) -> Result<ScanFileState, String> {
+        let id = file
+            .id
+            .ok_or_else(|| "Indexed file is missing its database id".to_string())?;
+        Ok(ScanFileState {
+            id,
+            modified_at: file.modified_at,
+            has_thumbnail: file.has_thumbnail.unwrap_or(false),
+            has_embedding: file.has_embedding.unwrap_or(false),
+            orientation: file.e_orientation.unwrap_or(1) as i32,
+            size: file.size,
+            width: file.width.unwrap_or(0),
+            height: file.height.unwrap_or(0),
+            duration: file.duration.map(|duration| duration as u64),
+        })
+    }
+
+    fn scan_file_index_result(
+        state: &ScanFileState,
+        deferred_seen_file_id: Option<i64>,
+        cache_hit: bool,
+    ) -> ScanFileIndexResult {
+        ScanFileIndexResult {
+            file_id: state.id,
+            has_thumbnail: state.has_thumbnail,
+            has_embedding: state.has_embedding,
+            orientation: state.orientation,
+            size: state.size,
+            width: state.width,
+            height: state.height,
+            duration: state.duration,
+            deferred_seen_file_id,
+            cache_hit,
+        }
+    }
+
+    /// Load just the fields needed by the synchronous scan decision tree.
+    /// This cache is intentionally owned by one album scan and is never shared
+    /// across scans, databases, or application lifetimes.
+    pub(crate) fn load_scan_file_state_cache_for_album(
+        album_id: i64,
+    ) -> Result<ScanFileStateCache, String> {
+        let conn = open_conn()?;
+        Self::load_scan_file_state_cache_for_album_with_conn(&conn, album_id)
+    }
+
+    fn load_scan_file_state_cache_for_album_with_conn(
+        conn: &Connection,
+        album_id: i64,
+    ) -> Result<ScanFileStateCache, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.id, a.folder_id, a.name, a.modified_at,
+                    EXISTS(SELECT 1 FROM athumbs t WHERE t.file_id = a.id),
+                    CASE WHEN a.embeds IS NOT NULL THEN 1 ELSE 0 END,
+                    a.e_orientation, a.size, a.width, a.height, a.duration
+                 FROM afiles a
+                 INNER JOIN afolders f ON f.id = a.folder_id
+                 WHERE f.album_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![album_id], |row| {
+                Ok((
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    ScanFileState {
+                        id: row.get(0)?,
+                        modified_at: row.get(3)?,
+                        has_thumbnail: row.get::<_, i64>(4)? != 0,
+                        has_embedding: row.get::<_, i64>(5)? != 0,
+                        orientation: row.get::<_, Option<i64>>(6)?.unwrap_or(1) as i32,
+                        size: row.get(7)?,
+                        width: row.get::<_, Option<u32>>(8)?.unwrap_or(0),
+                        height: row.get::<_, Option<u32>>(9)?.unwrap_or(0),
+                        duration: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut cache = ScanFileStateCache::new();
+        for row in rows {
+            let (folder_id, name, state) = row.map_err(|e| e.to_string())?;
+            cache.insert((folder_id, name), state);
+        }
+        Ok(cache)
+    }
+
     /// Bitmask: 1=image, 2=video, 4=raw, 8=Live/Motion still (live_photo_type 1/3/4).
     /// Companion Live videos (type 2) stay excluded by list queries separately.
     fn build_file_type_condition(mask: i64) -> Option<String> {
@@ -2274,20 +2848,159 @@ impl AFile {
         file_type: i64,
         last_scan_time: i64,
     ) -> Result<(Self, i32), String> {
+        let mut profile = AFileAddProfile::default();
+        Self::add_to_db_profiled_inner(
+            folder_id,
+            file_path,
+            file_type,
+            last_scan_time,
+            false,
+            &mut profile,
+        )
+    }
+
+    pub(crate) fn add_to_db_for_scan(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        last_scan_time: i64,
+    ) -> Result<(Self, i32, Option<i64>), String> {
+        let mut profile = AFileAddProfile::default();
+        let result = Self::add_to_db_profiled_inner(
+            folder_id,
+            file_path,
+            file_type,
+            last_scan_time,
+            true,
+            &mut profile,
+        );
+        result.map(|(file, status)| (file, status, profile.deferred_seen_file_id))
+    }
+
+    pub(crate) fn add_to_db_profiled_for_scan(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        last_scan_time: i64,
+    ) -> (Result<(Self, i32, Option<i64>), String>, AFileAddProfile) {
+        let mut profile = AFileAddProfile {
+            enabled: true,
+            ..Default::default()
+        };
+        let result = Self::add_to_db_profiled_inner(
+            folder_id,
+            file_path,
+            file_type,
+            last_scan_time,
+            true,
+            &mut profile,
+        )
+        .map(|(file, status)| (file, status, profile.deferred_seen_file_id));
+        (result, profile)
+    }
+
+    /// Scan through a lightweight, per-album state cache when possible. Cache
+    /// misses and rows needing metadata refresh deliberately reuse the existing
+    /// database path so inserts and concurrent-insert recovery retain their
+    /// established behavior.
+    pub(crate) fn add_to_db_for_scan_with_state_cache(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        last_scan_time: i64,
+        cache: &mut ScanFileStateCache,
+        profile: &mut AFileAddProfile,
+    ) -> Result<ScanFileIndexResult, String> {
+        let name = t_utils::get_file_name(file_path);
+        let key = (folder_id, name);
+        if let Some(existing) = cache.get(&key).cloned() {
+            let stat_started = profile.started();
+            let file_info = t_utils::FileInfo::new(file_path);
+            profile.stat_elapsed += AFileAddProfile::elapsed(stat_started);
+            let file_info = file_info?;
+            let modified = existing.modified_at != file_info.modified;
+            let missing_thumb = !existing.has_thumbnail;
+
+            if modified || missing_thumb {
+                let refresh_started = profile.started();
+                let updated_file = Self::update_file_info(existing.id, file_path, last_scan_time);
+                profile.refresh_elapsed += AFileAddProfile::elapsed(refresh_started);
+                if let Some(mut updated_file) = updated_file? {
+                    let write_started = profile.started();
+                    let _ = AThumb::delete(existing.id);
+                    if modified {
+                        let conn = open_conn()?;
+                        let _ = conn.execute(
+                            "UPDATE afiles SET embeds = NULL WHERE id = ?1",
+                            params![existing.id],
+                        );
+                        invalidate_embed_matrix_for_current_db();
+                        updated_file.has_embedding = Some(false);
+                    }
+                    profile.write_elapsed += AFileAddProfile::elapsed(write_started);
+
+                    let refreshed = Self::scan_file_state_from_file(&updated_file)?;
+                    cache.insert(key, refreshed.clone());
+                    return Ok(Self::scan_file_index_result(&refreshed, None, true));
+                }
+            } else {
+                profile.deferred_seen_file_id = Some(existing.id);
+            }
+
+            return Ok(Self::scan_file_index_result(
+                &existing,
+                profile.deferred_seen_file_id,
+                true,
+            ));
+        }
+
+        let (file, _) = Self::add_to_db_profiled_inner(
+            folder_id,
+            file_path,
+            file_type,
+            last_scan_time,
+            true,
+            profile,
+        )?;
+        let state = Self::scan_file_state_from_file(&file)?;
+        cache.insert(key, state.clone());
+        Ok(Self::scan_file_index_result(
+            &state,
+            profile.deferred_seen_file_id,
+            false,
+        ))
+    }
+
+    fn add_to_db_profiled_inner(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        last_scan_time: i64,
+        defer_seen_write: bool,
+        profile: &mut AFileAddProfile,
+    ) -> Result<(Self, i32), String> {
         // Check if the file exists
-        let existing_file = Self::fetch(folder_id, file_path)?;
+        let fetch_started = profile.started();
+        let existing_file = Self::fetch(folder_id, file_path);
+        profile.fetch_elapsed += AFileAddProfile::elapsed(fetch_started);
+        let existing_file = existing_file?;
         if let Some(file) = existing_file {
             // check file modified time or if thumbnail is missing
-            let file_info = t_utils::FileInfo::new(file_path)?;
+            let stat_started = profile.started();
+            let file_info = t_utils::FileInfo::new(file_path);
+            profile.stat_elapsed += AFileAddProfile::elapsed(stat_started);
+            let file_info = file_info?;
             let modified = file.modified_at != file_info.modified;
             let missing_thumb = !file.has_thumbnail.unwrap_or(false);
 
             if modified || missing_thumb {
                 if let Some(file_id) = file.id {
-                    if let Some(mut updated_file) =
-                        Self::update_file_info(file_id, file_path, last_scan_time)?
-                    {
+                    let refresh_started = profile.started();
+                    let updated_file = Self::update_file_info(file_id, file_path, last_scan_time);
+                    profile.refresh_elapsed += AFileAddProfile::elapsed(refresh_started);
+                    if let Some(mut updated_file) = updated_file? {
                         // If modified, delete old thumbnail and remove embeds data
+                        let write_started = profile.started();
                         if modified || missing_thumb {
                             let _ = AThumb::delete(file_id);
                             // remove embeds data
@@ -2301,6 +3014,7 @@ impl AFile {
                                 updated_file.has_embedding = Some(false);
                             }
                         }
+                        profile.write_elapsed += AFileAddProfile::elapsed(write_started);
                         return Ok((updated_file, 2));
                     }
                 } else {
@@ -2313,30 +3027,91 @@ impl AFile {
                 // Not modified and thumb exists, but we still need to update last_scan_time
                 // for the mark-and-sweep deletion logic.
                 if let Some(file_id) = file.id {
-                    let _ = Self::update_column(file_id, "last_scan_time", &last_scan_time);
+                    if defer_seen_write {
+                        profile.deferred_seen_file_id = Some(file_id);
+                    } else {
+                        let write_started = profile.started();
+                        let _ = Self::update_column(file_id, "last_scan_time", &last_scan_time);
+                        profile.write_elapsed += AFileAddProfile::elapsed(write_started);
+                    }
                 }
             }
             return Ok((file, 0));
         }
 
         // insert the new file into the database
-        let mut new_file_struct = Self::new(folder_id, file_path, file_type)?;
+        let metadata_started = profile.started();
+        let new_file_struct = Self::new_profiled(folder_id, file_path, file_type, Some(profile));
+        profile.metadata_elapsed += AFileAddProfile::elapsed(metadata_started);
+        let mut new_file_struct = new_file_struct?;
         new_file_struct.last_scan_time = Some(last_scan_time);
-        let inserted = new_file_struct.insert()?;
+        let write_started = profile.started();
+        let inserted = new_file_struct.insert();
+        profile.write_elapsed += AFileAddProfile::elapsed(write_started);
+        let inserted = inserted?;
 
         // A concurrent folder sync or album scan may have inserted the same
         // path after the SELECT above. Re-enter the existing-file path so the
         // winning row is marked as seen by this scan and receives any required
         // metadata or thumbnail refresh.
         if inserted == 0 {
-            return Self::add_to_db(folder_id, file_path, file_type, last_scan_time);
+            return Self::add_to_db_profiled_inner(
+                folder_id,
+                file_path,
+                file_type,
+                last_scan_time,
+                defer_seen_write,
+                profile,
+            );
         }
 
         // return the newly inserted file
-        let new_file = Self::fetch(folder_id, file_path)?;
+        let refetch_started = profile.started();
+        let new_file = Self::fetch(folder_id, file_path);
+        profile.refetch_elapsed += AFileAddProfile::elapsed(refetch_started);
+        let new_file = new_file?;
         new_file
             .map(|f| (f, 1))
             .ok_or_else(|| format!("Inserted file missing from DB: {}", file_path))
+    }
+
+    pub(crate) fn mark_seen_batch(file_ids: &[i64], last_scan_time: i64) -> Result<usize, String> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = open_conn()?;
+        Self::mark_seen_batch_with_conn(&mut conn, file_ids, last_scan_time)
+    }
+
+    pub(crate) fn mark_seen_batch_with_conn(
+        conn: &mut Connection,
+        file_ids: &[i64],
+        last_scan_time: i64,
+    ) -> Result<usize, String> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut updated = 0;
+        for chunk in file_ids.chunks(500) {
+            let placeholders = std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "UPDATE afiles SET last_scan_time = ?1 WHERE id IN ({})",
+                placeholders
+            );
+            let values = std::iter::once(&last_scan_time as &dyn ToSql)
+                .chain(chunk.iter().map(|file_id| file_id as &dyn ToSql));
+            updated += tx
+                .execute(&query, params_from_iter(values))
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
     }
 
     /// True when `file_path` is already indexed (folder path + basename match).
@@ -3205,9 +3980,7 @@ impl AFile {
 
         let mut engine = t_common::lock_mutex(&state.0);
         let (embedding, source) = if let Some((img, src)) = prepared {
-            match panic::catch_unwind(AssertUnwindSafe(|| {
-                engine.encode_image_from_dynamic(img)
-            })) {
+            match panic::catch_unwind(AssertUnwindSafe(|| engine.encode_image_from_dynamic(img))) {
                 Ok(Ok(emb)) => (emb, src),
                 Ok(Err(enc_err)) => {
                     let bytes = ui_thumb_bytes.or_else(|| {
@@ -3269,9 +4042,7 @@ impl AFile {
                     }
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
-                        return Err(format!(
-                            "thumbnail encode panicked for file_id={file_id}"
-                        ));
+                        return Err(format!("thumbnail encode panicked for file_id={file_id}"));
                     }
                 },
                 None => {
@@ -3294,25 +4065,169 @@ impl AFile {
         Ok("Embedding generated and saved".to_string())
     }
 
+    /// Decode and preprocess one batch without holding the AI engine mutex.
+    pub(crate) fn prepare_embeddings_batch(
+        sources: Vec<EmbeddingBatchSource>,
+    ) -> PreparedEmbeddingBatch {
+        let prepare_started = Instant::now();
+        let mut prepared = Vec::new();
+        for source in sources {
+            if !matches!(source.file_type, 1 | 3) {
+                continue;
+            }
+            if let Ok((img, _)) = t_image::load_image_for_clip_embed(
+                &source.file_path,
+                source.file_type,
+                source.orientation,
+            ) {
+                prepared.push((source.file_id, img));
+            }
+        }
+        let prepare_elapsed = prepare_started.elapsed();
+        if prepared.is_empty() {
+            return PreparedEmbeddingBatch {
+                prepare_elapsed,
+                ..PreparedEmbeddingBatch::default()
+            };
+        }
+        let ids: Vec<i64> = prepared.iter().map(|(id, _)| *id).collect();
+        let images: Vec<image::DynamicImage> = prepared.into_iter().map(|(_, img)| img).collect();
+        let preprocess_started = Instant::now();
+        let preprocessed = t_ai::AiEngine::preprocess_dynamic_images(images);
+        let preprocess_elapsed = preprocess_started.elapsed();
+        match preprocessed {
+            Ok(image_input) => PreparedEmbeddingBatch {
+                ids,
+                image_input: Some(image_input),
+                prepare_elapsed,
+                preprocess_elapsed,
+                ..PreparedEmbeddingBatch::default()
+            },
+            Err(error) => PreparedEmbeddingBatch {
+                ids,
+                preprocess_error: Some(error),
+                prepare_elapsed,
+                preprocess_elapsed,
+                ..PreparedEmbeddingBatch::default()
+            },
+        }
+    }
+
+    /// Run and persist a preprocessed dynamic batch through the single ONNX session.
+    pub(crate) fn generate_prepared_embeddings_batch(
+        state: &State<t_ai::AiState>,
+        prepared: PreparedEmbeddingBatch,
+    ) -> EmbeddingBatchOutcome {
+        let PreparedEmbeddingBatch {
+            ids,
+            image_input,
+            preprocess_error,
+            prepare_elapsed,
+            preprocess_elapsed,
+        } = prepared;
+        let prepared_items = ids.len();
+        if prepared_items == 0 {
+            return EmbeddingBatchOutcome {
+                prepare_elapsed,
+                preprocess_elapsed,
+                ..EmbeddingBatchOutcome::default()
+            };
+        }
+        let engine_started = Instant::now();
+        let encoding = match (image_input, preprocess_error) {
+            (Some(image_input), _) => {
+                let mut engine = t_common::lock_mutex(&state.0);
+                engine.encode_preprocessed_images_profiled(image_input, prepared_items)
+            }
+            (None, Some(error)) => Err(error),
+            (None, None) => Err("Embedding batch has no preprocessed input".to_string()),
+        };
+        let locked_engine_elapsed = engine_started.elapsed();
+        let engine_elapsed = preprocess_elapsed.saturating_add(locked_engine_elapsed);
+        let (embeddings, inference_elapsed) = match encoding {
+            Ok((embeddings, inference_elapsed)) => (Ok(embeddings), inference_elapsed),
+            Err(error) => (Err(error), Duration::default()),
+        };
+        let (results, write_elapsed) = match embeddings {
+            Ok(values) => {
+                let write_started = Instant::now();
+                let embeddings: Vec<(i64, Vec<f32>)> = ids.into_iter().zip(values).collect();
+                let results = match Self::update_embeddings_batch(&embeddings) {
+                    Ok(_) => embeddings
+                        .into_iter()
+                        .map(|(file_id, _)| (file_id, Ok(())))
+                        .collect(),
+                    Err(error) => embeddings
+                        .into_iter()
+                        .map(|(file_id, _)| (file_id, Err(error.clone())))
+                        .collect(),
+                };
+                (results, write_started.elapsed())
+            }
+            Err(error) => (
+                ids.into_iter()
+                    .map(|file_id| (file_id, Err(error.clone())))
+                    .collect(),
+                Duration::default(),
+            ),
+        };
+        EmbeddingBatchOutcome {
+            results,
+            prepared_items,
+            prepare_elapsed,
+            engine_elapsed,
+            preprocess_elapsed,
+            inference_elapsed,
+            write_elapsed,
+        }
+    }
+
     /// Update embedding for a file
     pub fn update_embedding(file_id: i64, embedding: Vec<f32>) -> Result<usize, String> {
-        // Convert Vec<f32> to Vec<u8>
-        let mut bytes = Vec::with_capacity(embedding.len() * 4);
-        for val in embedding {
-            bytes.extend_from_slice(&val.to_le_bytes());
-        }
-
-        let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "UPDATE afiles SET embeds = ?1 WHERE id = ?2",
-                params![bytes, file_id],
-            )
-            .map_err(|e| e.to_string())?;
+        let mut conn = open_conn()?;
+        let result = Self::update_embeddings_with_conn(&mut conn, &[(file_id, embedding)])?;
         if result > 0 {
             invalidate_embed_matrix_for_current_db();
         }
         Ok(result)
+    }
+
+    /// Persist a completed inference batch atomically. A batch DB failure is
+    /// returned to the scan worker, which preserves its existing per-file
+    /// fallback path instead of reporting partial success.
+    fn update_embeddings_batch(embeddings: &[(i64, Vec<f32>)]) -> Result<usize, String> {
+        if embeddings.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = open_conn()?;
+        let updated = Self::update_embeddings_with_conn(&mut conn, embeddings)?;
+        if updated > 0 {
+            invalidate_embed_matrix_for_current_db();
+        }
+        Ok(updated)
+    }
+
+    fn update_embeddings_with_conn(
+        conn: &mut Connection,
+        embeddings: &[(i64, Vec<f32>)],
+    ) -> Result<usize, String> {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut stmt = tx
+            .prepare_cached("UPDATE afiles SET embeds = ?1 WHERE id = ?2")
+            .map_err(|e| e.to_string())?;
+        let mut updated = 0;
+        for (file_id, embedding) in embeddings {
+            let mut bytes = Vec::with_capacity(embedding.len() * 4);
+            for value in embedding {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            updated += stmt
+                .execute(params![bytes, file_id])
+                .map_err(|e| e.to_string())?;
+        }
+        drop(stmt);
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
     }
 
     pub fn get_embedding_by_id(file_id: i64) -> Result<Vec<f32>, String> {
@@ -3717,6 +4632,27 @@ struct EmbedMatrix {
     norms: Vec<f32>,
 }
 
+#[derive(Default)]
+struct EmbedMatrixLoadProfile {
+    cache_hit: bool,
+    sqlite_elapsed: Duration,
+    build_elapsed: Duration,
+    rows_seen: usize,
+    rows_loaded: usize,
+    rows_skipped: usize,
+    matrix_bytes: usize,
+}
+
+impl EmbedMatrix {
+    fn allocated_bytes(&self) -> usize {
+        self.db_key
+            .capacity()
+            .saturating_add(self.ids.capacity().saturating_mul(size_of::<i64>()))
+            .saturating_add(self.data.capacity().saturating_mul(size_of::<f32>()))
+            .saturating_add(self.norms.capacity().saturating_mul(size_of::<f32>()))
+    }
+}
+
 /// L2-normalized embedding row for HNSW (distance = 1 - dot = cosine distance).
 #[derive(Clone)]
 struct EmbedPoint(Arc<[f32]>);
@@ -3771,23 +4707,16 @@ const EMBED_MATRIX_MAX_BYTES: usize = 512 * 1024 * 1024;
 
 pub(crate) fn bump_embed_matrix_generation(db_path_key: &str) {
     if let Ok(mut cache) = embed_matrix_cache().lock() {
-        let g = cache.generations.entry(db_path_key.to_string()).or_insert(0);
+        let g = cache
+            .generations
+            .entry(db_path_key.to_string())
+            .or_insert(0);
         *g = g.saturating_add(1);
         let new_g = *g;
-        if cache
-            .current
-            .as_ref()
-            .map(|m| m.db_key.as_str())
-            == Some(db_path_key)
-        {
+        if cache.current.as_ref().map(|m| m.db_key.as_str()) == Some(db_path_key) {
             cache.current = None;
         }
-        if cache
-            .ann
-            .as_ref()
-            .map(|a| a.db_key.as_str())
-            == Some(db_path_key)
-        {
+        if cache.ann.as_ref().map(|a| a.db_key.as_str()) == Some(db_path_key) {
             cache.ann = None;
         }
         cache
@@ -3821,26 +4750,183 @@ pub(crate) fn clear_embed_matrix_cache() {
     }
 }
 
-/// Preload the in-memory embed matrix (+ schedule ANN) off the first-search path.
+fn parse_embed_warm_profile_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn embed_warm_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_embed_warm_profile_enabled(
+            std::env::var("PICAIPIC_EMBED_WARM_PROFILE").ok().as_deref(),
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ProcessResourceSnapshot {
+    cpu_100ns: u64,
+    working_set_bytes: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn process_resource_snapshot() -> Option<ProcessResourceSnapshot> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let process = unsafe { GetCurrentProcess() };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let mut memory = PROCESS_MEMORY_COUNTERS::default();
+    let times_ok =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+    let memory_ok = unsafe {
+        K32GetProcessMemoryInfo(
+            process,
+            &mut memory,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    } != 0;
+    if !times_ok || !memory_ok {
+        return None;
+    }
+    let filetime_value =
+        |value: FILETIME| ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
+    Some(ProcessResourceSnapshot {
+        cpu_100ns: filetime_value(kernel).saturating_add(filetime_value(user)),
+        working_set_bytes: memory.WorkingSetSize as u64,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_resource_snapshot() -> Option<ProcessResourceSnapshot> {
+    None
+}
+
+fn normalized_process_cpu_percent(
+    before_cpu_100ns: u64,
+    after_cpu_100ns: u64,
+    wall_seconds: f64,
+    logical_cpus: usize,
+) -> f64 {
+    let cpu_seconds = after_cpu_100ns.saturating_sub(before_cpu_100ns) as f64 / 10_000_000.0;
+    (cpu_seconds / wall_seconds.max(f64::EPSILON) / logical_cpus.max(1) as f64 * 100.0)
+        .clamp(0.0, 100.0)
+}
+
+fn schedule_embed_warm_idle_profile(db_key: String) {
+    std::thread::Builder::new()
+        .name("embed-warm-idle-profile".into())
+        .spawn(move || {
+            const SETTLE_SECONDS: u64 = 5;
+            const SAMPLE_SECONDS: u64 = 5;
+            std::thread::sleep(Duration::from_secs(SETTLE_SECONDS));
+            let Some(before) = process_resource_snapshot() else {
+                println!("embed_matrix idle_profile db={db_key} unsupported_platform=1");
+                return;
+            };
+            let wall_started = Instant::now();
+            std::thread::sleep(Duration::from_secs(SAMPLE_SECONDS));
+            let Some(after) = process_resource_snapshot() else {
+                return;
+            };
+            let wall_seconds = wall_started.elapsed().as_secs_f64().max(f64::EPSILON);
+            let logical_cpus = std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(1);
+            let cpu_percent = normalized_process_cpu_percent(
+                before.cpu_100ns,
+                after.cpu_100ns,
+                wall_seconds,
+                logical_cpus,
+            );
+            println!(
+                "embed_matrix idle_profile db={} settle_seconds={} window_seconds={:.3} process_cpu_percent={:.2} working_set_mib={:.1} logical_cpus={}",
+                db_key,
+                SETTLE_SECONDS,
+                wall_seconds,
+                cpu_percent,
+                after.working_set_bytes as f64 / (1024.0 * 1024.0),
+                logical_cpus
+            );
+        })
+        .ok();
+}
+
+/// Preload the in-memory embed matrix off the first-search path. ANN stays lazy:
+/// building it for every app launch is expensive for 100k+ libraries, while the
+/// exact in-memory matrix already serves the first query.
 /// Disk persistence of the full matrix is deferred (large, versioned artifact);
-/// warming after library open/switch removes most first-query cold-start cost.
+/// warming after library open/switch removes the matrix load from the first query.
 pub fn warm_embed_matrix_cache() {
     std::thread::Builder::new()
         .name("embed-matrix-warm".into())
         .spawn(|| {
+            let warm_started = Instant::now();
+            let open_started = Instant::now();
             let Ok(conn) = open_conn() else {
                 return;
             };
-            match get_or_load_embed_matrix(&conn) {
+            let open_elapsed = open_started.elapsed();
+            let detailed_profile = embed_warm_profile_enabled();
+            let mut load_profile = EmbedMatrixLoadProfile::default();
+            let loaded = if detailed_profile {
+                get_or_load_embed_matrix_profiled(&conn, Some(&mut load_profile))
+            } else {
+                get_or_load_embed_matrix(&conn)
+            };
+            match loaded {
                 Ok(Some(matrix)) => {
-                    // Kick ANN build so later searches can use it without waiting.
-                    let _ = get_or_build_embed_ann(&matrix);
+                    let ann_mode = if embed_ann_enabled() {
+                        "lazy"
+                    } else {
+                        "disabled"
+                    };
+                    let total_elapsed = warm_started.elapsed();
                     println!(
-                        "embed_matrix warm ready db={} n={} dim={}",
+                        "embed_matrix warm ready db={} n={} dim={} ann={} elapsed_seconds={:.3} matrix_mib={:.1}",
                         matrix.db_key,
                         matrix.ids.len(),
-                        matrix.dim
+                        matrix.dim,
+                        ann_mode,
+                        total_elapsed.as_secs_f64(),
+                        matrix.allocated_bytes() as f64 / (1024.0 * 1024.0)
                     );
+                    if detailed_profile {
+                        let accounted = open_elapsed
+                            .saturating_add(load_profile.sqlite_elapsed)
+                            .saturating_add(load_profile.build_elapsed);
+                        println!(
+                            "embed_matrix warm_profile db={} cache_hit={} open_seconds={:.3} sqlite_seconds={:.3} build_seconds={:.3} other_seconds={:.3} total_seconds={:.3} rows_seen={} rows_loaded={} rows_skipped={} matrix_mib={:.1} working_set_mib={}",
+                            matrix.db_key,
+                            load_profile.cache_hit,
+                            open_elapsed.as_secs_f64(),
+                            load_profile.sqlite_elapsed.as_secs_f64(),
+                            load_profile.build_elapsed.as_secs_f64(),
+                            total_elapsed.saturating_sub(accounted).as_secs_f64(),
+                            total_elapsed.as_secs_f64(),
+                            load_profile.rows_seen,
+                            load_profile.rows_loaded,
+                            load_profile.rows_skipped,
+                            load_profile.matrix_bytes as f64 / (1024.0 * 1024.0),
+                            process_resource_snapshot()
+                                .map(|snapshot| format!("{:.1}", snapshot.working_set_bytes as f64 / (1024.0 * 1024.0)))
+                                .unwrap_or_else(|| "na".to_string())
+                        );
+                        schedule_embed_warm_idle_profile(matrix.db_key.clone());
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -3855,6 +4941,7 @@ fn load_embed_matrix(
     conn: &Connection,
     db_key: &str,
     generation: u64,
+    mut profile: Option<&mut EmbedMatrixLoadProfile>,
 ) -> Result<Option<EmbedMatrix>, String> {
     let exclusion = AFile::search_exclusion_condition("b");
     let sql = format!(
@@ -3863,29 +4950,74 @@ fn load_embed_matrix(
          LEFT JOIN afolders b ON a.folder_id = b.id
          WHERE a.embeds IS NOT NULL AND {exclusion}"
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let sqlite_started = profile.as_ref().map(|_| Instant::now());
+    let stmt_result = conn.prepare(&sql);
+    if let (Some(started), Some(profile)) = (sqlite_started, profile.as_deref_mut()) {
+        profile.sqlite_elapsed += started.elapsed();
+    }
+    let mut stmt = stmt_result.map_err(|e| e.to_string())?;
 
     let mut ids: Vec<i64> = Vec::new();
     let mut data: Vec<f32> = Vec::new();
     let mut norms: Vec<f32> = Vec::new();
     let mut dim: Option<usize> = None;
 
-    let rows = stmt
-        .query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        })
-        .map_err(|e| e.to_string())?;
+    let sqlite_started = profile.as_ref().map(|_| Instant::now());
+    let rows_result = stmt.query([]);
+    if let (Some(started), Some(profile)) = (sqlite_started, profile.as_deref_mut()) {
+        profile.sqlite_elapsed += started.elapsed();
+    }
+    let mut rows = rows_result.map_err(|e| e.to_string())?;
 
-    for row in rows {
-        let (id, blob) = row.map_err(|e| e.to_string())?;
+    loop {
+        let sqlite_started = profile.as_ref().map(|_| Instant::now());
+        let row_result = rows.next();
+        let row = match row_result {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                if let (Some(started), Some(profile)) = (sqlite_started, profile.as_deref_mut()) {
+                    profile.sqlite_elapsed += started.elapsed();
+                }
+                break;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let id: i64 = row.get(0).map_err(|error| error.to_string())?;
+        let blob_value = row.get_ref(1).map_err(|error| error.to_string())?;
+        let blob = match blob_value {
+            ValueRef::Blob(blob) => blob,
+            value => {
+                return Err(format!(
+                    "embedding row {id} has non-BLOB value type {:?}",
+                    value.data_type()
+                ));
+            }
+        };
+        if let (Some(started), Some(profile)) = (sqlite_started, profile.as_deref_mut()) {
+            profile.sqlite_elapsed += started.elapsed();
+        }
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.rows_seen = profile.rows_seen.saturating_add(1);
+        }
+        let build_started = profile.as_ref().map(|_| Instant::now());
         if blob.is_empty() || blob.len() % 4 != 0 {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.rows_skipped = profile.rows_skipped.saturating_add(1);
+                if let Some(started) = build_started {
+                    profile.build_elapsed += started.elapsed();
+                }
+            }
             continue;
         }
         let row_dim = blob.len() / 4;
         if let Some(d) = dim {
             if row_dim != d {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.rows_skipped = profile.rows_skipped.saturating_add(1);
+                    if let Some(started) = build_started {
+                        profile.build_elapsed += started.elapsed();
+                    }
+                }
                 continue; // skip mismatched rows
             }
         } else {
@@ -3899,6 +5031,9 @@ fn load_embed_matrix(
             .saturating_mul(4)
             > EMBED_MATRIX_MAX_BYTES
         {
+            if let (Some(started), Some(profile)) = (build_started, profile.as_deref_mut()) {
+                profile.build_elapsed += started.elapsed();
+            }
             return Ok(None);
         }
         let mut norm_sq = 0.0f32;
@@ -3909,20 +5044,45 @@ fn load_embed_matrix(
         }
         ids.push(id);
         norms.push(if norm_sq > 0.0 { norm_sq.sqrt() } else { 0.0 });
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.rows_loaded = profile.rows_loaded.saturating_add(1);
+            if let Some(started) = build_started {
+                profile.build_elapsed += started.elapsed();
+            }
+        }
+    }
+
+    let shrink_started = profile.as_ref().map(|_| Instant::now());
+    ids.shrink_to_fit();
+    data.shrink_to_fit();
+    norms.shrink_to_fit();
+    if let (Some(started), Some(profile)) = (shrink_started, profile.as_deref_mut()) {
+        profile.build_elapsed += started.elapsed();
     }
 
     let d = dim.unwrap_or(0);
-    Ok(Some(EmbedMatrix {
+    let matrix = EmbedMatrix {
         db_key: db_key.to_string(),
         generation,
         dim: d,
         ids,
         data,
         norms,
-    }))
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.matrix_bytes = matrix.allocated_bytes();
+    }
+    Ok(Some(matrix))
 }
 
 fn get_or_load_embed_matrix(conn: &Connection) -> Result<Option<Arc<EmbedMatrix>>, String> {
+    get_or_load_embed_matrix_profiled(conn, None)
+}
+
+fn get_or_load_embed_matrix_profiled(
+    conn: &Connection,
+    mut profile: Option<&mut EmbedMatrixLoadProfile>,
+) -> Result<Option<Arc<EmbedMatrix>>, String> {
     let path = t_storage::get_current_db_path().map_err(|e| e.to_string())?;
     let db_key = normalize_db_path_key(&path);
 
@@ -3935,12 +5095,18 @@ fn get_or_load_embed_matrix(conn: &Connection) -> Result<Option<Arc<EmbedMatrix>
         let cache = embed_matrix_cache().lock().map_err(|e| e.to_string())?;
         if let Some(ref m) = cache.current {
             if m.db_key == db_key && m.generation == generation {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.cache_hit = true;
+                    profile.matrix_bytes = m.allocated_bytes();
+                    profile.rows_seen = m.ids.len();
+                    profile.rows_loaded = m.ids.len();
+                }
                 return Ok(Some(m.clone()));
             }
         }
     }
 
-    let loaded = load_embed_matrix(conn, &db_key, generation)?;
+    let loaded = load_embed_matrix(conn, &db_key, generation, profile.as_deref_mut())?;
     let Some(matrix) = loaded else {
         return Ok(None);
     };
@@ -4044,7 +5210,7 @@ fn build_embed_ann(matrix: &EmbedMatrix) -> Option<EmbedAnnIndex> {
 }
 
 fn get_or_build_embed_ann(matrix: &Arc<EmbedMatrix>) -> Option<Arc<EmbedAnnIndex>> {
-    if matrix.ids.len() < t_common::IMAGE_SEARCH_ANN_MIN_N {
+    if !embed_ann_enabled() || matrix.ids.len() < t_common::IMAGE_SEARCH_ANN_MIN_N {
         return None;
     }
     let fail_key = (matrix.db_key.clone(), matrix.generation);
@@ -4069,6 +5235,38 @@ fn get_or_build_embed_ann(matrix: &Arc<EmbedMatrix>) -> Option<Arc<EmbedAnnIndex
     None
 }
 
+const DEFAULT_EMBED_ANN_BUILD_THREADS: usize = 2;
+
+fn parse_embed_ann_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn embed_ann_enabled() -> bool {
+    parse_embed_ann_enabled(std::env::var("PICAIPIC_EMBED_ANN").ok().as_deref())
+}
+
+fn parse_embed_ann_build_threads(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| (1..=8).contains(&value))
+        .unwrap_or(DEFAULT_EMBED_ANN_BUILD_THREADS)
+}
+
+fn embed_ann_build_threads() -> usize {
+    parse_embed_ann_build_threads(
+        std::env::var("PICAIPIC_EMBED_ANN_BUILD_THREADS")
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Build HNSW off the search path so the first large-library query stays responsive.
 fn schedule_background_ann_build(matrix: Arc<EmbedMatrix>) {
     let fail_key = (matrix.db_key.clone(), matrix.generation);
@@ -4087,10 +5285,29 @@ fn schedule_background_ann_build(matrix: Arc<EmbedMatrix>) {
         cache.ann_building.insert(fail_key.clone());
     }
 
+    let build_threads = embed_ann_build_threads();
+    println!(
+        "embed_ann build scheduled db={} gen={} n={} threads={}",
+        matrix.db_key,
+        matrix.generation,
+        matrix.ids.len(),
+        build_threads
+    );
+
     std::thread::Builder::new()
         .name("embed-ann-build".into())
         .spawn(move || {
-            let built = build_embed_ann(&matrix);
+            let built = match ThreadPoolBuilder::new()
+                .num_threads(build_threads)
+                .thread_name(|index| format!("embed-ann-rayon-{index}"))
+                .build()
+            {
+                Ok(pool) => pool.install(|| build_embed_ann(&matrix)),
+                Err(error) => {
+                    eprintln!("embed_ann worker pool failed: {error}");
+                    None
+                }
+            };
             if let Ok(mut cache) = embed_matrix_cache().lock() {
                 cache.ann_building.remove(&fail_key);
                 let g_now = *cache
@@ -4122,6 +5339,52 @@ fn schedule_background_ann_build(matrix: Arc<EmbedMatrix>) {
             }
         })
         .ok();
+}
+
+#[cfg(test)]
+mod embed_ann_config_tests {
+    use super::{
+        normalized_process_cpu_percent, parse_embed_ann_build_threads, parse_embed_ann_enabled,
+        parse_embed_warm_profile_enabled,
+    };
+
+    #[test]
+    fn ann_is_opt_in() {
+        assert!(!parse_embed_ann_enabled(None));
+        assert!(!parse_embed_ann_enabled(Some("0")));
+        assert!(!parse_embed_ann_enabled(Some("false")));
+        assert!(parse_embed_ann_enabled(Some("1")));
+        assert!(parse_embed_ann_enabled(Some(" TRUE ")));
+        assert!(parse_embed_ann_enabled(Some("yes")));
+    }
+
+    #[test]
+    fn accepts_bounded_thread_counts_and_defaults_invalid_values() {
+        assert_eq!(parse_embed_ann_build_threads(Some("1")), 1);
+        assert_eq!(parse_embed_ann_build_threads(Some(" 4 ")), 4);
+        assert_eq!(parse_embed_ann_build_threads(Some("8")), 8);
+        assert_eq!(parse_embed_ann_build_threads(Some("0")), 2);
+        assert_eq!(parse_embed_ann_build_threads(Some("9")), 2);
+        assert_eq!(parse_embed_ann_build_threads(Some("invalid")), 2);
+        assert_eq!(parse_embed_ann_build_threads(None), 2);
+    }
+
+    #[test]
+    fn warm_profile_is_opt_in() {
+        assert!(!parse_embed_warm_profile_enabled(None));
+        assert!(!parse_embed_warm_profile_enabled(Some("0")));
+        assert!(!parse_embed_warm_profile_enabled(Some("false")));
+        assert!(parse_embed_warm_profile_enabled(Some("1")));
+        assert!(parse_embed_warm_profile_enabled(Some(" TRUE ")));
+        assert!(parse_embed_warm_profile_enabled(Some("yes")));
+    }
+
+    #[test]
+    fn process_cpu_is_normalized_to_task_manager_scale() {
+        assert_eq!(normalized_process_cpu_percent(0, 10_000_000, 5.0, 8), 2.5);
+        assert_eq!(normalized_process_cpu_percent(0, 80_000_000, 1.0, 8), 100.0);
+        assert_eq!(normalized_process_cpu_percent(20, 10, 5.0, 8), 0.0);
+    }
 }
 
 /// ANN retrieve then exact cosine on candidates only (band histogram is candidate-local).
@@ -4332,8 +5595,8 @@ mod image_search_top_k_tests {
 #[cfg(test)]
 mod score_embed_matrix_tests {
     use super::{
-        score_embed_matrix_parallel, score_embed_matrix_serial, EmbedMatrix,
-        SCORE_EMBED_MATRIX_PARALLEL_MIN_N,
+        EmbedMatrix, SCORE_EMBED_MATRIX_PARALLEL_MIN_N, score_embed_matrix_parallel,
+        score_embed_matrix_serial,
     };
     use std::collections::HashMap;
 
@@ -4524,8 +5787,7 @@ mod query_builder_tests {
 
     #[test]
     fn search_parts_always_exclude_live_companion_and_excluded_folders() {
-        let (_joins, where_clause, params) =
-            AFile::build_search_query_parts(&empty_query_params());
+        let (_joins, where_clause, params) = AFile::build_search_query_parts(&empty_query_params());
         assert!(where_clause.contains("live_photo_type"));
         assert!(where_clause.contains("is_excluded_from_search"));
         assert!(params.is_empty());
@@ -4565,9 +5827,9 @@ mod query_builder_tests {
         q.end_date = 1_700_086_400;
         q.calendar_sort = 0; // taken_date
         let (_j, where_clause, params) = AFile::build_search_query_parts(&q);
-        assert!(where_clause.contains(
-            "strftime('%Y-%m-%d', a.taken_date, 'unixepoch', 'localtime')"
-        ));
+        assert!(
+            where_clause.contains("strftime('%Y-%m-%d', a.taken_date, 'unixepoch', 'localtime')")
+        );
         assert!(where_clause.contains("localtime"));
         assert_eq!(params.len(), 2);
     }
@@ -4760,9 +6022,12 @@ mod query_builder_tests {
 
 #[cfg(test)]
 mod crud_tests {
-    use super::{AFile, AFolder, RawMetadataTarget};
+    use super::{
+        AFile, AFileAddProfile, AFileMetadataProfiler, AFolder, BinaryExifFallbackProfile,
+        RawMetadataTarget,
+    };
     use crate::t_libraw::RawMeta;
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
     use std::fs;
     use std::path::PathBuf;
 
@@ -5066,6 +6331,7 @@ mod crud_tests {
                  content_id TEXT,
                  paired_file_id INTEGER,
                  live_photo_type INTEGER DEFAULT 0,
+                 embeds BLOB,
                  last_scan_time INTEGER DEFAULT 0,
                  UNIQUE(folder_id, name),
                  FOREIGN KEY(folder_id) REFERENCES afolders(id) ON DELETE CASCADE
@@ -5096,8 +6362,14 @@ mod crud_tests {
         fs::write(&media_path, b"header-fixture").unwrap();
         let path = media_path.to_string_lossy();
 
-        assert_eq!(AFile::read_file_header(&path, 1).as_deref(), Some(b"header-fixture".as_slice()));
-        assert_eq!(AFile::read_file_header(&path, 3).as_deref(), Some(b"header-fixture".as_slice()));
+        assert_eq!(
+            AFile::read_file_header(&path, 1).as_deref(),
+            Some(b"header-fixture".as_slice())
+        );
+        assert_eq!(
+            AFile::read_file_header(&path, 3).as_deref(),
+            Some(b"header-fixture".as_slice())
+        );
         assert!(AFile::read_file_header(&path, 0).is_none());
 
         let _ = fs::remove_file(media_path);
@@ -5118,6 +6390,65 @@ mod crud_tests {
         assert!(AFile::read_image_exif(&path, 0, Some(b"not-exif")).is_none());
         assert!(AFile::read_image_exif(&path, 1, Some(b"not-exif")).is_none());
         let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn profiled_exif_read_separates_header_and_file_fallback() {
+        let mut profile = AFileAddProfile::scan_enabled();
+        let mut profiler = AFileMetadataProfiler::new(Some(&mut profile));
+
+        let header_exif = profiler.measure_exif(|profiler| {
+            AFile::read_image_exif_profiled(
+                "missing.jpg",
+                1,
+                Some(&orientation_tiff_fixture()),
+                profiler,
+            )
+        });
+        assert!(header_exif.is_some());
+        drop(profiler);
+        assert_eq!(profile.metadata_exif_header_attempts, 1);
+        assert_eq!(profile.metadata_exif_file_fallback_attempts, 0);
+
+        let mut profiler = AFileMetadataProfiler::new(Some(&mut profile));
+        let fallback_exif = profiler.measure_exif(|profiler| {
+            AFile::read_image_exif_profiled("missing.jpg", 1, Some(b"not-exif"), profiler)
+        });
+        assert!(fallback_exif.is_none());
+        drop(profiler);
+        assert_eq!(profile.metadata_exif_header_attempts, 2);
+        assert_eq!(profile.metadata_exif_file_fallback_attempts, 1);
+        assert!(profile.metadata_exif_elapsed >= profile.metadata_exif_header_elapsed);
+    }
+
+    #[test]
+    fn profiled_exif_read_skips_complete_jpeg_without_exif() {
+        let mut profile = AFileAddProfile::scan_enabled();
+        let mut profiler = AFileMetadataProfiler::new(Some(&mut profile));
+        let jpeg = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ];
+
+        let exif = profiler.measure_exif(|profiler| {
+            AFile::read_image_exif_profiled("missing.jpg", 1, Some(&jpeg), profiler)
+        });
+        assert!(exif.is_none());
+        drop(profiler);
+        assert_eq!(profile.metadata_exif_header_attempts, 0);
+        assert_eq!(profile.metadata_exif_file_fallback_attempts, 0);
+    }
+
+    #[test]
+    fn complete_jpeg_without_exif_uses_default_orientation() {
+        let jpeg = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ];
+
+        assert_eq!(AFile::extract_orientation(&None, Some(&jpeg)), 1);
     }
 
     fn orientation_tiff_fixture() -> Vec<u8> {
@@ -5293,6 +6624,49 @@ mod crud_tests {
     }
 
     #[test]
+    fn binary_exif_fallback_collects_all_requested_fields_in_one_pass() {
+        let fallback = AFile::scrape_binary_exif_fallback(&identity_tiff_fixture());
+
+        assert_eq!(fallback.make.as_deref(), Some("Canon"));
+        assert_eq!(fallback.model.as_deref(), Some("EOS R"));
+        assert_eq!(
+            fallback.date_time_original.as_deref(),
+            Some("2026:07:27 13:45:00")
+        );
+        assert_eq!(fallback.software.as_deref(), Some("PicAiPic"));
+        assert_eq!(fallback.lens_make.as_deref(), Some("Canon"));
+        assert_eq!(fallback.lens_model.as_deref(), Some("RF50"));
+    }
+
+    #[test]
+    fn binary_exif_profile_skips_entry_scan_without_tiff_signature() {
+        let mut profile = BinaryExifFallbackProfile::default();
+
+        assert!(
+            AFile::scrape_binary_exif_fallback_profiled(b"not a TIFF header", Some(&mut profile),)
+                .make
+                .is_none()
+        );
+        assert_eq!(profile.tiff_signature_attempts, 1);
+        assert_eq!(profile.tiff_bases_found, 0);
+        assert_eq!(profile.entry_scan_attempts, 0);
+    }
+
+    #[test]
+    fn binary_exif_fallback_skips_complete_jpeg_without_exif() {
+        let jpeg = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ];
+
+        assert!(!AFile::should_scrape_binary_exif_fallback(&jpeg));
+        assert!(AFile::should_scrape_binary_exif_fallback(
+            &identity_tiff_fixture()
+        ));
+    }
+
+    #[test]
     fn raw_metadata_overlay_fills_only_missing_fields() {
         let mut make = Some("EXIF make".to_string());
         let mut model = None;
@@ -5427,25 +6801,153 @@ mod crud_tests {
         assert!((latitude - 12.5).abs() < f64::EPSILON);
 
         assert_eq!(AFile::delete_with_conn(&mut conn, file_id).unwrap(), 1);
-        assert!(conn
-            .query_row("SELECT COUNT(*) FROM afiles WHERE id = ?1", [file_id], |row| {
-                row.get::<_, i64>(0)
-            })
+        assert!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM afiles WHERE id = ?1",
+                [file_id],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap()
-            == 0);
-        assert!(conn
-            .query_row("SELECT COUNT(*) FROM athumbs WHERE file_id = ?1", [file_id], |row| {
-                row.get::<_, i64>(0)
-            })
+                == 0
+        );
+        assert!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM athumbs WHERE file_id = ?1",
+                [file_id],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap()
-            == 0);
+                == 0
+        );
+
+        drop(conn);
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn seen_batch_updates_all_requested_rows_in_one_transaction() {
+        let (mut conn, db_path, media_path) = fixture();
+        let path = media_path.to_string_lossy();
+        let first = AFile::new(1, &path, 0).expect("build first fixture AFile");
+        assert_eq!(first.insert_with_conn(&conn).unwrap(), 1);
+        let first_id = conn.last_insert_rowid();
+
+        let mut second = AFile::new(1, &path, 0).expect("build second fixture AFile");
+        second.name = "second.txt".into();
+        assert_eq!(second.insert_with_conn(&conn).unwrap(), 1);
+        let second_id = conn.last_insert_rowid();
+
+        assert_eq!(
+            AFile::mark_seen_batch_with_conn(&mut conn, &[first_id, second_id], 123).unwrap(),
+            2
+        );
+        let times: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT last_scan_time FROM afiles ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(times, vec![123, 123]);
+
+        drop(conn);
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn scan_state_cache_loads_and_hits_existing_rows() {
+        let (conn, db_path, media_path) = fixture();
+        let path = media_path.to_string_lossy();
+        let mut file = AFile::new(1, &path, 0).expect("build fixture AFile");
+        file.e_orientation = Some(6);
+        file.width = Some(640);
+        file.height = Some(480);
+        file.duration = Some(12);
+        assert_eq!(file.insert_with_conn(&conn).unwrap(), 1);
+        let file_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO athumbs (file_id, error_code) VALUES (?1, 0)",
+            [file_id],
+        )
+        .unwrap();
+        conn.execute("UPDATE afiles SET embeds = x'01' WHERE id = ?1", [file_id])
+            .unwrap();
+
+        let mut cache = AFile::load_scan_file_state_cache_for_album_with_conn(&conn, 1).unwrap();
+        assert_eq!(cache.len(), 1);
+        let state = cache.get(&(1, file.name.clone())).unwrap();
+        assert_eq!(state.id, file_id);
+        assert!(state.has_thumbnail);
+        assert!(state.has_embedding);
+        assert_eq!(state.orientation, 6);
+        assert_eq!(
+            (state.width, state.height, state.duration),
+            (640, 480, Some(12))
+        );
+
+        let mut profile = AFileAddProfile::default();
+        let result =
+            AFile::add_to_db_for_scan_with_state_cache(1, &path, 0, 123, &mut cache, &mut profile)
+                .unwrap();
+        assert!(result.cache_hit);
+        assert_eq!(result.file_id, file_id);
+        assert_eq!(result.deferred_seen_file_id, Some(file_id));
+
+        drop(conn);
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn embedding_batch_writes_all_rows_in_one_transaction() {
+        let (mut conn, db_path, media_path) = fixture();
+        let path = media_path.to_string_lossy();
+        let first = AFile::new(1, &path, 0).expect("build first fixture AFile");
+        assert_eq!(first.insert_with_conn(&conn).unwrap(), 1);
+        let first_id = conn.last_insert_rowid();
+
+        let mut second = AFile::new(1, &path, 0).expect("build second fixture AFile");
+        second.name = "second.txt".into();
+        assert_eq!(second.insert_with_conn(&conn).unwrap(), 1);
+        let second_id = conn.last_insert_rowid();
+
+        assert_eq!(
+            AFile::update_embeddings_with_conn(
+                &mut conn,
+                &[(first_id, vec![0.5, -1.0]), (second_id, vec![2.0])],
+            )
+            .unwrap(),
+            2
+        );
+        let first_bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT embeds FROM afiles WHERE id = ?1",
+                [first_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let second_bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT embeds FROM afiles WHERE id = ?1",
+                [second_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            first_bytes,
+            [0.5f32.to_le_bytes(), (-1.0f32).to_le_bytes()].concat()
+        );
+        assert_eq!(second_bytes, 2.0f32.to_le_bytes().to_vec());
 
         drop(conn);
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(media_path);
     }
 }
-
 
 /// Define the album thumbnail struct
 #[derive(Debug, Serialize, Deserialize)]

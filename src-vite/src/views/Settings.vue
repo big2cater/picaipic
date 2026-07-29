@@ -4614,7 +4614,7 @@ async function verifyAiPluginProfile(plugin: AiPluginSummary, profile: AiPluginI
         ...aiPluginStatuses.value,
         [plugin.id]: status,
       };
-      pluginStore.setStatus(plugin.id, status);
+      pluginStore.setStatus(plugin.id, status, true);
     }
 
     const diagnostics = await getAiPluginDiagnostics(plugin.id);
@@ -4665,7 +4665,7 @@ async function runAiPluginProfileSmokeTest(plugin: AiPluginSummary, profile: AiP
         ...aiPluginStatuses.value,
         [plugin.id]: startupStatus,
       };
-      pluginStore.setStatus(plugin.id, startupStatus);
+      pluginStore.setStatus(plugin.id, startupStatus, true);
     } else {
       const status = await getAiPluginStatus(plugin.id);
       if (status) {
@@ -4673,7 +4673,7 @@ async function runAiPluginProfileSmokeTest(plugin: AiPluginSummary, profile: AiP
           ...aiPluginStatuses.value,
           [plugin.id]: status,
         };
-        pluginStore.setStatus(plugin.id, status);
+        pluginStore.setStatus(plugin.id, status, true);
       }
     }
 
@@ -4887,7 +4887,7 @@ async function refreshAiPluginStatus(plugin: AiPluginSummary, showErrors = true)
         ...aiPluginStatuses.value,
         [plugin.id]: status,
       };
-      pluginStore.setStatus(plugin.id, status);
+      pluginStore.setStatus(plugin.id, status, true);
     }
   } catch (error: any) {
     if (showErrors) {
@@ -4996,7 +4996,7 @@ async function startAiPluginRuntime(plugin: AiPluginSummary) {
         ...aiPluginStatuses.value,
         [plugin.id]: status,
       };
-      pluginStore.setStatus(plugin.id, status);
+      pluginStore.setStatus(plugin.id, status, true);
     }
     if (status?.reachable) {
       toast.success(pluginText('startSuccess'));
@@ -5027,7 +5027,7 @@ async function stopAiPluginRuntime(plugin: AiPluginSummary) {
         ...aiPluginStatuses.value,
         [plugin.id]: status,
       };
-      pluginStore.setStatus(plugin.id, status);
+      pluginStore.setStatus(plugin.id, status, true);
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
     await refreshAiPluginStatus(plugin, false);
@@ -5066,7 +5066,7 @@ async function restartAiPluginRuntime(plugin: AiPluginSummary) {
         ...aiPluginStatuses.value,
         [plugin.id]: status,
       };
-      pluginStore.setStatus(plugin.id, status);
+      pluginStore.setStatus(plugin.id, status, true);
     }
     await refreshAiPluginStatus(plugin, false);
     await pluginStore.loadPlugins(true);

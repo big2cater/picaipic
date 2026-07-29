@@ -21,7 +21,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use walkdir::WalkDir; // https://docs.rs/walkdir/2.5.0/walkdir/
 
@@ -108,8 +108,13 @@ mod transfer_tests {
 
     #[test]
     fn download_content_length_rejects_oversize() {
-        assert!(check_download_content_length(Some(IMPORT_URL_MAX_BYTES), IMPORT_URL_MAX_BYTES).is_ok());
-        assert!(check_download_content_length(Some(IMPORT_URL_MAX_BYTES + 1), IMPORT_URL_MAX_BYTES).is_err());
+        assert!(
+            check_download_content_length(Some(IMPORT_URL_MAX_BYTES), IMPORT_URL_MAX_BYTES).is_ok()
+        );
+        assert!(
+            check_download_content_length(Some(IMPORT_URL_MAX_BYTES + 1), IMPORT_URL_MAX_BYTES)
+                .is_err()
+        );
         assert!(check_download_content_length(None, IMPORT_URL_MAX_BYTES).is_ok());
     }
 
@@ -1890,9 +1895,7 @@ struct AlbumScanGuard {
 
 impl AlbumScanGuard {
     fn acquire(album_id: i64) -> Result<Self, String> {
-        let mut active = ACTIVE_ALBUM_SCANS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap_or_else(|e| e.into_inner());
         if !active.insert(album_id) {
             return Err(format!("Album {} is already being scanned", album_id));
         }
@@ -2824,6 +2827,99 @@ struct FileIndexOutcome {
     task: Option<ThumbnailTask>,
     processed_immediately: bool,
     search_ready_immediately: bool,
+    deferred_seen_file_id: Option<i64>,
+}
+
+#[derive(Default)]
+struct IndexSingleFileProfile {
+    folder_elapsed: Duration,
+    folder_cache_hit: bool,
+    folder_cache_miss: bool,
+    file_cache_hit: bool,
+    file_cache_miss: bool,
+    file: crate::t_sqlite::AFileAddProfile,
+    assemble_elapsed: Duration,
+}
+
+// The seen batch must commit before its matching recovery checkpoint. A 500-file
+// window keeps restart rework bounded while avoiding one SQLite transaction per
+// 50 unchanged files in 10k+ warm rescans.
+const SCAN_SEEN_BATCH_SIZE: usize = 500;
+const SCAN_PROGRESS_CHECKPOINT_SIZE: u64 = SCAN_SEEN_BATCH_SIZE as u64;
+
+#[derive(Default)]
+struct SeenBatchProfile {
+    items: u64,
+    elapsed: Duration,
+}
+
+fn flush_deferred_seen_files(
+    file_ids: &mut Vec<i64>,
+    last_scan_time: i64,
+) -> Result<SeenBatchProfile, String> {
+    if file_ids.is_empty() {
+        return Ok(SeenBatchProfile::default());
+    }
+
+    let started = Instant::now();
+    let items = file_ids.len() as u64;
+    let updated = crate::t_sqlite::AFile::mark_seen_batch(file_ids, last_scan_time)?;
+    if updated != file_ids.len() {
+        return Err(format!(
+            "Batch seen update touched {} of {} indexed files",
+            updated,
+            file_ids.len()
+        ));
+    }
+    file_ids.clear();
+    Ok(SeenBatchProfile {
+        items,
+        elapsed: started.elapsed(),
+    })
+}
+
+fn get_or_insert_folder_id<F>(
+    folder_ids: &mut HashMap<String, i64>,
+    folder_path: &str,
+    load: F,
+) -> Result<(i64, bool), String>
+where
+    F: FnOnce() -> Result<i64, String>,
+{
+    if let Some(&folder_id) = folder_ids.get(folder_path) {
+        return Ok((folder_id, true));
+    }
+
+    let folder_id = load()?;
+    folder_ids.insert(folder_path.to_string(), folder_id);
+    Ok((folder_id, false))
+}
+
+#[cfg(test)]
+mod folder_id_cache_tests {
+    use super::get_or_insert_folder_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn resolves_each_folder_once_per_scan() {
+        let mut folder_ids = HashMap::new();
+        let mut loads = 0;
+
+        let (first_id, first_hit) = get_or_insert_folder_id(&mut folder_ids, "D:/album", || {
+            loads += 1;
+            Ok(42)
+        })
+        .unwrap();
+        let (second_id, second_hit) = get_or_insert_folder_id(&mut folder_ids, "D:/album", || {
+            loads += 1;
+            Ok(42)
+        })
+        .unwrap();
+
+        assert_eq!((first_id, first_hit), (42, false));
+        assert_eq!((second_id, second_hit), (42, true));
+        assert_eq!(loads, 1);
+    }
 }
 
 #[derive(Clone)]
@@ -2833,40 +2929,426 @@ struct ProcessingBudget {
     embedding: Arc<Semaphore>,
 }
 
+struct EmbeddingRequest {
+    file_id: i64,
+    file_path: String,
+    file_type: i64,
+    orientation: i32,
+    reply: oneshot::Sender<bool>,
+}
+
+struct PendingEmbeddingBatch {
+    requests: Vec<EmbeddingRequest>,
+    preparation: tauri::async_runtime::JoinHandle<crate::t_sqlite::PreparedEmbeddingBatch>,
+}
+
+#[derive(Default)]
+struct EmbeddingWorkerBatchOutcome {
+    results: HashMap<i64, Result<(), String>>,
+    requested_items: u64,
+    prepared_items: u64,
+    prepare_elapsed: Duration,
+    engine_elapsed: Duration,
+    preprocess_elapsed: Duration,
+    inference_elapsed: Duration,
+    write_elapsed: Duration,
+    fallback_attempts: u64,
+    fallback_elapsed: Duration,
+}
+
+const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 8;
+const DEFAULT_EMBEDDING_INFLIGHT_BATCHES: usize = 3;
+
+fn parse_embedding_batch_size(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| (1..=32).contains(&value))
+        .unwrap_or(DEFAULT_EMBEDDING_BATCH_SIZE)
+}
+
+fn embedding_batch_size() -> usize {
+    parse_embedding_batch_size(std::env::var("PICAIPIC_EMBED_BATCH_SIZE").ok().as_deref())
+}
+
+fn parse_embedding_inflight_batches(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| (2..=4).contains(&value))
+        .unwrap_or(DEFAULT_EMBEDDING_INFLIGHT_BATCHES)
+}
+
+fn embedding_inflight_batches() -> usize {
+    parse_embedding_inflight_batches(
+        std::env::var("PICAIPIC_EMBED_INFLIGHT_BATCHES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+async fn receive_embedding_batch(
+    receiver: &mut mpsc::Receiver<EmbeddingRequest>,
+    batch_size: usize,
+) -> Option<Vec<EmbeddingRequest>> {
+    let first = receiver.recv().await?;
+    let mut batch = vec![first];
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    while batch.len() < batch_size {
+        match receiver.try_recv() {
+            Ok(request) => batch.push(request),
+            Err(_) => break,
+        }
+    }
+    Some(batch)
+}
+
+fn try_receive_prefetch_batch(
+    receiver: &mut mpsc::Receiver<EmbeddingRequest>,
+    batch_size: usize,
+) -> Option<Vec<EmbeddingRequest>> {
+    let available = receiver.len();
+    if available == 0 || (available < batch_size && !receiver.is_closed()) {
+        return None;
+    }
+    let mut batch = Vec::with_capacity(available.min(batch_size));
+    while batch.len() < batch_size {
+        match receiver.try_recv() {
+            Ok(request) => batch.push(request),
+            Err(_) => break,
+        }
+    }
+    (!batch.is_empty()).then_some(batch)
+}
+
+fn spawn_embedding_preparation(requests: Vec<EmbeddingRequest>) -> PendingEmbeddingBatch {
+    let sources = requests
+        .iter()
+        .map(|request| crate::t_sqlite::EmbeddingBatchSource {
+            file_id: request.file_id,
+            file_path: request.file_path.clone(),
+            file_type: request.file_type,
+            orientation: request.orientation,
+        })
+        .collect();
+    let preparation = tauri::async_runtime::spawn_blocking(move || {
+        crate::t_sqlite::AFile::prepare_embeddings_batch(sources)
+    });
+    PendingEmbeddingBatch {
+        requests,
+        preparation,
+    }
+}
+
+#[cfg(test)]
+mod embedding_batch_config_tests {
+    use super::{
+        EmbeddingRequest, parse_embedding_batch_size, parse_embedding_inflight_batches,
+        try_receive_prefetch_batch,
+    };
+    use tokio::sync::{mpsc, oneshot};
+
+    fn request(file_id: i64) -> EmbeddingRequest {
+        let (reply, _result) = oneshot::channel();
+        EmbeddingRequest {
+            file_id,
+            file_path: format!("{file_id}.jpg"),
+            file_type: 1,
+            orientation: 1,
+            reply,
+        }
+    }
+
+    #[test]
+    fn accepts_safe_batch_sizes_and_defaults_invalid_values() {
+        assert_eq!(parse_embedding_batch_size(Some("16")), 16);
+        assert_eq!(parse_embedding_batch_size(Some(" 32 ")), 32);
+        assert_eq!(parse_embedding_batch_size(Some("0")), 8);
+        assert_eq!(parse_embedding_batch_size(Some("33")), 8);
+        assert_eq!(parse_embedding_batch_size(Some("invalid")), 8);
+        assert_eq!(parse_embedding_batch_size(None), 8);
+    }
+
+    #[test]
+    fn accepts_bounded_inflight_batch_counts() {
+        assert_eq!(parse_embedding_inflight_batches(Some("2")), 2);
+        assert_eq!(parse_embedding_inflight_batches(Some(" 3 ")), 3);
+        assert_eq!(parse_embedding_inflight_batches(Some("4")), 4);
+        assert_eq!(parse_embedding_inflight_batches(Some("1")), 3);
+        assert_eq!(parse_embedding_inflight_batches(Some("5")), 3);
+        assert_eq!(parse_embedding_inflight_batches(Some("invalid")), 3);
+        assert_eq!(parse_embedding_inflight_batches(None), 3);
+    }
+
+    #[tokio::test]
+    async fn prefetch_requires_a_full_open_batch_but_drains_a_closed_tail() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        for file_id in 0..3 {
+            sender.send(request(file_id)).await.unwrap();
+        }
+        assert!(try_receive_prefetch_batch(&mut receiver, 4).is_none());
+
+        sender.send(request(3)).await.unwrap();
+        assert_eq!(
+            try_receive_prefetch_batch(&mut receiver, 4).unwrap().len(),
+            4
+        );
+
+        sender.send(request(4)).await.unwrap();
+        sender.send(request(5)).await.unwrap();
+        drop(sender);
+        assert_eq!(
+            try_receive_prefetch_batch(&mut receiver, 4).unwrap().len(),
+            2
+        );
+    }
+}
+
+fn generate_embedding_worker_outcome(
+    app_handle: tauri::AppHandle,
+    prepared: crate::t_sqlite::PreparedEmbeddingBatch,
+    ids: Vec<i64>,
+) -> EmbeddingWorkerBatchOutcome {
+    let state: State<crate::t_ai::AiState> = app_handle.state();
+    let batch_outcome =
+        crate::t_sqlite::AFile::generate_prepared_embeddings_batch(&state, prepared);
+    let mut outcome = EmbeddingWorkerBatchOutcome {
+        results: batch_outcome.results.into_iter().collect(),
+        requested_items: ids.len() as u64,
+        prepared_items: batch_outcome.prepared_items as u64,
+        prepare_elapsed: batch_outcome.prepare_elapsed,
+        engine_elapsed: batch_outcome.engine_elapsed,
+        preprocess_elapsed: batch_outcome.preprocess_elapsed,
+        inference_elapsed: batch_outcome.inference_elapsed,
+        write_elapsed: batch_outcome.write_elapsed,
+        ..EmbeddingWorkerBatchOutcome::default()
+    };
+    let fallback_started = Instant::now();
+    for file_id in ids {
+        if outcome.results.get(&file_id).is_some_and(Result::is_ok) {
+            continue;
+        }
+        outcome.fallback_attempts += 1;
+        let fallback = crate::t_sqlite::AFile::generate_embedding(&state, file_id)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        outcome.results.insert(file_id, fallback);
+    }
+    if outcome.fallback_attempts > 0 {
+        outcome.fallback_elapsed = fallback_started.elapsed();
+    }
+    outcome
+}
+
+async fn embedding_batch_worker(
+    app_handle: tauri::AppHandle,
+    mut receiver: mpsc::Receiver<EmbeddingRequest>,
+    phase_stats: Option<Arc<Mutex<ScanPhaseStats>>>,
+    batch_size: usize,
+) {
+    let Some(first_batch) = receive_embedding_batch(&mut receiver, batch_size).await else {
+        return;
+    };
+    let mut pending = spawn_embedding_preparation(first_batch);
+    loop {
+        let prepared = pending.preparation.await.unwrap_or_default();
+        let prefetched =
+            try_receive_prefetch_batch(&mut receiver, batch_size).map(spawn_embedding_preparation);
+        if prefetched.is_some() {
+            if let Some(stats) = &phase_stats {
+                t_common::lock_mutex(stats).embedding_prefetched_batches += 1;
+            }
+        }
+        let batch = pending.requests;
+        let ids: Vec<i64> = batch.iter().map(|request| request.file_id).collect();
+        let handle = app_handle.clone();
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            generate_embedding_worker_outcome(handle, prepared, ids)
+        })
+        .await
+        .unwrap_or_default();
+        if let Some(stats) = &phase_stats {
+            let mut stats = t_common::lock_mutex(stats);
+            stats.embedding_batches += 1;
+            stats.embedding_batch_items += outcome.requested_items;
+            stats.embedding_prepared_items += outcome.prepared_items;
+            stats.embedding_prepare_elapsed += outcome.prepare_elapsed;
+            stats.embedding_engine_elapsed += outcome.engine_elapsed;
+            stats.embedding_preprocess_elapsed += outcome.preprocess_elapsed;
+            stats.embedding_inference_elapsed += outcome.inference_elapsed;
+            stats.embedding_write_elapsed += outcome.write_elapsed;
+            stats.embedding_fallback_attempts += outcome.fallback_attempts;
+            stats.embedding_fallback_elapsed += outcome.fallback_elapsed;
+        }
+        for request in batch {
+            let ok = outcome
+                .results
+                .get(&request.file_id)
+                .is_some_and(Result::is_ok);
+            let _ = request.reply.send(ok);
+        }
+
+        pending = match prefetched {
+            Some(prefetched) => prefetched,
+            None => {
+                let Some(batch) = receive_embedding_batch(&mut receiver, batch_size).await else {
+                    break;
+                };
+                spawn_embedding_preparation(batch)
+            }
+        };
+    }
+}
+
 #[derive(Clone, Default)]
 struct ScanPhaseStats {
     index_attempts: u64,
     index_successes: u64,
     index_elapsed: Duration,
+    index_folder_elapsed: Duration,
+    index_folder_cache_hits: u64,
+    index_folder_cache_misses: u64,
+    index_file_cache_preload_elapsed: Duration,
+    index_file_cache_rows: u64,
+    index_file_cache_hits: u64,
+    index_file_cache_misses: u64,
+    index_seen_batch_items: u64,
+    index_seen_batch_batches: u64,
+    index_seen_batch_elapsed: Duration,
+    index_file_fetch_elapsed: Duration,
+    index_file_stat_elapsed: Duration,
+    index_file_metadata_elapsed: Duration,
+    index_metadata_file_info_elapsed: Duration,
+    index_metadata_header_elapsed: Duration,
+    index_metadata_dimensions_elapsed: Duration,
+    index_metadata_exif_elapsed: Duration,
+    index_metadata_exif_header_attempts: u64,
+    index_metadata_exif_header_elapsed: Duration,
+    index_metadata_exif_container_attempts: u64,
+    index_metadata_exif_container_elapsed: Duration,
+    index_metadata_exif_signature_scan_elapsed: Duration,
+    index_metadata_exif_raw_attempts: u64,
+    index_metadata_exif_raw_elapsed: Duration,
+    index_metadata_exif_file_fallback_attempts: u64,
+    index_metadata_exif_file_fallback_elapsed: Duration,
+    index_metadata_exif_extract_elapsed: Duration,
+    index_metadata_exif_extract_basic_elapsed: Duration,
+    index_metadata_exif_extract_orientation_elapsed: Duration,
+    index_metadata_exif_extract_flash_elapsed: Duration,
+    index_metadata_exif_extract_gps_elapsed: Duration,
+    index_metadata_exif_extract_identity_elapsed: Duration,
+    index_metadata_exif_extract_description_elapsed: Duration,
+    index_metadata_exif_extract_capture_elapsed: Duration,
+    index_metadata_capture_fallback_elapsed: Duration,
+    index_metadata_raw_elapsed: Duration,
+    index_metadata_binary_fallback_elapsed: Duration,
+    index_metadata_binary_tiff_signature_attempts: u64,
+    index_metadata_binary_tiff_signature_elapsed: Duration,
+    index_metadata_binary_tiff_bases_found: u64,
+    index_metadata_binary_complete_jpeg_without_exif_attempts: u64,
+    index_metadata_binary_complete_jpeg_without_exif_tiff_bases_found: u64,
+    index_metadata_binary_entry_scan_attempts: u64,
+    index_metadata_binary_entry_scan_elapsed: Duration,
+    index_metadata_binary_value_decode_elapsed: Duration,
+    index_metadata_motion_elapsed: Duration,
+    index_metadata_motion_header_xmp_attempts: u64,
+    index_metadata_motion_header_xmp_elapsed: Duration,
+    index_metadata_motion_header_complete_check_attempts: u64,
+    index_metadata_motion_header_complete_check_elapsed: Duration,
+    index_metadata_motion_file_fallback_attempts: u64,
+    index_metadata_motion_file_fallback_elapsed: Duration,
+    index_metadata_motion_parse_attempts: u64,
+    index_metadata_motion_parse_elapsed: Duration,
+    index_metadata_heic_elapsed: Duration,
+    index_metadata_geocode_elapsed: Duration,
+    index_metadata_prompt_elapsed: Duration,
+    index_metadata_assemble_elapsed: Duration,
+    index_file_refresh_elapsed: Duration,
+    index_file_write_elapsed: Duration,
+    index_file_refetch_elapsed: Duration,
+    index_assemble_elapsed: Duration,
+    index_slow_files: u64,
     thumbnail_attempts: u64,
     thumbnail_successes: u64,
     thumbnail_elapsed: Duration,
     embedding_attempts: u64,
     embedding_successes: u64,
     embedding_elapsed: Duration,
+    embedding_permit_wait_elapsed: Duration,
+    embedding_send_elapsed: Duration,
+    embedding_reply_elapsed: Duration,
+    embedding_send_timeouts: u64,
+    embedding_reply_timeouts: u64,
+    embedding_batch_capacity: u64,
+    embedding_inflight_batches: u64,
+    embedding_batches: u64,
+    embedding_prefetched_batches: u64,
+    embedding_batch_items: u64,
+    embedding_prepared_items: u64,
+    embedding_prepare_elapsed: Duration,
+    embedding_engine_elapsed: Duration,
+    embedding_preprocess_elapsed: Duration,
+    embedding_inference_elapsed: Duration,
+    embedding_write_elapsed: Duration,
+    embedding_fallback_attempts: u64,
+    embedding_fallback_elapsed: Duration,
 }
 
 fn scan_phase_profile_enabled() -> bool {
     std::env::var("PICAIPIC_SCAN_PHASE_PROFILE")
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
+fn parse_scan_slow_file_ms(value: Option<&str>) -> Option<Duration> {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&value| (1..=600_000).contains(&value))
+        .map(Duration::from_millis)
+}
+
+fn scan_slow_file_threshold() -> Option<Duration> {
+    parse_scan_slow_file_ms(std::env::var("PICAIPIC_SCAN_SLOW_FILE_MS").ok().as_deref())
+}
+
+#[cfg(test)]
+mod scan_profile_config_tests {
+    use super::parse_scan_slow_file_ms;
+    use std::time::Duration;
+
+    #[test]
+    fn slow_file_threshold_is_explicit_and_bounded() {
+        assert_eq!(
+            parse_scan_slow_file_ms(Some(" 250 ")),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(parse_scan_slow_file_ms(Some("0")), None);
+        assert_eq!(parse_scan_slow_file_ms(Some("600001")), None);
+        assert_eq!(parse_scan_slow_file_ms(Some("invalid")), None);
+        assert_eq!(parse_scan_slow_file_ms(None), None);
+    }
+}
+
 impl ProcessingBudget {
-    fn new() -> Self {
+    fn new(embedding_batch_size: usize, embedding_inflight_batches: usize) -> Self {
         let logical_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
         let total_budget = ((logical_cores as f64) * 0.7).floor().max(1.0) as usize;
         let heavy_budget = if logical_cores <= 8 { 1 } else { 2 }.min(total_budget);
         let normal_budget = total_budget.saturating_sub(heavy_budget).max(1);
-        // Single AiEngine mutex serializes ONNX; budget=2 only queued more waiters.
-        // Keep 1 until multi-engine sessions exist. Decode/I/O is outside the lock.
-        let _ = logical_cores;
+        // Default to two batches: ONNX consumes one while the next batch decodes
+        // and preprocesses outside the engine lock. Controlled probes may admit
+        // a bounded additional queued batch without adding another ONNX session.
         Self {
             normal_thumb: Arc::new(Semaphore::new(normal_budget)),
             heavy_thumb: Arc::new(Semaphore::new(heavy_budget)),
-            embedding: Arc::new(Semaphore::new(1)),
+            embedding: Arc::new(Semaphore::new(
+                embedding_batch_size.saturating_mul(embedding_inflight_batches),
+            )),
         }
     }
 }
@@ -3028,7 +3510,11 @@ fn index_single_file(
     ftype: i64,
     thumbnail_size: u32,
     last_scan_time: i64,
-) -> Option<FileIndexOutcome> {
+    profile_enabled: bool,
+    folder_ids: &mut HashMap<String, i64>,
+    file_states: &mut crate::t_sqlite::ScanFileStateCache,
+) -> (Option<FileIndexOutcome>, IndexSingleFileProfile) {
+    let mut profile = IndexSingleFileProfile::default();
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let parent_path = Path::new(path_str)
             .parent()
@@ -3036,71 +3522,109 @@ fn index_single_file(
             .to_string_lossy()
             .to_string();
 
-        if let Ok(folder) = crate::t_sqlite::AFolder::add_to_db(album_id, &parent_path) {
-            if let Some(folder_id) = folder.id {
-                if let Ok((file, _)) =
-                    crate::t_sqlite::AFile::add_to_db(folder_id, path_str, ftype, last_scan_time)
-                {
-                    if let Some(file_id) = file.id {
-                        let has_thumbnail = file.has_thumbnail.unwrap_or(false);
-                        let has_embedding = file.has_embedding.unwrap_or(false);
-                        let processed_immediately = has_thumbnail;
-                        let search_ready_immediately = match ftype {
-                            1 | 3 => has_thumbnail && has_embedding,
-                            _ => false,
-                        };
-                        let fully_indexed = match ftype {
-                            1 | 3 => search_ready_immediately,
-                            2 => processed_immediately,
-                            _ => false,
-                        };
+        let mut folder_load_elapsed = Duration::default();
+        let folder = get_or_insert_folder_id(folder_ids, &parent_path, || {
+            let folder_started = profile_enabled.then(Instant::now);
+            let folder = crate::t_sqlite::AFolder::add_to_db(album_id, &parent_path);
+            folder_load_elapsed += folder_started
+                .map(|started| started.elapsed())
+                .unwrap_or_default();
+            folder.and_then(|folder| {
+                folder.id.ok_or_else(|| {
+                    format!("Indexed folder has no id, skipping file: {}", parent_path)
+                })
+            })
+        });
+        profile.folder_elapsed += folder_load_elapsed;
+        let (folder_id, folder_cache_hit) = match folder {
+            Ok(folder) => folder,
+            Err(_) => {
+                profile.folder_cache_miss = true;
+                return None;
+            }
+        };
+        profile.folder_cache_hit = folder_cache_hit;
+        profile.folder_cache_miss = !folder_cache_hit;
+        let mut file_profile = if profile_enabled {
+            crate::t_sqlite::AFileAddProfile::scan_enabled()
+        } else {
+            crate::t_sqlite::AFileAddProfile::default()
+        };
+        let file = crate::t_sqlite::AFile::add_to_db_for_scan_with_state_cache(
+            folder_id,
+            path_str,
+            ftype,
+            last_scan_time,
+            file_states,
+            &mut file_profile,
+        );
+        profile.file_cache_hit = file
+            .as_ref()
+            .map(|result| result.cache_hit)
+            .unwrap_or(false);
+        profile.file_cache_miss = !profile.file_cache_hit;
+        if profile_enabled {
+            profile.file = file_profile;
+        }
+        if let Ok(file) = file {
+            let assemble_started = profile_enabled.then(Instant::now);
+            {
+                let file_id = file.file_id;
+                let has_thumbnail = file.has_thumbnail;
+                let has_embedding = file.has_embedding;
+                let processed_immediately = has_thumbnail;
+                let search_ready_immediately = match ftype {
+                    1 | 3 => has_thumbnail && has_embedding,
+                    _ => false,
+                };
+                let fully_indexed = match ftype {
+                    1 | 3 => search_ready_immediately,
+                    2 => processed_immediately,
+                    _ => false,
+                };
 
-                        let task = if fully_indexed {
-                            None
-                        } else {
-                            Some(ThumbnailTask {
-                                file_id,
-                                file_path: path_str.to_string(),
-                                file_type: ftype,
-                                orientation: file.e_orientation.unwrap_or(1) as i32,
-                                thumbnail_size,
-                                file_size: file.size.max(0) as u64,
-                                duration: file.duration.map(|d| d as u64),
-                                is_heavy: should_use_heavy_lane(
-                                    ftype,
-                                    path_str,
-                                    file.size.max(0) as u64,
-                                    file.width.unwrap_or(0),
-                                    file.height.unwrap_or(0),
-                                ),
-                                processed_already_ready: has_thumbnail,
-                            })
-                        };
+                let task = if fully_indexed {
+                    None
+                } else {
+                    Some(ThumbnailTask {
+                        file_id,
+                        file_path: path_str.to_string(),
+                        file_type: ftype,
+                        orientation: file.orientation,
+                        thumbnail_size,
+                        file_size: file.size.max(0) as u64,
+                        duration: file.duration,
+                        is_heavy: should_use_heavy_lane(
+                            ftype,
+                            path_str,
+                            file.size.max(0) as u64,
+                            file.width,
+                            file.height,
+                        ),
+                        processed_already_ready: has_thumbnail,
+                    })
+                };
 
-                        return Some(FileIndexOutcome {
-                            task,
-                            processed_immediately,
-                            search_ready_immediately,
-                        });
-                    } else {
-                        eprintln!(
-                            "Indexed file has no id, skipping follow-up tasks: {}",
-                            path_str
-                        );
-                    }
-                }
-            } else {
-                eprintln!("Indexed folder has no id, skipping file: {}", parent_path);
+                let outcome = FileIndexOutcome {
+                    task,
+                    processed_immediately,
+                    search_ready_immediately,
+                    deferred_seen_file_id: file.deferred_seen_file_id,
+                };
+                profile.assemble_elapsed += assemble_started
+                    .map(|started| started.elapsed())
+                    .unwrap_or_default();
+                return Some(outcome);
             }
         }
         None
     }));
 
     match result {
-        Ok(task) => task,
+        Ok(task) => (task, profile),
         Err(_) => {
             eprintln!("Panic while indexing file, skipping: {}", path_str);
-            None
+            (None, profile)
         }
     }
 }
@@ -3117,6 +3641,7 @@ async fn process_thumbnail_task(
     budget: ProcessingBudget,
     tracker: Arc<Mutex<ProgressTracker>>,
     phase_stats: Option<Arc<Mutex<ScanPhaseStats>>>,
+    embedding_sender: mpsc::Sender<EmbeddingRequest>,
 ) -> Result<bool, String> {
     // --- Preview phase: hold thumb permit only while generating UI thumbnails ---
     let thumb_timeout = if task.is_heavy {
@@ -3230,49 +3755,93 @@ async fn process_thumbnail_task(
     }
 
     // --- Search-index phase: separate permit; does not block thumbnail workers ---
+    let embedding_permit_started = phase_stats.as_ref().map(|_| Instant::now());
     let _embedding_permit = budget
         .embedding
         .acquire()
         .await
         .map_err(|e| format!("Failed to acquire embedding permit: {}", e))?;
+    let embedding_permit_wait_elapsed = embedding_permit_started.map(|started| started.elapsed());
     let embedding_started = phase_stats.as_ref().map(|_| Instant::now());
 
-    let app_handle_for_embedding = app_handle.clone();
-    let file_id = task.file_id;
-    let file_path = task.file_path.clone();
-    let embed_join = tauri::async_runtime::spawn_blocking(move || {
-        let ai_state: State<crate::t_ai::AiState> = app_handle_for_embedding.state();
-        match crate::t_sqlite::AFile::generate_embedding(&ai_state, file_id) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("Failed to generate embedding for {}: {}", file_path, e);
-                false
+    let (reply, result) = oneshot::channel();
+    let embedding_send_started = phase_stats.as_ref().map(|_| Instant::now());
+    let (
+        embedding_ok,
+        embedding_send_elapsed,
+        embedding_reply_elapsed,
+        send_timed_out,
+        reply_timed_out,
+    ) = match tokio::time::timeout(
+        EMBED_TIMEOUT,
+        embedding_sender.send(EmbeddingRequest {
+            file_id: task.file_id,
+            file_path: task.file_path.clone(),
+            file_type: task.file_type,
+            orientation: task.orientation,
+            reply,
+        }),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            let send_elapsed = embedding_send_started.map(|started| started.elapsed());
+            let reply_started = phase_stats.as_ref().map(|_| Instant::now());
+            match tokio::time::timeout(EMBED_TIMEOUT, result).await {
+                Ok(Ok(ok)) => (
+                    ok,
+                    send_elapsed,
+                    reply_started.map(|started| started.elapsed()),
+                    false,
+                    false,
+                ),
+                Ok(Err(_)) => (
+                    false,
+                    send_elapsed,
+                    reply_started.map(|started| started.elapsed()),
+                    false,
+                    false,
+                ),
+                Err(_) => (
+                    false,
+                    send_elapsed,
+                    reply_started.map(|started| started.elapsed()),
+                    false,
+                    true,
+                ),
             }
         }
-    });
-
-    let embedding_ok = match tokio::time::timeout(EMBED_TIMEOUT, embed_join).await {
-        Ok(Ok(ok)) => ok,
-        Ok(Err(e)) => {
-            eprintln!(
-                "Embedding join failed for {} (file_id={}): {}",
-                task.file_path, task.file_id, e
-            );
-            false
-        }
-        Err(_) => {
-            eprintln!(
-                "Embedding timed out after {:?} for {} (file_id={})",
-                EMBED_TIMEOUT, task.file_path, task.file_id
-            );
-            false
-        }
+        Ok(Err(_)) => (
+            false,
+            embedding_send_started.map(|started| started.elapsed()),
+            None,
+            false,
+            false,
+        ),
+        Err(_) => (
+            false,
+            embedding_send_started.map(|started| started.elapsed()),
+            None,
+            true,
+            false,
+        ),
     };
 
     if let Some(stats) = &phase_stats {
         let mut stats = t_common::lock_mutex(stats);
         stats.embedding_attempts += 1;
         stats.embedding_successes += u64::from(embedding_ok);
+        if let Some(elapsed) = embedding_permit_wait_elapsed {
+            stats.embedding_permit_wait_elapsed += elapsed;
+        }
+        if let Some(elapsed) = embedding_send_elapsed {
+            stats.embedding_send_elapsed += elapsed;
+        }
+        if let Some(elapsed) = embedding_reply_elapsed {
+            stats.embedding_reply_elapsed += elapsed;
+        }
+        stats.embedding_send_timeouts += u64::from(send_timed_out);
+        stats.embedding_reply_timeouts += u64::from(reply_timed_out);
         if let Some(started) = embedding_started {
             stats.embedding_elapsed += started.elapsed();
         }
@@ -3307,11 +3876,21 @@ pub async fn index_album_worker(
     let _album_scan_guard = AlbumScanGuard::acquire(album_id)?;
     let scan_start = std::time::Instant::now();
     let phase_profile_enabled = scan_phase_profile_enabled();
-    let phase_stats = phase_profile_enabled
-        .then(|| Arc::new(Mutex::new(ScanPhaseStats::default())));
+    let phase_stats =
+        phase_profile_enabled.then(|| Arc::new(Mutex::new(ScanPhaseStats::default())));
+    let slow_index_threshold = phase_profile_enabled
+        .then(scan_slow_file_threshold)
+        .flatten();
     // Generate a unique scan time for this session (current timestamp)
     let current_scan_time = Utc::now().timestamp_millis();
-    let processing_budget = ProcessingBudget::new();
+    let embedding_batch_size = embedding_batch_size();
+    let embedding_inflight_batches = embedding_inflight_batches();
+    let processing_budget = ProcessingBudget::new(embedding_batch_size, embedding_inflight_batches);
+    if let Some(stats) = &phase_stats {
+        let mut stats = t_common::lock_mutex(stats);
+        stats.embedding_batch_capacity = embedding_batch_size as u64;
+        stats.embedding_inflight_batches = embedding_inflight_batches as u64;
+    }
     // 1. Get album info
     let album = Album::get_album_by_id(album_id).map_err(|e| e.to_string())?;
     let previous_indexed = album.indexed.unwrap_or(0).max(0) as u64;
@@ -3371,7 +3950,34 @@ pub async fn index_album_worker(
     let mut is_cancelled = false;
     let mut traversal_failed = false;
     let mut traversed_count = 0u64;
+    let mut folder_ids = HashMap::new();
+    let file_cache_started = phase_profile_enabled.then(Instant::now);
+    let mut file_states = match AFile::load_scan_file_state_cache_for_album(album_id) {
+        Ok(cache) => cache,
+        Err(error) => {
+            eprintln!(
+                "Failed to preload lightweight scan state for album {}; falling back to per-file lookup: {}",
+                album_id, error
+            );
+            crate::t_sqlite::ScanFileStateCache::new()
+        }
+    };
+    if let Some(stats) = &phase_stats {
+        let mut stats = t_common::lock_mutex(stats);
+        stats.index_file_cache_preload_elapsed += file_cache_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        stats.index_file_cache_rows = file_states.len() as u64;
+    }
+    let mut deferred_seen_file_ids = Vec::with_capacity(SCAN_SEEN_BATCH_SIZE);
     let mut thumbnail_join_set: JoinSet<Result<bool, String>> = JoinSet::new();
+    let (embedding_sender, embedding_receiver) = mpsc::channel(embedding_batch_size * 2);
+    let embedding_worker = tauri::async_runtime::spawn(embedding_batch_worker(
+        app_handle.clone(),
+        embedding_receiver,
+        phase_stats.clone(),
+        embedding_batch_size,
+    ));
     let traversal_started = Instant::now();
     for entry in WalkDir::new(&album.path)
         .into_iter()
@@ -3426,24 +4032,158 @@ pub async fn index_album_worker(
                 }
 
                 let index_started = phase_stats.as_ref().map(|_| Instant::now());
-                let outcome = index_single_file(
+                let (outcome, index_profile) = index_single_file(
                     &album.path,
                     album_id,
                     &path_str,
                     ftype,
                     thumbnail_size,
                     current_scan_time,
+                    phase_profile_enabled,
+                    &mut folder_ids,
+                    &mut file_states,
                 );
+                let index_elapsed = index_started.map(|started| started.elapsed());
+                let slow_index = slow_index_threshold
+                    .zip(index_elapsed)
+                    .is_some_and(|(threshold, elapsed)| elapsed >= threshold);
+                if slow_index {
+                    let total_ms = index_elapsed.unwrap_or_default().as_secs_f64() * 1000.0;
+                    eprintln!(
+                        "[scan-slow-index] album={} file_type={} total_ms={:.3} folder_ms={:.3} fetch_ms={:.3} stat_ms={:.3} metadata_ms={:.3} refresh_ms={:.3} write_ms={:.3} refetch_ms={:.3} assemble_ms={:.3} path='{}'",
+                        album_id,
+                        ftype,
+                        total_ms,
+                        index_profile.folder_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.fetch_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.stat_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.metadata_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.refresh_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.write_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.file.refetch_elapsed.as_secs_f64() * 1000.0,
+                        index_profile.assemble_elapsed.as_secs_f64() * 1000.0,
+                        path_str,
+                    );
+                }
                 if let Some(stats) = &phase_stats {
                     let mut stats = t_common::lock_mutex(stats);
                     stats.index_attempts += 1;
                     stats.index_successes += u64::from(outcome.is_some());
-                    if let Some(started) = index_started {
-                        stats.index_elapsed += started.elapsed();
+                    if let Some(elapsed) = index_elapsed {
+                        stats.index_elapsed += elapsed;
                     }
+                    stats.index_folder_elapsed += index_profile.folder_elapsed;
+                    stats.index_folder_cache_hits += u64::from(index_profile.folder_cache_hit);
+                    stats.index_folder_cache_misses += u64::from(index_profile.folder_cache_miss);
+                    stats.index_file_cache_hits += u64::from(index_profile.file_cache_hit);
+                    stats.index_file_cache_misses += u64::from(index_profile.file_cache_miss);
+                    stats.index_file_fetch_elapsed += index_profile.file.fetch_elapsed;
+                    stats.index_file_stat_elapsed += index_profile.file.stat_elapsed;
+                    stats.index_file_metadata_elapsed += index_profile.file.metadata_elapsed;
+                    stats.index_metadata_file_info_elapsed +=
+                        index_profile.file.metadata_file_info_elapsed;
+                    stats.index_metadata_header_elapsed +=
+                        index_profile.file.metadata_header_elapsed;
+                    stats.index_metadata_dimensions_elapsed +=
+                        index_profile.file.metadata_dimensions_elapsed;
+                    stats.index_metadata_exif_elapsed += index_profile.file.metadata_exif_elapsed;
+                    stats.index_metadata_exif_header_attempts +=
+                        index_profile.file.metadata_exif_header_attempts;
+                    stats.index_metadata_exif_header_elapsed +=
+                        index_profile.file.metadata_exif_header_elapsed;
+                    stats.index_metadata_exif_container_attempts +=
+                        index_profile.file.metadata_exif_container_attempts;
+                    stats.index_metadata_exif_container_elapsed +=
+                        index_profile.file.metadata_exif_container_elapsed;
+                    stats.index_metadata_exif_signature_scan_elapsed +=
+                        index_profile.file.metadata_exif_signature_scan_elapsed;
+                    stats.index_metadata_exif_raw_attempts +=
+                        index_profile.file.metadata_exif_raw_attempts;
+                    stats.index_metadata_exif_raw_elapsed +=
+                        index_profile.file.metadata_exif_raw_elapsed;
+                    stats.index_metadata_exif_file_fallback_attempts +=
+                        index_profile.file.metadata_exif_file_fallback_attempts;
+                    stats.index_metadata_exif_file_fallback_elapsed +=
+                        index_profile.file.metadata_exif_file_fallback_elapsed;
+                    stats.index_metadata_exif_extract_elapsed +=
+                        index_profile.file.metadata_exif_extract_elapsed;
+                    stats.index_metadata_exif_extract_basic_elapsed +=
+                        index_profile.file.metadata_exif_extract_basic_elapsed;
+                    stats.index_metadata_exif_extract_orientation_elapsed +=
+                        index_profile.file.metadata_exif_extract_orientation_elapsed;
+                    stats.index_metadata_exif_extract_flash_elapsed +=
+                        index_profile.file.metadata_exif_extract_flash_elapsed;
+                    stats.index_metadata_exif_extract_gps_elapsed +=
+                        index_profile.file.metadata_exif_extract_gps_elapsed;
+                    stats.index_metadata_exif_extract_identity_elapsed +=
+                        index_profile.file.metadata_exif_extract_identity_elapsed;
+                    stats.index_metadata_exif_extract_description_elapsed +=
+                        index_profile.file.metadata_exif_extract_description_elapsed;
+                    stats.index_metadata_exif_extract_capture_elapsed +=
+                        index_profile.file.metadata_exif_extract_capture_elapsed;
+                    stats.index_metadata_capture_fallback_elapsed +=
+                        index_profile.file.metadata_capture_fallback_elapsed;
+                    stats.index_metadata_raw_elapsed += index_profile.file.metadata_raw_elapsed;
+                    stats.index_metadata_binary_fallback_elapsed +=
+                        index_profile.file.metadata_binary_fallback_elapsed;
+                    stats.index_metadata_binary_tiff_signature_attempts +=
+                        index_profile.file.metadata_binary_tiff_signature_attempts;
+                    stats.index_metadata_binary_tiff_signature_elapsed +=
+                        index_profile.file.metadata_binary_tiff_signature_elapsed;
+                    stats.index_metadata_binary_tiff_bases_found +=
+                        index_profile.file.metadata_binary_tiff_bases_found;
+                    stats.index_metadata_binary_complete_jpeg_without_exif_attempts +=
+                        index_profile
+                            .file
+                            .metadata_binary_complete_jpeg_without_exif_attempts;
+                    stats.index_metadata_binary_complete_jpeg_without_exif_tiff_bases_found +=
+                        index_profile
+                            .file
+                            .metadata_binary_complete_jpeg_without_exif_tiff_bases_found;
+                    stats.index_metadata_binary_entry_scan_attempts +=
+                        index_profile.file.metadata_binary_entry_scan_attempts;
+                    stats.index_metadata_binary_entry_scan_elapsed +=
+                        index_profile.file.metadata_binary_entry_scan_elapsed;
+                    stats.index_metadata_binary_value_decode_elapsed +=
+                        index_profile.file.metadata_binary_value_decode_elapsed;
+                    stats.index_metadata_motion_elapsed +=
+                        index_profile.file.metadata_motion_elapsed;
+                    stats.index_metadata_motion_header_xmp_attempts +=
+                        index_profile.file.metadata_motion_header_xmp_attempts;
+                    stats.index_metadata_motion_header_xmp_elapsed +=
+                        index_profile.file.metadata_motion_header_xmp_elapsed;
+                    stats.index_metadata_motion_header_complete_check_attempts += index_profile
+                        .file
+                        .metadata_motion_header_complete_check_attempts;
+                    stats.index_metadata_motion_header_complete_check_elapsed += index_profile
+                        .file
+                        .metadata_motion_header_complete_check_elapsed;
+                    stats.index_metadata_motion_file_fallback_attempts +=
+                        index_profile.file.metadata_motion_file_fallback_attempts;
+                    stats.index_metadata_motion_file_fallback_elapsed +=
+                        index_profile.file.metadata_motion_file_fallback_elapsed;
+                    stats.index_metadata_motion_parse_attempts +=
+                        index_profile.file.metadata_motion_parse_attempts;
+                    stats.index_metadata_motion_parse_elapsed +=
+                        index_profile.file.metadata_motion_parse_elapsed;
+                    stats.index_metadata_heic_elapsed += index_profile.file.metadata_heic_elapsed;
+                    stats.index_metadata_geocode_elapsed +=
+                        index_profile.file.metadata_geocode_elapsed;
+                    stats.index_metadata_prompt_elapsed +=
+                        index_profile.file.metadata_prompt_elapsed;
+                    stats.index_metadata_assemble_elapsed +=
+                        index_profile.file.metadata_assemble_elapsed;
+                    stats.index_file_refresh_elapsed += index_profile.file.refresh_elapsed;
+                    stats.index_file_write_elapsed += index_profile.file.write_elapsed;
+                    stats.index_file_refetch_elapsed += index_profile.file.refetch_elapsed;
+                    stats.index_assemble_elapsed += index_profile.assemble_elapsed;
+                    stats.index_slow_files += u64::from(slow_index);
                 }
 
                 if let Some(outcome) = outcome {
+                    if let Some(file_id) = outcome.deferred_seen_file_id {
+                        deferred_seen_file_ids.push(file_id);
+                    }
                     let file_size = outcome
                         .task
                         .as_ref()
@@ -3458,6 +4198,7 @@ pub async fn index_album_worker(
                             processing_budget.clone(),
                             tracker.clone(),
                             phase_stats.clone(),
+                            embedding_sender.clone(),
                         ));
                     }
                     with_progress_tracker(&tracker, |tracker| {
@@ -3477,7 +4218,29 @@ pub async fn index_album_worker(
                         with_progress_tracker(&tracker, |tracker| tracker.snapshot.processed);
                     let discovered_now =
                         with_progress_tracker(&tracker, |tracker| tracker.snapshot.discovered);
-                    if discovered_now % 50 == 0 || processed_now % 50 == 0 {
+                    if discovered_now > 0 && discovered_now % SCAN_PROGRESS_CHECKPOINT_SIZE == 0 {
+                        let seen_batch = match flush_deferred_seen_files(
+                            &mut deferred_seen_file_ids,
+                            current_scan_time,
+                        ) {
+                            Ok(batch) => batch,
+                            Err(error) => {
+                                eprintln!(
+                                    "Failed to persist seen files before scan checkpoint: {}",
+                                    error
+                                );
+                                traversal_failed = true;
+                                thumbnail_join_set.abort_all();
+                                break;
+                            }
+                        };
+                        if let Some(stats) = &phase_stats {
+                            let mut stats = t_common::lock_mutex(stats);
+                            stats.index_seen_batch_items += seen_batch.items;
+                            stats.index_seen_batch_batches += u64::from(seen_batch.items > 0);
+                            stats.index_seen_batch_elapsed += seen_batch.elapsed;
+                            stats.index_file_write_elapsed += seen_batch.elapsed;
+                        }
                         let _ = Album::update_progress(album_id, processed_now, total_files);
                     }
                 } else {
@@ -3493,6 +4256,23 @@ pub async fn index_album_worker(
                 traversed_count += 1;
             }
         }
+    }
+    if let Err(error) = flush_deferred_seen_files(&mut deferred_seen_file_ids, current_scan_time)
+        .map(|seen_batch| {
+            if let Some(stats) = &phase_stats {
+                let mut stats = t_common::lock_mutex(stats);
+                stats.index_seen_batch_items += seen_batch.items;
+                stats.index_seen_batch_batches += u64::from(seen_batch.items > 0);
+                stats.index_seen_batch_elapsed += seen_batch.elapsed;
+                stats.index_file_write_elapsed += seen_batch.elapsed;
+            }
+        })
+    {
+        eprintln!(
+            "Failed to persist remaining seen files after traversal: {}",
+            error
+        );
+        traversal_failed = true;
     }
     let traversal_elapsed = traversal_started.elapsed();
 
@@ -3522,6 +4302,8 @@ pub async fn index_album_worker(
             }
         }
     }
+    drop(embedding_sender);
+    let _ = embedding_worker.await;
     let drain_elapsed = drain_started.elapsed();
 
     with_progress_tracker(&tracker, |tracker| tracker.emit_now());
@@ -3590,8 +4372,23 @@ pub async fn index_album_worker(
     );
     if let Some(stats) = &phase_stats {
         let stats = t_common::lock_mutex(stats).clone();
+        let index_known_elapsed = stats
+            .index_folder_elapsed
+            .saturating_add(stats.index_file_fetch_elapsed)
+            .saturating_add(stats.index_file_stat_elapsed)
+            .saturating_add(stats.index_file_metadata_elapsed)
+            .saturating_add(stats.index_file_refresh_elapsed)
+            .saturating_add(stats.index_file_write_elapsed)
+            .saturating_add(stats.index_file_refetch_elapsed)
+            .saturating_add(stats.index_assemble_elapsed);
+        let index_other_elapsed = stats.index_elapsed.saturating_sub(index_known_elapsed);
+        let engine_overhead_elapsed = stats.embedding_engine_elapsed.saturating_sub(
+            stats
+                .embedding_preprocess_elapsed
+                .saturating_add(stats.embedding_inference_elapsed),
+        );
         println!(
-            "[scan-profile] album={} folder='{}' files={} count_seconds={:.3} traversal_seconds={:.3} index_attempts={} index_successes={} index_seconds={:.3} drain_seconds={:.3} thumbnail_attempts={} thumbnail_successes={} thumbnail_task_seconds={:.3} embedding_attempts={} embedding_successes={} embedding_task_seconds={:.3} finalize_seconds={:.3} total_seconds={:.3}",
+            "[scan-profile] album={} folder='{}' files={} count_seconds={:.3} traversal_seconds={:.3} index_attempts={} index_successes={} index_seconds={:.3} index_folder_seconds={:.3} index_folder_cache_hits={} index_folder_cache_misses={} index_file_cache_preload_seconds={:.3} index_file_cache_rows={} index_file_cache_hits={} index_file_cache_misses={} index_fetch_seconds={:.3} index_stat_seconds={:.3} index_metadata_seconds={:.3} index_metadata_file_info_seconds={:.3} index_metadata_header_seconds={:.3} index_metadata_dimensions_seconds={:.3} index_metadata_exif_seconds={:.3} index_metadata_exif_header_attempts={} index_metadata_exif_header_seconds={:.3} index_metadata_exif_container_attempts={} index_metadata_exif_container_seconds={:.3} index_metadata_exif_signature_scan_seconds={:.3} index_metadata_exif_raw_attempts={} index_metadata_exif_raw_seconds={:.3} index_metadata_exif_file_fallback_attempts={} index_metadata_exif_file_fallback_seconds={:.3} index_metadata_exif_extract_seconds={:.3} index_metadata_exif_extract_basic_seconds={:.3} index_metadata_exif_extract_orientation_seconds={:.3} index_metadata_exif_extract_flash_seconds={:.3} index_metadata_exif_extract_gps_seconds={:.3} index_metadata_exif_extract_identity_seconds={:.3} index_metadata_exif_extract_description_seconds={:.3} index_metadata_exif_extract_capture_seconds={:.3} index_metadata_capture_fallback_seconds={:.3} index_metadata_raw_seconds={:.3} index_metadata_binary_fallback_seconds={:.3} index_metadata_binary_tiff_signature_attempts={} index_metadata_binary_tiff_signature_seconds={:.3} index_metadata_binary_tiff_bases_found={} index_metadata_binary_complete_jpeg_without_exif_attempts={} index_metadata_binary_complete_jpeg_without_exif_tiff_bases_found={} index_metadata_binary_entry_scan_attempts={} index_metadata_binary_entry_scan_seconds={:.3} index_metadata_binary_value_decode_seconds={:.3} index_metadata_motion_seconds={:.3} index_metadata_motion_header_xmp_attempts={} index_metadata_motion_header_xmp_seconds={:.3} index_metadata_motion_header_complete_check_attempts={} index_metadata_motion_header_complete_check_seconds={:.3} index_metadata_motion_file_fallback_attempts={} index_metadata_motion_file_fallback_seconds={:.3} index_metadata_motion_parse_attempts={} index_metadata_motion_parse_seconds={:.3} index_metadata_heic_seconds={:.3} index_metadata_geocode_seconds={:.3} index_metadata_prompt_seconds={:.3} index_metadata_assemble_seconds={:.3} index_refresh_seconds={:.3} index_write_seconds={:.3} index_seen_batch_items={} index_seen_batch_batches={} index_seen_batch_seconds={:.3} index_refetch_seconds={:.3} index_assemble_seconds={:.3} index_other_seconds={:.3} index_slow_files={} drain_seconds={:.3} thumbnail_attempts={} thumbnail_successes={} thumbnail_task_seconds={:.3} embedding_attempts={} embedding_successes={} embedding_task_seconds={:.3} embedding_permit_wait_seconds={:.3} embedding_send_seconds={:.3} embedding_reply_seconds={:.3} embedding_send_timeouts={} embedding_reply_timeouts={} embedding_batch_capacity={} embedding_inflight_batches={} embedding_batches={} embedding_prefetched_batches={} embedding_batch_items={} embedding_prepared_items={} embedding_prepare_seconds={:.3} embedding_engine_seconds={:.3} embedding_preprocess_seconds={:.3} embedding_inference_seconds={:.3} embedding_engine_overhead_seconds={:.3} embedding_write_seconds={:.3} embedding_fallback_attempts={} embedding_fallback_seconds={:.3} finalize_seconds={:.3} total_seconds={:.3}",
             album_id,
             album.path,
             final_snapshot.processed,
@@ -3600,6 +4397,94 @@ pub async fn index_album_worker(
             stats.index_attempts,
             stats.index_successes,
             stats.index_elapsed.as_secs_f64(),
+            stats.index_folder_elapsed.as_secs_f64(),
+            stats.index_folder_cache_hits,
+            stats.index_folder_cache_misses,
+            stats.index_file_cache_preload_elapsed.as_secs_f64(),
+            stats.index_file_cache_rows,
+            stats.index_file_cache_hits,
+            stats.index_file_cache_misses,
+            stats.index_file_fetch_elapsed.as_secs_f64(),
+            stats.index_file_stat_elapsed.as_secs_f64(),
+            stats.index_file_metadata_elapsed.as_secs_f64(),
+            stats.index_metadata_file_info_elapsed.as_secs_f64(),
+            stats.index_metadata_header_elapsed.as_secs_f64(),
+            stats.index_metadata_dimensions_elapsed.as_secs_f64(),
+            stats.index_metadata_exif_elapsed.as_secs_f64(),
+            stats.index_metadata_exif_header_attempts,
+            stats.index_metadata_exif_header_elapsed.as_secs_f64(),
+            stats.index_metadata_exif_container_attempts,
+            stats.index_metadata_exif_container_elapsed.as_secs_f64(),
+            stats
+                .index_metadata_exif_signature_scan_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_exif_raw_attempts,
+            stats.index_metadata_exif_raw_elapsed.as_secs_f64(),
+            stats.index_metadata_exif_file_fallback_attempts,
+            stats
+                .index_metadata_exif_file_fallback_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_exif_extract_elapsed.as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_basic_elapsed
+                .as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_orientation_elapsed
+                .as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_flash_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_exif_extract_gps_elapsed.as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_identity_elapsed
+                .as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_description_elapsed
+                .as_secs_f64(),
+            stats
+                .index_metadata_exif_extract_capture_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_capture_fallback_elapsed.as_secs_f64(),
+            stats.index_metadata_raw_elapsed.as_secs_f64(),
+            stats.index_metadata_binary_fallback_elapsed.as_secs_f64(),
+            stats.index_metadata_binary_tiff_signature_attempts,
+            stats
+                .index_metadata_binary_tiff_signature_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_binary_tiff_bases_found,
+            stats.index_metadata_binary_complete_jpeg_without_exif_attempts,
+            stats.index_metadata_binary_complete_jpeg_without_exif_tiff_bases_found,
+            stats.index_metadata_binary_entry_scan_attempts,
+            stats.index_metadata_binary_entry_scan_elapsed.as_secs_f64(),
+            stats
+                .index_metadata_binary_value_decode_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_motion_elapsed.as_secs_f64(),
+            stats.index_metadata_motion_header_xmp_attempts,
+            stats.index_metadata_motion_header_xmp_elapsed.as_secs_f64(),
+            stats.index_metadata_motion_header_complete_check_attempts,
+            stats
+                .index_metadata_motion_header_complete_check_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_motion_file_fallback_attempts,
+            stats
+                .index_metadata_motion_file_fallback_elapsed
+                .as_secs_f64(),
+            stats.index_metadata_motion_parse_attempts,
+            stats.index_metadata_motion_parse_elapsed.as_secs_f64(),
+            stats.index_metadata_heic_elapsed.as_secs_f64(),
+            stats.index_metadata_geocode_elapsed.as_secs_f64(),
+            stats.index_metadata_prompt_elapsed.as_secs_f64(),
+            stats.index_metadata_assemble_elapsed.as_secs_f64(),
+            stats.index_file_refresh_elapsed.as_secs_f64(),
+            stats.index_file_write_elapsed.as_secs_f64(),
+            stats.index_seen_batch_items,
+            stats.index_seen_batch_batches,
+            stats.index_seen_batch_elapsed.as_secs_f64(),
+            stats.index_file_refetch_elapsed.as_secs_f64(),
+            stats.index_assemble_elapsed.as_secs_f64(),
+            index_other_elapsed.as_secs_f64(),
+            stats.index_slow_files,
             drain_elapsed.as_secs_f64(),
             stats.thumbnail_attempts,
             stats.thumbnail_successes,
@@ -3607,6 +4492,25 @@ pub async fn index_album_worker(
             stats.embedding_attempts,
             stats.embedding_successes,
             stats.embedding_elapsed.as_secs_f64(),
+            stats.embedding_permit_wait_elapsed.as_secs_f64(),
+            stats.embedding_send_elapsed.as_secs_f64(),
+            stats.embedding_reply_elapsed.as_secs_f64(),
+            stats.embedding_send_timeouts,
+            stats.embedding_reply_timeouts,
+            stats.embedding_batch_capacity,
+            stats.embedding_inflight_batches,
+            stats.embedding_batches,
+            stats.embedding_prefetched_batches,
+            stats.embedding_batch_items,
+            stats.embedding_prepared_items,
+            stats.embedding_prepare_elapsed.as_secs_f64(),
+            stats.embedding_engine_elapsed.as_secs_f64(),
+            stats.embedding_preprocess_elapsed.as_secs_f64(),
+            stats.embedding_inference_elapsed.as_secs_f64(),
+            engine_overhead_elapsed.as_secs_f64(),
+            stats.embedding_write_elapsed.as_secs_f64(),
+            stats.embedding_fallback_attempts,
+            stats.embedding_fallback_elapsed.as_secs_f64(),
             finalize_elapsed.as_secs_f64(),
             elapsed,
         );

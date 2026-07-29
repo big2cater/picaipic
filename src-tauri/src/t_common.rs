@@ -3,7 +3,6 @@
  */
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-
 // Image support
 pub const NORMAL_IMGS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "avif", "heic", "heif", "hif", "jxl",
@@ -103,4 +102,3 @@ pub const IMAGE_SEARCH_ANN_CANDIDATES: usize = 500;
 pub fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
-

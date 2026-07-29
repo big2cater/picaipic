@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use tauri::{AppHandle, Manager};
 
@@ -32,6 +32,19 @@ pub struct MotionPhotoInfo {
     pub video_offset: u64,
     /// Length of the embedded video segment (if known).
     pub video_length: Option<u64>,
+}
+
+/// Optional internal timing for Motion Photo detection during scan profiling.
+#[derive(Default)]
+pub struct MotionPhotoReadProfile {
+    pub header_xmp_attempts: u64,
+    pub header_xmp_elapsed: Duration,
+    pub header_complete_check_attempts: u64,
+    pub header_complete_check_elapsed: Duration,
+    pub file_fallback_attempts: u64,
+    pub file_fallback_elapsed: Duration,
+    pub parse_attempts: u64,
+    pub parse_elapsed: Duration,
 }
 
 /// Parse a Motion Photo `content_id` stored as `motion:<offset>:<length>`.
@@ -62,12 +75,68 @@ pub fn parse_motion_content_id(content_id: &str) -> Option<MotionPhotoInfo> {
 /// `http://ns.adobe.com/xap/1.0/\0`. In HEIF, it may be in a
 /// `xmp` item. We scan the file for `<x:xmpmeta` to `</x:xmpmeta>`.
 pub fn extract_xmp_packet(file_path: &str) -> Option<String> {
+    extract_xmp_packet_with_header(file_path, None)
+}
+
+/// Extract XMP while reusing an already-read image header when it is complete
+/// through JPEG SOS/EOI. Incomplete headers retain the file-read fallback.
+pub fn extract_xmp_packet_with_header(
+    file_path: &str,
+    file_header: Option<&[u8]>,
+) -> Option<String> {
+    extract_xmp_packet_with_header_profiled(file_path, file_header, None)
+}
+
+fn extract_xmp_packet_with_header_profiled(
+    file_path: &str,
+    file_header: Option<&[u8]>,
+    mut profile: Option<&mut MotionPhotoReadProfile>,
+) -> Option<String> {
     let path = Path::new(file_path);
     let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
 
     match ext.as_str() {
-        "jpg" | "jpeg" => extract_xmp_from_jpeg(file_path),
-        "heic" | "heif" | "hif" => extract_xmp_from_heic(file_path),
+        "jpg" | "jpeg" => {
+            if let Some(header) = file_header {
+                let started = profile.as_ref().map(|_| Instant::now());
+                let header_complete_without_xmp = jpeg_header_complete_without_xmp(header);
+                if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                    profile.header_complete_check_attempts += 1;
+                    profile.header_complete_check_elapsed += started.elapsed();
+                }
+                if header_complete_without_xmp {
+                    return None;
+                }
+                let started = profile.as_ref().map(|_| Instant::now());
+                let xmp = extract_xmp_from_jpeg_bytes(header);
+                if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                    profile.header_xmp_attempts += 1;
+                    profile.header_xmp_elapsed += started.elapsed();
+                }
+                if let Some(xmp) = xmp {
+                    return Some(xmp);
+                }
+                if jpeg_header_reaches_scan(header) {
+                    return None;
+                }
+            }
+            let started = profile.as_ref().map(|_| Instant::now());
+            let xmp = extract_xmp_from_jpeg(file_path);
+            if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                profile.file_fallback_attempts += 1;
+                profile.file_fallback_elapsed += started.elapsed();
+            }
+            xmp
+        }
+        "heic" | "heif" | "hif" => {
+            let started = profile.as_ref().map(|_| Instant::now());
+            let xmp = extract_xmp_from_heic(file_path);
+            if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                profile.file_fallback_attempts += 1;
+                profile.file_fallback_elapsed += started.elapsed();
+            }
+            xmp
+        }
         _ => None,
     }
 }
@@ -80,6 +149,10 @@ fn extract_xmp_from_jpeg(file_path: &str) -> Option<String> {
     buf.truncate(n);
     drop(file);
 
+    extract_xmp_from_jpeg_bytes(&buf)
+}
+
+fn extract_xmp_from_jpeg_bytes(buf: &[u8]) -> Option<String> {
     // Search for the XMP packet start marker
     let start_marker = b"<x:xmpmeta";
     let end_marker = b"</x:xmpmeta>";
@@ -108,6 +181,93 @@ fn extract_xmp_from_jpeg(file_path: &str) -> Option<String> {
     String::from_utf8(xmp_bytes.to_vec()).ok()
 }
 
+/// True if `data` reaches JPEG scan data or EOI after a complete marker walk.
+/// XMP lives in APP metadata before that boundary, so a complete header with no
+/// XMP cannot gain one from reopening the source file.
+fn jpeg_header_reaches_scan(data: &[u8]) -> bool {
+    if data.len() < 2 || data[0] != 0xff || data[1] != 0xd8 {
+        return false;
+    }
+
+    let mut offset = 2usize;
+    while offset + 2 <= data.len() {
+        if data[offset] != 0xff {
+            return false;
+        }
+        while offset < data.len() && data[offset] == 0xff {
+            offset += 1;
+        }
+        if offset >= data.len() {
+            return false;
+        }
+        let marker = data[offset];
+        offset += 1;
+        if marker == 0xd9 || marker == 0xda {
+            return true;
+        }
+        if marker == 0x00 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if offset + 2 > data.len() {
+            return false;
+        }
+        let length = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        if length < 2 || offset + length > data.len() {
+            return false;
+        }
+        offset += length;
+    }
+    false
+}
+
+/// True when a complete JPEG marker walk reaches SOS/EOI without an APP1 XMP
+/// packet. Motion Photo XMP belongs in APP1, so the generic byte scanner and
+/// file fallback cannot find it after this proof.
+fn jpeg_header_complete_without_xmp(data: &[u8]) -> bool {
+    if data.len() < 2 || data[0] != 0xff || data[1] != 0xd8 {
+        return false;
+    }
+
+    let mut offset = 2usize;
+    while offset + 2 <= data.len() {
+        if data[offset] != 0xff {
+            return false;
+        }
+        while offset < data.len() && data[offset] == 0xff {
+            offset += 1;
+        }
+        if offset >= data.len() {
+            return false;
+        }
+        let marker = data[offset];
+        offset += 1;
+        if marker == 0xd9 || marker == 0xda {
+            return true;
+        }
+        if marker == 0x00 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if offset + 2 > data.len() {
+            return false;
+        }
+        let length = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        if length < 2 || offset + length > data.len() {
+            return false;
+        }
+        let segment_end = offset + length;
+        if marker == 0xe1 {
+            let payload = &data[offset + 2..segment_end];
+            if find_subslice(payload, b"http://ns.adobe.com/xap/1.0/\0").is_some()
+                || find_subslice(payload, b"<x:xmpmeta").is_some()
+            {
+                return false;
+            }
+        }
+        offset = segment_end;
+    }
+    false
+}
+
 /// Extract XMP from a HEIC file. HEIF stores XMP as a meta item.
 /// For now we do a raw binary scan for the XMP packet markers.
 fn extract_xmp_from_heic(file_path: &str) -> Option<String> {
@@ -134,46 +294,50 @@ fn extract_xmp_from_heic(file_path: &str) -> Option<String> {
 /// containing `MotionPhoto=1` and a `Container:Directory` that lists
 /// the image and video segments with their byte offsets.
 pub fn detect_motion_photo(file_path: &str) -> Option<MotionPhotoInfo> {
-    let xmp = extract_xmp_packet(file_path)?;
+    detect_motion_photo_with_header(file_path, None)
+}
+
+/// Detect Motion Photo metadata while reusing an already-read JPEG header when
+/// possible. Callers with no header retain the original file-read behavior.
+pub fn detect_motion_photo_with_header(
+    file_path: &str,
+    file_header: Option<&[u8]>,
+) -> Option<MotionPhotoInfo> {
+    detect_motion_photo_with_header_profiled(file_path, file_header, None)
+}
+
+/// Profiled variant used only by opt-in scan timing.
+pub fn detect_motion_photo_with_header_profiled(
+    file_path: &str,
+    file_header: Option<&[u8]>,
+    mut profile: Option<&mut MotionPhotoReadProfile>,
+) -> Option<MotionPhotoInfo> {
+    let xmp =
+        extract_xmp_packet_with_header_profiled(file_path, file_header, profile.as_deref_mut())?;
+
+    let started = profile.as_ref().map(|_| Instant::now());
 
     // Check for MotionPhoto flag
     // The XMP uses rdf:Description with GCamera namespace attributes
-    if !xmp.contains("MotionPhoto") {
-        return None;
-    }
-
-    // Parse the Container:Directory to find the video segment offset.
-    // The XMP structure looks like:
-    // <GCamera:MotionPhoto>1</GCamera:MotionPhoto>
-    // <Container:Directory>
-    //   <Container:Item
-    //     Semantic="Image"
-    //     Length="..."
-    //     Mime="image/jpeg" />
-    //   <Container:Item
-    //     Semantic="MotionPhoto"
-    //     Length="..."
-    //     Mime="video/mp4" />
-    // </Container:Directory>
-    //
-    // Alternatively, some devices use:
-    // <GCamera:MotionPhoto>1</GCamera:MotionPhoto>
-    // <GCamera:MotionPhotoOffset>OFFSET</GCamera:MotionPhotoOffset>
-    //
-    // We try both approaches.
-
-    // Try MotionPhotoOffset (simpler, used by some Pixel devices)
-    if let Some(offset) = extract_xmp_value(&xmp, "MotionPhotoOffset") {
-        if let Ok(offset_val) = offset.parse::<u64>() {
-            return Some(MotionPhotoInfo {
+    let result = if !xmp.contains("MotionPhoto") {
+        None
+    } else if let Some(offset) = extract_xmp_value(&xmp, "MotionPhotoOffset") {
+        offset
+            .parse::<u64>()
+            .ok()
+            .map(|offset_val| MotionPhotoInfo {
                 video_offset: offset_val,
                 video_length: None,
-            });
-        }
-    }
+            })
+    } else {
+        parse_container_directory(&xmp)
+    };
 
-    // Parse Container:Directory items
-    parse_container_directory(&xmp)
+    if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+        profile.parse_attempts += 1;
+        profile.parse_elapsed += started.elapsed();
+    }
+    result
 }
 
 /// Parse the Container:Directory XMP structure to find the video segment.
@@ -662,4 +826,80 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_jpeg_header_reaches_metadata_boundary() {
+        assert!(jpeg_header_reaches_scan(&[
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ]));
+        assert!(!jpeg_header_reaches_scan(&[
+            0xff, 0xd8, 0xff, 0xe1, 0x00, 0x10, // incomplete APP1
+        ]));
+    }
+
+    #[test]
+    fn complete_jpeg_without_xmp_is_proven_empty() {
+        assert!(jpeg_header_complete_without_xmp(&[
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ]));
+
+        let xmp = b"<x:xmpmeta></x:xmpmeta>";
+        let app1_len = (xmp.len() + 2) as u16;
+        let mut header = vec![0xff, 0xd8, 0xff, 0xe1];
+        header.extend_from_slice(&app1_len.to_be_bytes());
+        header.extend_from_slice(xmp);
+        header.extend_from_slice(&[0xff, 0xda]);
+        assert!(!jpeg_header_complete_without_xmp(&header));
+    }
+
+    #[test]
+    fn motion_photo_detection_reuses_complete_jpeg_header() {
+        let xmp = concat!(
+            "<x:xmpmeta><rdf:RDF><rdf:Description ",
+            "xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\">",
+            "<GCamera:MotionPhoto>1</GCamera:MotionPhoto>",
+            "<GCamera:MotionPhotoOffset>42</GCamera:MotionPhotoOffset>",
+            "</rdf:Description></rdf:RDF></x:xmpmeta>"
+        );
+        let app1_len = (xmp.len() + 2) as u16;
+        let mut header = vec![0xff, 0xd8, 0xff, 0xe1];
+        header.extend_from_slice(&app1_len.to_be_bytes());
+        header.extend_from_slice(xmp.as_bytes());
+        header.extend_from_slice(&[0xff, 0xda]);
+
+        let motion = detect_motion_photo_with_header("missing.jpg", Some(&header));
+        assert_eq!(motion.map(|info| info.video_offset), Some(42));
+    }
+
+    #[test]
+    fn profiled_motion_detection_skips_file_fallback_for_complete_header() {
+        let header = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x02, // empty APP0
+            0xff, 0xda, // SOS
+        ];
+        let mut profile = MotionPhotoReadProfile::default();
+
+        assert!(
+            detect_motion_photo_with_header_profiled(
+                "missing.jpg",
+                Some(&header),
+                Some(&mut profile),
+            )
+            .is_none()
+        );
+        assert_eq!(profile.header_xmp_attempts, 0);
+        assert_eq!(profile.header_complete_check_attempts, 1);
+        assert_eq!(profile.file_fallback_attempts, 0);
+        assert_eq!(profile.parse_attempts, 0);
+    }
 }
