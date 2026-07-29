@@ -39,6 +39,8 @@ let program: WebGLProgram | null = null;
 let tex: WebGLTexture | null = null;
 let buf: WebGLBuffer | null = null;
 let raf = 0;
+/** Pending one-shot capture rAF from beginSession (not the paint loop). */
+let captureRaf = 0;
 let startMs = 0;
 let hasTexture = false;
 
@@ -361,7 +363,12 @@ function beginSession() {
   ensureSourceObserver();
 
   // Wait one frame so layout/images are stable, then freeze
-  requestAnimationFrame(() => {
+  if (captureRaf) {
+    cancelAnimationFrame(captureRaf);
+    captureRaf = 0;
+  }
+  captureRaf = requestAnimationFrame(() => {
+    captureRaf = 0;
     if (!props.active || !props.sourceEl) return;
     const snap = captureSource(props.sourceEl);
     if (!snap) return;
@@ -379,6 +386,10 @@ function beginSession() {
 }
 
 function endSession() {
+  if (captureRaf) {
+    cancelAnimationFrame(captureRaf);
+    captureRaf = 0;
+  }
   cancelAnimationFrame(raf);
   raf = 0;
   ready.value = false;

@@ -415,15 +415,27 @@ function growthLoop(ts: number) {
   growthRaf = requestAnimationFrame(growthLoop);
 }
 
+function startGrowth() {
+  if (growthRaf) return;
+  growthAnchor = 0;
+  growthRaf = requestAnimationFrame(growthLoop);
+}
+
+function stopGrowth() {
+  if (growthRaf) cancelAnimationFrame(growthRaf);
+  growthRaf = 0;
+  growthAnchor = 0;
+}
+
 watch(gravityActive, (on, was) => {
   if (on && !was) {
     growthAccum = 0;
-    growthAnchor = performance.now();
     effectiveElapsedSec.value = 0;
+    startGrowth();
   } else if (!on) {
     growthAccum = 0;
-    growthAnchor = 0;
     effectiveElapsedSec.value = 0;
+    stopGrowth();
   }
 });
 
@@ -657,7 +669,7 @@ onMounted(async () => {
   applyReducedMotionMq();
   reducedMotionMq.addEventListener?.('change', applyReducedMotionMq);
   document.addEventListener('visibilitychange', onVisibilityChange);
-  growthRaf = requestAnimationFrame(growthLoop);
+  if (gravityActive.value) startGrowth();
 });
 
 onBeforeUnmount(() => {
@@ -674,8 +686,7 @@ onBeforeUnmount(() => {
   unlistenAddAlbumRequested = null;
   unlistenEditAlbumRequested?.();
   unlistenEditAlbumRequested = null;
-  if (growthRaf) cancelAnimationFrame(growthRaf);
-  growthRaf = 0;
+  stopGrowth();
   document.removeEventListener('visibilitychange', onVisibilityChange);
   reducedMotionMq?.removeEventListener?.('change', applyReducedMotionMq);
   reducedMotionMq = null;

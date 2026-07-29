@@ -28,6 +28,7 @@ Read root `AGENTS.md`, then this file, then the routed context and matching patt
 ## Current Project State
 
 **Working:**
+- **Black-hole rAF lifecycle cleanup (2026-07-29):** `PhotoVortexLayer` now tracks/cancels pending one-shot capture frames across rapid active changes and unmount; Home starts the growth timer only while `gravityActive`, eliminating the theme-off 60fps no-op loop — `patterns/change-black-hole-theme.md`.
 - **Linux release resource fix (2026-07-29):** the packaged photo-frame fallback `src-tauri/resources/branding/default-frame-logo.png` is now explicitly tracked despite the generated-resource ignore rules. This fixes clean GitHub Actions checkouts failing Tauri resource expansion at `resources/branding/*` after libheif completed — `patterns/release-build.md`.
 - **GitHub README refresh (2026-07-29):** English/Chinese repository introductions now describe the actual v1.1.0 library, local-AI/plugin, built-in creative, Live/Motion, theme, performance, and Windows/Linux feature set. The README screenshot is `docs/public/screenshots/picaipic-v1.1-smart-tags.png` (2560x1380 source capture).
 - **Release dead-code warning cleanup (2026-07-29):** EXIF binary fallback wrapper is test-only; obsolete pre-state-cache scan wrappers and unused public XMP extraction wrappers were removed. Active profiled scan/XMP paths are unchanged, and Rust format/check pass without the reported warnings.
