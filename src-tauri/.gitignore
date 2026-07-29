@@ -6,7 +6,10 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-/resources
+/resources/*
+!/resources/branding/
+/resources/branding/*
+!/resources/branding/default-frame-logo.png
 
 # ignore dynamic libraries (e.g. onnxruntime)
 *.dylib

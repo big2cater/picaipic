@@ -43,6 +43,7 @@ For v1.1.0, treat the existing private draft as a verification target, not a pub
 
 ## Gotchas
 - `cargo check` does not exercise final native linking or installer resource layout.
+- `src-tauri/resources` is ignored because models and FFmpeg sidecars are downloaded/generated. Keep the required packaged fallback `resources/branding/default-frame-logo.png` explicitly unignored and tracked; otherwise a clean CI checkout fails with `glob pattern resources/branding/* path not found` after native compilation.
 - Tauri updater signing and plugin Ed25519 signing are different key systems.
 - `beforeBuildCommand` must work relative to the Tauri project on every platform; avoid machine-specific absolute paths.
 - Native submodules must be real gitlinks and initialized recursively.
