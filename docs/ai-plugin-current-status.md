@@ -1,6 +1,13 @@
 ﻿# PicAiPic AI Plugin Host - Current Status
 
-Date: 2026-07-10
+Date: 2026-07-29
+
+## 2026-07-29 v1.1.0 lifecycle and release-scope update
+
+- Manifest-contributed actions, including SA-LUT, are visible only when the plugin is both host-managed and reachable. Settings broadcasts lifecycle changes across WebViews, so start/stop/restart/failure updates main and viewer menus immediately.
+- The release scope is now explicitly Windows and Linux. Remaining Android/iOS icon trees and macOS ICNS, Info.plist, Objective-C pasteboard bridge, native menu, Tauri capability, and FFmpeg download configuration were removed.
+- The canonical application icon was refreshed. Packaging generates into a temporary directory and hash-syncs only changed Windows/Linux/shared assets, preventing Windows user-mapped PNG failures during rebuilds.
+- The v1.1.0 release remains a private draft until the owner chooses to publish it. Plugin trust, signing, bearer auth, permission grants, runtime conflict gates, input staging, and output adoption/discard remain required behavior.
 
 ## 2026-07-10 v1.0.0 consistency, isolation, and performance pass
 

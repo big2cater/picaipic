@@ -26,7 +26,7 @@ edges:
     condition: when changing EXIF photo frame (classic bar, float/sink blur, logo)
   - target: patterns/change-batch-process.md
     condition: when changing batch process concurrency, cancel, or atomic writes
-last_updated: 2026-07-22
+last_updated: 2026-07-29
 ---
 
 # Architecture
@@ -66,5 +66,5 @@ User interaction starts in Vue views/components under `src-vite/src/`. Pinia sto
 
 - No required cloud account, server database, or forced upload pipeline; the product is local-first.
 - No web-service backend for the main application; privileged work runs in the local Rust host.
-- No macOS release target in the current product scope, despite some harmless conditional Rust branches remaining.
+- No Android, iOS, or macOS application target. Windows/Linux builds may retain harmless conditional source branches or upstream dependency metadata, but dedicated mobile/macOS bundle assets and native bridges are not maintained.
 - No general-purpose unrestricted plugin execution contract: plugins are permissioned, signed in release builds, authenticated, and mediated by the host.

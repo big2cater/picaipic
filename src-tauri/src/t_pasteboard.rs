@@ -1,44 +1,11 @@
-/// Cross‑platform drag‑drop image URL extraction.
+/// Windows/Linux drag-drop image URL extraction.
 ///
-/// - **macOS**: reads `NSPasteboardNameDrag` which is scoped to the
-///   current drag operation and never returns stale data.
-/// - **Windows / Linux**: falls back to the system clipboard.  During
+/// Falls back to the system clipboard. During
 ///   a browser drag the image URL is normally placed on the clipboard
 ///   as well, so checking it immediately after the drop event gives
 ///   the correct URL.  The read is gated behind an `http(s)://` prefix
 ///   check to reject irrelevant clipboard text.
 
-#[cfg(target_os = "macos")]
-mod imp {
-    use std::ffi::{CStr, c_char};
-
-    unsafe extern "C" {
-        fn lap_get_drag_image_url() -> *const c_char;
-        fn lap_get_drag_file_paths() -> *const c_char;
-        fn lap_free_string(ptr: *const c_char);
-    }
-
-    fn read_string(ptr: *const c_char) -> Option<String> {
-        if ptr.is_null() {
-            return None;
-        }
-        let url = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
-        unsafe { lap_free_string(ptr) };
-        Some(url)
-    }
-
-    pub fn get_drag_image_url() -> Option<String> {
-        read_string(unsafe { lap_get_drag_image_url() })
-    }
-
-    pub fn get_drag_file_paths() -> Vec<String> {
-        read_string(unsafe { lap_get_drag_file_paths() })
-            .and_then(|value| serde_json::from_str(&value).ok())
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
 mod imp {
     pub fn get_drag_image_url() -> Option<String> {
         // Browsers on Windows put the image URL on the system clipboard
@@ -64,39 +31,6 @@ pub fn get_drag_image_url() -> Option<String> {
 
 pub fn get_drag_file_paths() -> Vec<String> {
     imp::get_drag_file_paths()
-}
-
-#[cfg(target_os = "macos")]
-pub async fn copy_files_and_image(
-    _app_handle: &tauri::AppHandle,
-    file_paths: &[String],
-    image_bytes: Option<&[u8]>,
-) -> Result<(), String> {
-    use std::ffi::{CString, c_char, c_uchar};
-
-    unsafe extern "C" {
-        fn lap_copy_files_and_image_to_clipboard(
-            file_paths_json: *const c_char,
-            image_bytes: *const c_uchar,
-            image_length: usize,
-        ) -> bool;
-    }
-
-    let file_paths_json = serde_json::to_string(file_paths)
-        .map_err(|e| format!("Failed to serialize clipboard file paths: {}", e))?;
-    let file_paths_json = CString::new(file_paths_json)
-        .map_err(|_| "Clipboard file paths contain a null byte".to_string())?;
-    let (image_ptr, image_len) = image_bytes
-        .map(|bytes| (bytes.as_ptr(), bytes.len()))
-        .unwrap_or((std::ptr::null(), 0));
-    let success = unsafe {
-        lap_copy_files_and_image_to_clipboard(file_paths_json.as_ptr(), image_ptr, image_len)
-    };
-    if success {
-        Ok(())
-    } else {
-        Err("Failed to write file and image to clipboard".to_string())
-    }
 }
 
 #[cfg(target_os = "windows")]

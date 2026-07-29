@@ -78,6 +78,8 @@ last_updated: 2026-07-29
 
 **AI models or FFmpeg resources are missing:** rerun the platform download scripts before development/package builds.
 
+**Windows icon regeneration fails with `os error 1224`:** current scripts generate under a temporary directory and hash-sync changed Windows/Linux/shared files only. If a genuinely changed destination is still locked, close PicAiPic and image preview windows, then rerun `build-exe.bat`.
+
 **Windows AI startup reports missing runtime:** install the correct Microsoft Visual C++ Redistributable for x64/arm64 and restart.
 
 **`cargo check` passes but release link fails:** inspect native MSVC/CRT compatibility for ONNX Runtime, LibRaw, and bundled C/C++ libraries; a check build does not prove final linker compatibility.

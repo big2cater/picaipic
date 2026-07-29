@@ -69,24 +69,6 @@ pub fn parse_motion_content_id(content_id: &str) -> Option<MotionPhotoInfo> {
     })
 }
 
-/// Extract the raw XMP packet from a JPEG/HEIF file.
-///
-/// In JPEG, XMP is stored in an APP1 segment with namespace
-/// `http://ns.adobe.com/xap/1.0/\0`. In HEIF, it may be in a
-/// `xmp` item. We scan the file for `<x:xmpmeta` to `</x:xmpmeta>`.
-pub fn extract_xmp_packet(file_path: &str) -> Option<String> {
-    extract_xmp_packet_with_header(file_path, None)
-}
-
-/// Extract XMP while reusing an already-read image header when it is complete
-/// through JPEG SOS/EOI. Incomplete headers retain the file-read fallback.
-pub fn extract_xmp_packet_with_header(
-    file_path: &str,
-    file_header: Option<&[u8]>,
-) -> Option<String> {
-    extract_xmp_packet_with_header_profiled(file_path, file_header, None)
-}
-
 fn extract_xmp_packet_with_header_profiled(
     file_path: &str,
     file_header: Option<&[u8]>,

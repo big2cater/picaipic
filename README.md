@@ -93,18 +93,18 @@ If you selected a custom database storage directory in PicAiPic settings, delete
 
 ## Current Development Focus
 
-PicAiPic is now on the `v1.0.0` host/plugin baseline. Recent work completed:
+PicAiPic is now on the `v1.1.0` development line. A private draft multi-architecture release may exist, but it is not considered published until the owner promotes it. Recent work completed:
 
-- the Lap → PicAiPic identity migration across the active UI, updater, packaging, documentation, and application data paths
+- smoother large-library browsing through stale viewport cancellation, deduplicated thumbnail/metadata requests, lazy per-card menus, and contained GPU-friendly virtual item positioning
+- faster warm rescans through scan-local folder/file-state caches and bounded timestamp transactions; a 10,343-file unchanged rescan improved from 10.164s to 8.786s
+- batched local CLIP embedding, bounded preprocessing prefetch, lower startup matrix allocation, and exact-search-by-default behavior validated with 110k vectors
 - signed AI plugin packages, publisher trust, bearer-token authentication, permission/setup flows, runtime conflict gates, and input-file staging
-- shared, plugin-private, and external Python runtime bindings, plus manifest-driven external model directory binding
-- correct per-library thumbnail/preview isolation when requests finish after a library switch
-- host/plugin minimum and maximum PicAiPic version enforcement
-- frontend route/component splitting; the Home entry chunk was reduced from about 527 KB to about 15 KB
-- Live Photo / Motion Photo detection, pairing, long-press preview, motion extract cache, export/convert, optional confirmed JPEG keyframe overwrite, and album metadata repair (schema v6)
-- disk↔DB rename consistency, album edit error propagation, large-library dedup scan efficiency, and MediaViewer null-safety hardening
+- plugin-contributed actions such as SA-LUT appear only while the managed plugin runtime is reachable; start/stop/restart state is synchronized across windows
+- built-in crop, collage, batch processing, print layouts, color match, LUT/photo styles, photo frames, smart albums, collections, and Live Photo / Motion Photo workflows
+- a refreshed application icon across Windows packaging, Linux/shared PNG assets, title bars, About/Welcome views, and documentation
+- a Windows/Linux-only release scope; Android/iOS assets and macOS bundle/native bridge files have been removed
 
-The highest-priority remaining work is release-executable regression after host/plugin changes, user-confirmed **one-click** fallback from a conflicting shared runtime to plugin-private (manual private binding already exists), signing-key rotation/revocation design, and stronger network/Linux plugin isolation beyond default input staging.
+The highest-priority remaining work is release-executable regression, representative cold-import/embedding profiling, signing-key rotation/revocation design, and stronger network/Linux plugin isolation beyond default input staging. See [v1.1.0 release notes](docs/guide/release-notes/v1.1.0.md) and the [development progress board](docs/guide/picaipic-progress.md).
 
 ## Build from Source
 

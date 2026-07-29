@@ -14,13 +14,12 @@ fn main() {
     // Allow conditional compilation based on whether libheif is available.
     println!("cargo::rustc-check-cfg=cfg(lap_has_libheif)");
 
-    // Icons are linked into the Windows/macOS binary at build time. Without
+    // Icons are linked into the Windows binary at build time. Without
     // rerun-if-changed, only editing PNG sidecars (or an ICO content-only
     // change that Cargo does not see as an input) can leave the previous
     // embedded icon in the exe. Force rebuild when any icon asset changes.
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/icon.png");
-    println!("cargo:rerun-if-changed=icons/icon.icns");
     println!("cargo:rerun-if-changed=icons/32x32.png");
     println!("cargo:rerun-if-changed=icons/128x128.png");
     println!("cargo:rerun-if-changed=icons/128x128@2x.png");
@@ -31,10 +30,7 @@ fn main() {
 
     write_build_info();
     build_libraw();
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "macos" {
-        build_libheif();
-    }
+    build_libheif();
 
     // build tauri
     tauri_build::build();
@@ -201,10 +197,10 @@ fn build_libheif() {
     );
     println!("cargo:rustc-link-lib=static={}", libde265.lib_name);
     match target_os.as_str() {
-        "macos" => println!("cargo:rustc-link-lib=c++"),
         "windows" => {}
-        // Some libheif builds depend on the C++ runtime.
-        _ => println!("cargo:rustc-link-lib=stdc++"),
+        // Linux libheif builds depend on the C++ runtime.
+        "linux" => println!("cargo:rustc-link-lib=stdc++"),
+        _ => panic!("PicAiPic supports only Windows and Linux"),
     }
 
     // Enable the Rust-side libheif bindings only when the native library is available.
@@ -384,21 +380,13 @@ fn build_libraw() {
     } else {
         println!("cargo:rustc-link-lib=z");
         println!("cargo:rustc-link-lib=m");
-        match target_os.as_str() {
-            "macos" => println!("cargo:rustc-link-lib=c++"),
-            "linux" => println!("cargo:rustc-link-lib=stdc++"),
-            _ => {}
+        if target_os == "linux" {
+            println!("cargo:rustc-link-lib=stdc++");
         }
     }
 
     // Native clipboard shims for formats that must be published together.
-    if target_os == "macos" {
-        println!("cargo:rerun-if-changed=src/pasteboard.mm");
-        cc::Build::new()
-            .file("src/pasteboard.mm")
-            .compile("lap_pasteboard");
-        println!("cargo:rustc-link-lib=framework=AppKit");
-    } else if target_os == "linux" {
+    if target_os == "linux" {
         println!("cargo:rerun-if-changed=src/clipboard_linux.c");
         let gtk = pkg_config::Config::new()
             .probe("gtk+-3.0")

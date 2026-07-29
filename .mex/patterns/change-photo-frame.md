@@ -1,7 +1,7 @@
 ---
 name: change-photo-frame
 description: Runbook for EXIF photo frame / info bar (classic bar, float/sink blur+shadow, optional logo).
-last_updated: 2026-07-22
+last_updated: 2026-07-29
 ---
 
 # Change photo frame / 相框
@@ -39,11 +39,11 @@ last_updated: 2026-07-22
 - Field toggles: brand, model, lens, focal, aperture, shutter, ISO, datetime.
 - Style: bar height, outer margin / canvas pad, colors (classic); blur sigma, shadow blur/offset/opacity (blur layouts).
 - **Default logo:** `showLogo` defaults true; empty `logoPath` → host resolves bundled `resources/branding/default-frame-logo.png` (from repo `logo-pic.png` / black wordmark). User can pick another file or clear back to default.
-- **Do not reuse frame logo as the Windows app icon. Regenerate app icons with `scripts/regenerate_app_icons.ps1` (from `favicon1.ico`), then **clean rebuild** so `icon.ico` is re-linked into the EXE (`build.rs` now has `rerun-if-changed` on icon assets).** App chrome icons are the neural-cat mark from `docs/public/icon.png` → `src-tauri/icons/*` (+ `src-vite/src/assets/images/icon.png`). Regenerating frame branding must not overwrite `src-tauri/icons/icon.ico` / `icon.png`.
+- **Do not reuse frame logo as the Windows app icon. Regenerate app icons with `scripts/regenerate_app_icons.ps1` (from `favicon1.ico`), then **clean rebuild** so `icon.ico` is re-linked into the EXE (`build.rs` now has `rerun-if-changed` on icon assets).** App chrome icons are the network-cat mark from `docs/public/icon.png` → root Windows/Linux/shared icon files (+ `src-vite/src/assets/images/icon.png`). Regenerating frame branding must not overwrite `src-tauri/icons/icon.ico` / `icon.png`.
 - Logo positions: **`bar-center` (default)**, top-left, top-right. Legacy bar-left/bar-right map to center.
 - **Preview perf:** `photo_frame_preview` uses `load_image_for_layout_cached`, EXIF summary cache, logo resize cache, and system-font cache; UI maxEdge ~1000.
 - Optional import into the open album (copy outputs; unique names).
-- App Windows / taskbar / title-bar icons use the **neural-cat** mark from repo-root `favicon1.ico` → `src-tauri/icons/*` + `src-vite/src/assets/images/icon.png` + `docs/public/icon.png`. Tauri `bundle.icon` points at `icons/icon.png` + `icons/icon.ico`. **Frame default logo** is separate: `resources/branding/default-frame-logo.png` (black wordmark from `logo-pic.png`) — never overwrite app icons with the frame logo.
+- App Windows / taskbar / title-bar icons use the **network-cat** mark from repo-root `favicon1.ico` → root Windows/Linux/shared icon files + `src-vite/src/assets/images/icon.png` + `docs/public/icon.png`. Tauri `bundle.icon` points at `icons/icon.png` + `icons/icon.ico`. **Frame default logo** is separate: `resources/branding/default-frame-logo.png` (black wordmark from `logo-pic.png`) — never overwrite app icons with the frame logo.
 
 ## Host layout
 

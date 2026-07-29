@@ -2,10 +2,14 @@
 
 Updated: 2026-07-29
 
-## Status board (2026-07-28)
+## Status board (2026-07-29)
 
 | Track | Status |
 |-------|--------|
+| v1.1.0 docs/release line | **Private draft / owner publish decision** — Windows x64/arm64 + Linux x86_64/aarch64; current notes: `release-notes/v1.1.0.md` |
+| Large-grid scrollbar browsing | **Shipped** — stale viewport cancellation, metadata/thumbnail request dedupe, lazy card menus, contained `translate3d`; frontend production build passed |
+| Plugin action lifecycle visibility | **Fixed** — SA-LUT/manifest actions require managed + reachable; status changes broadcast across windows |
+| Supported desktop platforms | **Windows + Linux only** — Android/iOS icon trees and macOS ICNS/Info.plist/native bridge/menu assets removed |
 | Theme menu | **Default / Retro / CMYK / Black hole / Cyberpunk** (`THEME_ID` 0–4) — branch `feat/black-hole-idle-theme` / PR #3 |
 | Black-hole cosmos + PhotoVortex | **Shipped** — maximize + **6s** idle; UV lens; RO size cache; theme-gated mount — `change-black-hole-theme.md` |
 | Cyberpunk night-city ambient | **Shipped** — `CyberpunkBackground` (sprite-baked rain/particles/kana) — `change-cyberpunk-theme.md` |
@@ -51,7 +55,7 @@ Updated: 2026-07-29
 | Image-search model Track B0 CLIP B/16 default | **Abandoned** (2026-07-23) |
 | Image-search model Track B SigLIP2 Phase 0 | **Probe done**; real-album **no clear quality win** → **no product UI on this pack** — `siglip2-phase0-probe.md` |
 | Settings cross-window hydrate gate + mediaBadges loop fix | **Shipped** (2026-07-22) |
-| App icon from `favicon1.ico` (neural-cat) + package -Clean | **Shipped** (2026-07-22) |
+| App icon from `favicon1.ico` (network-cat) + package -Clean | **Refreshed** (2026-07-29) — Windows ICO/tile, Linux/shared PNG, app chrome/docs; temp generation + hash-sync avoids mapped-file locks |
 	| Smart Albums UX pack (size ops, pickers, sort, local-day dates, empty load) | **Shipped** (2026-07-24) — `change-smart-albums.md` |
 	| Smart tags 6-bucket + default High thr + thr re-run | **Shipped** (2026-07-24) — people/pets prompts owner-tuned — `change-smart-tags.md` |
 	
@@ -364,8 +368,8 @@ Host-built-in traditional tools (not SA-LUT plugin):
 
 ## 2026-07-22 App icons from favicon1.ico + package script
 
-- **Canonical app mark:** repo-root **`favicon1.ico`** (neural-cat PicAiPic). Frame wordmark stays `resources/branding/default-frame-logo.png` from `logo-pic.png` — never overwrite app icons with frame logo.
-- Regenerated `src-tauri/icons/*` via `pnpm … tauri icon` from favicon1 master; frontend `assets/images/icon.png` + `docs/public/icon.png` synced.
+- **Canonical app mark:** repo-root **`favicon1.ico`** (network-cat PicAiPic, refreshed 2026-07-29). Frame wordmark stays `resources/branding/default-frame-logo.png` from `logo-pic.png` — never overwrite app icons with frame logo.
+- Regenerated root Windows/Linux/shared icon files from the favicon1 master; frontend `assets/images/icon.png` + `docs/public/icon.png` synced. Unsupported Android/iOS/macOS outputs remain temporary and are not committed.
 - **`build.rs`:** `rerun-if-changed` on icon assets so ICO content changes force re-link.
 - **`scripts/regenerate_app_icons.ps1`**; **`package_windows.ps1`** always regenerates icons from `favicon1.ico`; **`-Clean`** runs `cargo clean -p PicAiPic`.
 - **`build-exe.bat`** always passes **`-Clean`**.

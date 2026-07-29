@@ -13,22 +13,6 @@ OS_TYPE="${1:-$(uname -s)}"
 ARCH_TYPE="${2:-$(uname -m)}"
 
 case "$OS_TYPE" in
-  Darwin|macos|macos-*)
-    case "$ARCH_TYPE" in
-      x86_64|x64)
-        FFMPEG_FILE="ffmpeg-x86_64-apple-darwin"
-        FFPROBE_FILE="ffprobe-x86_64-apple-darwin"
-        ;;
-      arm64|aarch64)
-        FFMPEG_FILE="ffmpeg-aarch64-apple-darwin"
-        FFPROBE_FILE="ffprobe-aarch64-apple-darwin"
-        ;;
-      *)
-        echo "Unsupported macOS architecture: $ARCH_TYPE"
-        exit 1
-        ;;
-    esac
-    ;;
   Linux|linux|linux-*|ubuntu-*)
     case "$ARCH_TYPE" in
       x86_64|x64)

@@ -131,7 +131,7 @@ Task 10 自测                   §7 的 17 case；性能核对（可见卡<60�
   ));
   const isDynamicTheme = isBlackHole;  // 本期动态主题===黑洞；未来扩展 ||
   ```
-- [ ] appearance `<select>` 加 `:disabled="isBlackHole"` + `:class="{'opacity-50 cursor-not-allowed': isBlackHole}"`；黑洞下显示 hint `{{ $t('settings.general.black_hole_appearance_locked') }}`（spec §3.4）。
+- [ ] appearance `<select>` 加 `:disabled="isBlackHole"` + `:class="{'opacity-50 cursor-not-allowed': isBlackHole}"`；黑洞下显示 hint `&#123;&#123; $t('settings.general.black_hole_appearance_locked') &#125;&#125;`（spec §3.4）。
 - [ ] 改写 `currentTheme` computed 的 `set`（真实名 `currentTheme`，非 `themeModel`）：选黑洞时双钉 `lightTheme=darkTheme=3`；切走时写活动槽并清非活动槽残留 3（**必做**，防翻 appearance 复活，spec §3.3 + case 10b/10c）。
   ```ts
   set(value) {

@@ -16,7 +16,7 @@ edges:
     condition: when installing or troubleshooting toolchains
   - target: context/plugin-runtime.md
     condition: when Python, PyTorch, or plugin runtime dependencies are involved
-last_updated: 2026-07-22
+last_updated: 2026-07-29
 ---
 
 # Stack
@@ -56,7 +56,7 @@ last_updated: 2026-07-22
 - No ORM; persistence uses explicit `rusqlite` queries and versioned migration code.
 - No direct database/filesystem access from Vue; privileged operations cross Tauri commands.
 - No heavy frontend state framework beyond Pinia; preserve existing store/component organization.
-- No macOS release pipeline in current scope.
+- No Android, iOS, or macOS application target. PicAiPic release assets are Windows and Linux only; platform entries in upstream lockfiles and vendored source are dependency metadata.
 - No unsigned plugins in release builds; `PICAIPIC_ALLOW_UNSIGNED_PLUGINS=1` is a developer-only bypass.
 - No host OpenCV dependency for traditional color match / style LUT / photo style; keep those paths pure Rust.
 - No Photon-style cloud vision API for built-in photo style / LUT apply (local only). Photon’s AI recolor analysis is a separate remote-API design.
@@ -66,6 +66,6 @@ last_updated: 2026-07-22
 
 - Development requires Node.js 20+, pnpm 9 (the sole committed JavaScript lockfile format), Rust stable, and Tauri CLI `^2.0.0`.
 - Vite dev server is fixed to `127.0.0.1:3580`; Tauri `devUrl` depends on it.
-- Cargo, Tauri, frontend, and docs package metadata are aligned at product version `1.0.0`.
+- Cargo, Tauri, frontend, and docs package metadata are aligned at product version `1.1.0`.
 - `ort` is pinned exactly to `2.0.0-rc.10`; native runtime changes can affect model downloads, copied DLLs, and release linking.
 - CI uses pnpm 9 and builds Windows x64/arm64 plus Linux x86_64/aarch64.

@@ -10,7 +10,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -39,7 +38,6 @@
           "$DESKTOP/**",
           "$DOWNLOAD/**",
           "$APPCACHE/**",
-          "/Volumes/**",
           "/media/**",
           "/mnt/**",
           "/run/media/**"
@@ -54,8 +52,7 @@
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png",
-      "icons/icon.ico",
-      "icons/icon.icns"
+      "icons/icon.ico"
     ],
     "resources": {
       "resources/models/*": "models",

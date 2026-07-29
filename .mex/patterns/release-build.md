@@ -14,13 +14,15 @@ edges:
     condition: when native/version constraints cause failures
   - target: context/plugin-runtime.md
     condition: when producing plugin packages
-last_updated: 2026-07-18
+last_updated: 2026-07-29
 ---
 
 # Build Release Artifacts
 
 ## Context
 App installers and plugin zips are separate products. App packaging bundles models/FFmpeg and updater metadata; plugin packaging validates manifests, excludes runtime artifacts, and optionally signs package manifests.
+
+**Supported desktop targets (2026-07-29):** Windows and Linux only. Android/iOS assets and macOS bundle/native bridge files were removed. Platform entries in Cargo/pnpm lockfiles and scripts inside vendored third-party source are dependency metadata, not supported PicAiPic release targets.
 
 **Installer delivery (2026-07-18):** tagged app builds upload primarily to the **GitHub Release** for that tag. Actions artifacts are optional/best-effort because storage quota can fail after a green compile/bundle.
 
@@ -36,6 +38,8 @@ App installers and plugin zips are separate products. App packaging bundles mode
 9. Inspect artifact names, architectures, sizes, signatures/updater JSON, and bundled resource paths on the **Release** page (not only Actions).
 10. Smoke the installed/packaged application, including plugin trust/setup/start/smoke where the release contains plugin-host changes.
 11. **Publish** the draft release only when the owner is ready (private repos may keep drafts indefinitely).
+
+For v1.1.0, treat the existing private draft as a verification target, not a published release. Update public website links and updater metadata only when the owner promotes the release.
 
 ## Gotchas
 - `cargo check` does not exercise final native linking or installer resource layout.
@@ -64,4 +68,5 @@ Classify failure as toolchain, native compile/link, missing resource, relative p
 ## App icons
 
 - Windows taskbar/exe icons come from `src-tauri/icons/icon.ico` (see `tauri.conf.json` `bundle.icon`).
-- Canonical brand mark: repo-root `favicon1.ico`. Run `scripts/regenerate_app_icons.ps1`, then **clean rebuild** installers. Do not use frame `logo-pic.png` for app chrome.
+- Canonical brand mark: repo-root `favicon1.ico`. Run `scripts/regenerate_app_icons.ps1`, then **clean rebuild** installers. Generation occurs in a temporary directory and hash-syncs only changed root Windows/Linux/shared assets, so unsupported mobile/macOS outputs never return and a running WebView cannot block unchanged files. Do not use frame `logo-pic.png` for app chrome.
+- The 2026-07-29 icon refresh uses the supplied network-cat PicAiPic mark. The generated Windows ICO must retain 16, 24, 32, 48, 64, and 256 px frames; verify with Pillow `Image.open(...).ico.sizes()` after regeneration.

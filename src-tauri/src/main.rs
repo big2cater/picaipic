@@ -22,7 +22,7 @@ mod t_common;
 mod t_config;
 mod t_dedup;
 mod t_face;
-#[cfg(all(not(target_os = "macos"), lap_has_libheif))]
+#[cfg(lap_has_libheif)]
 mod t_heif;
 mod t_http;
 mod t_image;
@@ -32,7 +32,6 @@ mod t_lens;
 mod t_libraw;
 mod t_live_photo;
 mod t_lut;
-mod t_menu;
 mod t_migration;
 mod t_pasteboard;
 mod t_plugin;
@@ -64,7 +63,7 @@ async fn main() {
     };
 
     let run_result = builder
-        .plugin(tauri_plugin_window_state::Builder::default().build()) // macOS: ~/Library/Application Support/{APP_NAME}/window-state.json
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
@@ -99,9 +98,7 @@ async fn main() {
         .setup(|_app| {
             t_video::init_ffmpeg_path(&_app.handle());
             t_config::set_app_identifier(&_app.config().identifier);
-            t_menu::install_app_menu(&_app.handle())?;
 
-            #[cfg(not(target_os = "macos"))]
             if let Some(window) = _app.get_webview_window("main") {
                 if let Err(e) = window.set_decorations(false) {
                     eprintln!("Failed to disable main window decorations: {}", e);
@@ -208,9 +205,6 @@ async fn main() {
 
                 app_handle.exit(0);
             }
-        })
-        .on_menu_event(|app, event| {
-            t_menu::handle_menu_event(app, event);
         })
         .invoke_handler(tauri::generate_handler![
             // library

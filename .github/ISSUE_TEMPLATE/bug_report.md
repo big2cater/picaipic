@@ -29,7 +29,7 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots to help explain your problem.
 
 **Desktop (please complete the following information):**
- - OS: [e.g. macOS, Windows 10]
+ - OS: [e.g. Windows 11, Ubuntu 24.04]
  - Version [e.g. 0.1.8]
 
 **Additional context**

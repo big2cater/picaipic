@@ -8,7 +8,7 @@ Downloads AI model files (CLIP + InsightFace) required for the app to `src-tauri
 
 ### Usage
 
-**macOS / Linux:**
+**Linux:**
 ```bash
 ./scripts/download_models.sh
 ```
@@ -34,7 +34,7 @@ Downloads FFmpeg and FFprobe sidecar binaries for the current platform into `src
 
 ### Usage
 
-**macOS / Linux:**
+**Linux:**
 ```bash
 ./scripts/download_ffmpeg_sidecar.sh
 ```
@@ -48,8 +48,6 @@ Downloads FFmpeg and FFprobe sidecar binaries for the current platform into `src
 
 | Platform | Files |
 |----------|-------|
-| macOS Intel | `ffmpeg-x86_64-apple-darwin`, `ffprobe-x86_64-apple-darwin` |
-| macOS Apple Silicon | `ffmpeg-aarch64-apple-darwin`, `ffprobe-aarch64-apple-darwin` |
 | Linux x86_64 | `ffmpeg-x86_64-unknown-linux-gnu`, `ffprobe-x86_64-unknown-linux-gnu` |
 | Linux aarch64 | `ffmpeg-aarch64-unknown-linux-gnu`, `ffprobe-aarch64-unknown-linux-gnu` |
 | Windows x86_64 | `ffmpeg-x86_64-pc-windows-msvc.exe`, `ffprobe-x86_64-pc-windows-msvc.exe` |

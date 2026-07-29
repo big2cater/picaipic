@@ -2123,6 +2123,7 @@ impl AFile {
         }
     }
 
+    #[cfg(test)]
     fn scrape_binary_exif_fallback(data: &[u8]) -> BinaryExifFallback {
         Self::scrape_binary_exif_fallback_profiled(data, None)
     }
@@ -2857,46 +2858,6 @@ impl AFile {
             false,
             &mut profile,
         )
-    }
-
-    pub(crate) fn add_to_db_for_scan(
-        folder_id: i64,
-        file_path: &str,
-        file_type: i64,
-        last_scan_time: i64,
-    ) -> Result<(Self, i32, Option<i64>), String> {
-        let mut profile = AFileAddProfile::default();
-        let result = Self::add_to_db_profiled_inner(
-            folder_id,
-            file_path,
-            file_type,
-            last_scan_time,
-            true,
-            &mut profile,
-        );
-        result.map(|(file, status)| (file, status, profile.deferred_seen_file_id))
-    }
-
-    pub(crate) fn add_to_db_profiled_for_scan(
-        folder_id: i64,
-        file_path: &str,
-        file_type: i64,
-        last_scan_time: i64,
-    ) -> (Result<(Self, i32, Option<i64>), String>, AFileAddProfile) {
-        let mut profile = AFileAddProfile {
-            enabled: true,
-            ..Default::default()
-        };
-        let result = Self::add_to_db_profiled_inner(
-            folder_id,
-            file_path,
-            file_type,
-            last_scan_time,
-            true,
-            &mut profile,
-        )
-        .map(|(file, status)| (file, status, profile.deferred_seen_file_id));
-        (result, profile)
     }
 
     /// Scan through a lightweight, per-album state cache when possible. Cache

@@ -57,18 +57,18 @@ PicAiPic 是一款开源、本地优先的照片管理器，旨在帮助您轻�
 
 ## 当前开发状态
 
-PicAiPic 当前处于 `v1.0.0` 宿主/插件基线。近期已经完成：
+PicAiPic 当前处于 `v1.1.0` 开发线。仓库可能已有私有多架构 draft release，但只有维护者主动发布后才算正式版本。近期已经完成：
 
-- 活跃界面、更新器、打包配置、文档和数据目录中的 Lap → PicAiPic 品牌迁移
-- AI 插件包签名与发布者信任、启动令牌、权限/安装流程、运行时冲突门禁和输入文件预拷贝
-- shared、plugin-private、external 三类 Python 运行时绑定，以及 manifest 驱动的外部模型目录绑定
-- 切换图库后延迟缩略图/预览请求的跨图库隔离
-- 插件最低/最高 PicAiPic 版本兼容性校验
-- 首页组件按需加载，Home 入口 chunk 从约 527 KB 降至约 15 KB
-- Live Photo / Motion Photo 检测、配对、长按预览、motion 提取缓存、导出/转换、可选 JPEG 关键帧覆盖与相册元数据修复（schema v6）
-- 重命名磁盘↔数据库一致性、相册改名错误传播、大库去重扫描效率与 MediaViewer 空安全加固
+- 大图库滚动优化：取消过期视口任务、缩略图/metadata 请求去重、卡片菜单懒挂载、虚拟列表使用稳定的 GPU 定位
+- 暖重扫优化：扫描内 folder/file-state cache 与有界时间戳事务；10,343 个未变化文件从 10.164 秒降至 8.786 秒
+- 本地 CLIP batch embedding、受限预处理预取、启动矩阵减内存，以及 11 万向量默认精确搜索实机验证
+- AI 插件包签名、发布者信任、bearer token、权限/安装流程、运行时冲突门禁与输入文件 staging
+- SA-LUT 等插件动作只在托管插件可达时显示；启动/停止/重启状态会跨窗口同步
+- 裁剪、拼图、批处理、冲印、追色、LUT/照片格调、相框、智能相册、集合和 Live/Motion Photo 等内置流程
+- Windows 安装包、Linux/共享 PNG、标题栏、欢迎/关于页和文档站统一使用新版应用图标
+- 发布范围收敛为 Windows/Linux；已删除 Android/iOS 资源和 macOS bundle/native bridge 文件
 
-下一阶段重点是 release 可执行文件的插件回归、带用户确认的 shared → plugin-private **一键**回退（手动选 private 已有）、插件签名密钥轮换/撤销设计，以及在默认 input staging 之上更强的网络/Linux 插件隔离。
+下一阶段重点是 release 可执行文件回归、代表性冷导入/embedding profiling、插件签名密钥轮换/撤销设计，以及在默认 input staging 之上更强的网络/Linux 插件隔离。详见 [v1.1.0 发布说明](../docs/guide/release-notes/v1.1.0.md) 和 [开发进度看板](../docs/guide/picaipic-progress.md)。
 
 ## 卸载 PicAiPic
 
