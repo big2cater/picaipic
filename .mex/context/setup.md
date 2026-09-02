@@ -17,7 +17,7 @@ edges:
     condition: when provisioning or testing plugin runtimes
   - target: patterns/release-build.md
     condition: when producing app or plugin artifacts
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 ---
 
 # Setup
@@ -27,7 +27,7 @@ last_updated: 2026-07-29
 - Node.js 20+ and pnpm (CI currently uses pnpm 9).
 - Rust stable plus `cargo install tauri-cli --version "^2.0.0" --locked`.
 - Git with recursive submodule support for native third-party libraries.
-- Windows: Visual C++ build tools/runtime and PowerShell; Linux: WebKitGTK 4.1, GTK/appindicator, build tools, clang/nasm/pkg-config/autotools/cmake and related packages from README/CI.
+- Windows: Visual C++ build tools/runtime and PowerShell 7 (`pwsh`); Linux: WebKitGTK 4.1, GTK/appindicator, build tools, clang/nasm/pkg-config/autotools/cmake and related packages from README/CI.
 - Python is required for plugin checks, signing tools, and sample AI plugin environments.
 
 ## First-time Setup
@@ -67,7 +67,8 @@ last_updated: 2026-07-29
 - `.\scripts\check_plugin_host.ps1` — manifests, Rust fmt/check, frontend build, and Python compile checks.
 - `.\scripts\check_plugin_host.ps1 -IncludeStress -FastStress` — add mock async/local-HTTP plugin task stress.
 - `.\scripts\package_plugin.ps1 -All -FailOnWarnings` — validate/package all plugins; add signing options for release artifacts.
-- `.\scripts\package_windows.ps1 -CheckOnly` — Windows packaging preflight; `.\build-exe.bat` performs the build.
+- `pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\package_windows.ps1 -CheckOnly` — Windows packaging preflight; add `-Clean` for a full local rebuild. Use PowerShell 7 for project terminal commands.
+- `.\build-exe.bat` builds both NSIS and MSI by default and closes running PicAiPic processes from both build and installed locations first. Reinstalling an unchanged MSI product version can enter cached maintenance behavior, so uninstall or bump the version before validating MSI.
 - Tag release (Linux draft + assets): push an annotated `v*` tag; workflow `.github/workflows/release.yml` builds Linux and uploads packages to the tag’s GitHub Release.
 - Windows release assets: workflow_dispatch `.github/workflows/release-windows.yml` with `release_tag=vX.Y.Z` after the draft tag/release exists; updates `latest.json` with Windows entries.
 - Current line: app versions **1.1.0**; draft release **v1.1.0** may exist unpublished on a private repo.
@@ -79,6 +80,12 @@ last_updated: 2026-07-29
 **AI models or FFmpeg resources are missing:** rerun the platform download scripts before development/package builds.
 
 **Windows icon regeneration fails with `os error 1224`:** current scripts generate under a temporary directory and hash-sync changed Windows/Linux/shared files only. If a genuinely changed destination is still locked, close PicAiPic and image preview windows, then rerun `build-exe.bat`.
+
+**A newly built installer opens an older-looking UI:** first confirm every old PicAiPic process is closed before starting the installed app. MSI maintenance is also keyed by product version and may reuse cached state when, for example, another `1.1.0` MSI is run; uninstall/bump the version before validating MSI. The package script prints this warning whenever MSI output is requested.
+
+**A dynamic theme background works but photos do not distort:** the ambient and photo layers are independent. Confirm main-window native maximize, 6 seconds idle, intensity above 0, Windows Animation effects enabled, and no modal/library switch. Photo WebGL buffers clamp to GPU limits; capture/GL failure should show the theme-specific CSS photo fallback. See `docs/guide/fx-theme-runtime-compatibility.md`.
+
+**Local packaging reports `D:\ailab\src-vite` missing:** the generated Tauri override commands run from the repository root and must use `pnpm --dir src-vite ...`. Do not copy the base `tauri.conf.json` path (`../src-vite`), whose relative path is resolved under different config handling.
 
 **Windows AI startup reports missing runtime:** install the correct Microsoft Visual C++ Redistributable for x64/arm64 and restart.
 

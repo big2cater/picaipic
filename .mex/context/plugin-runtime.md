@@ -17,7 +17,7 @@ edges:
     condition: when adding or changing plugin behavior
   - target: patterns/debug-plugin-runtime.md
     condition: when setup, start, health, smoke, task, or output behavior fails
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 ---
 
 
@@ -36,6 +36,7 @@ last_updated: 2026-07-29
 
 ## Storage Boundaries
 
+- Release installs default the plugin store to `%LOCALAPPDATA%/com.big2cater.picaipic/picaipic-local`, independent of the executable/install directory. This keeps package code, models, logs, outputs, and runtimes writable when PicAiPic is installed under `Program Files`, a non-system drive, or a path containing spaces. If an older install already has an install-adjacent `picaipic-local` and the AppData store does not yet exist, the host keeps using that legacy store so existing data does not disappear; users can select a new store explicitly in Settings.
 - `plugins/<id>` — installed code.
 - `plugin-data/<id>` — persistent plugin settings/data.
 - `plugin-cache/<id>` — disposable cache and task staging.
@@ -48,7 +49,12 @@ last_updated: 2026-07-29
 ## Security Invariants
 
 - Package JSON canonicalization must match between Python signing and Rust verification; keys are sorted and the signature field is omitted from signed bytes.
+- Package installation snapshots the selected ZIP into a UUID-namespaced file under the host-managed plugin root. Manifest reads, declared-file hash checks, signature/trust verification, and extraction reuse one archive opened from that snapshot; never reopen the user-selected path after verification.
+- Package replacement is transactional: the old managed code directory is renamed to a hidden same-parent backup, and is restored if code placement, private-storage preparation, model inspection, or registry persistence fails. The backup is deleted only after commit; hidden interrupted transaction directories are never discovered as plugins.
+- Uninstall stages managed code and optional private data/cache/output/runtime directories to hidden same-parent paths, persists registry cleanup, then finalizes deletion. On a registry or staging failure, staged paths are restored; shared runtimes and external model bindings are never staged or deleted.
+- Package extraction enforces declared unpacked-size ceilings before writing to staging, and staged directory deletion uses bounded backoff retries for Windows handle-release lag.
 - Permissions distinguish reading selected files, writing output directories/source files, process launch, setup download, runtime network, and upload behavior.
+- Runtime network grants fail closed: a missing grant or registry read error means `false`, including when experimental OS network enforcement is enabled.
 - Backends bind to loopback, accept the host-selected port, and require `PICAIPIC_PLUGIN_AUTH_TOKEN` bearer authentication.
 - Default confinement stages/copies external input paths into task storage on all supported platforms (`sandbox_enabled()` is not Windows-gated). Staging failures fail closed. Diagnostics: task message + `inputs/staging-report.json` (counts/bytes/hardlink vs copy/skips). Staging prefers same-volume hardlink, then copy. Only JSON fields named `path` are rewritten. Do not pass raw source paths as a shortcut.
 - Writable roots allow-list (Phase 1): `plugin_writable_roots` centralizes data/cache/outputs/plugin-runtimes/code + shared runtimes + bound model dirs + task extras; used for staging skip + optional ACL exclusions. Adoption still requires task-output containment only.
@@ -67,6 +73,7 @@ last_updated: 2026-07-29
 - External runtimes must be probed and represented as external binding state.
 - `entry.defaultPort` is preferred only; start/stop scripts and backend must honor `PICAIPIC_PLUGIN_PORT`.
 - Long-running work uses async task states/events and cancellation; keep task history bounded and avoid blocking UI-only progress assumptions.
+- Resource lookup for bundled host models and FFmpeg uses Tauri's resource directory with `PathBuf` joins, not the current working directory or a fixed install path.
 
 ## Sources of Truth
 

@@ -32,6 +32,25 @@
         >
           {{ $t('info_panel.dedup.tabs.similar') }}
         </button>
+        <select
+          v-if="dedupMode === 'similar'"
+          class="select select-xs"
+          :value="Number(config.dedup?.similarGrouping ?? 1)"
+          :title="$t('info_panel.dedup.grouping_strictness')"
+          @change="changeSimilarGrouping(Number(($event.target as HTMLSelectElement).value))"
+        >
+          <option :value="0">{{ $t('info_panel.dedup.grouping_options.strict') }}</option>
+          <option :value="1">{{ $t('info_panel.dedup.grouping_options.normal') }}</option>
+          <option :value="2">{{ $t('info_panel.dedup.grouping_options.loose') }}</option>
+        </select>
+        <TButton
+          class="ml-auto"
+          :icon="IconRefresh"
+          :buttonSize="'small'"
+          :tooltip="$t('info_panel.dedup.reanalyze')"
+          :disabled="!props.dedupScanKey"
+          @click="triggerBackendDedup(true)"
+        />
       </div>
       <div v-if="isDedupLoading" class="p-4 flex-1 flex items-center justify-center">
         <div class="text-center text-base-content/30 space-y-3 max-w-[260px]">
@@ -179,6 +198,10 @@
                     {{ $t('file_info.modified_at') }}: {{ formatTimestamp(activeGroup.keepItem.file.modified_at, $t('format.date_time')) }}
                   </div>
                 </div>
+                <!-- `setKeep` with id 0 clears the keeper so every candidate is selectable again. -->
+                <PanelActionButton class="shrink-0" @click.stop="setKeep(activeGroup.id, 0)">
+                  {{ $t('info_panel.dedup.unkeep') }}
+                </PanelActionButton>
               </div>
             </button>
 
@@ -683,6 +706,14 @@ function ensureDedupStatusPolling() {
   }, 1000);
 }
 
+/// Change how tightly Related Photos are grouped, then re-run the scan: the distance
+/// is applied while clustering, so existing groups cannot be regrouped in place.
+function changeSimilarGrouping(value: number) {
+  if (!config.dedup) config.dedup = { similarGrouping: 1 };
+  config.dedup.similarGrouping = value;
+  void triggerBackendDedup(true);
+}
+
 async function triggerBackendDedup(force = false) {
   if (!props.dedupScanKey) {
     stopDedupStatusPolling();
@@ -713,7 +744,11 @@ async function triggerBackendDedup(force = false) {
       return;
     }
 
-    await dedupStartScan(props.dedupQueryParams || null, dedupMode.value);
+    await dedupStartScan(
+      props.dedupQueryParams || null,
+      dedupMode.value,
+      dedupMode.value === 'similar' ? Number(config.dedup?.similarGrouping ?? 1) : null,
+    );
     if (!dedupPaneGlobalState.lastScanKeyByMode) {
       dedupPaneGlobalState.lastScanKeyByMode = { exact: '', similar: '' };
     }

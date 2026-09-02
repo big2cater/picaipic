@@ -16,6 +16,7 @@
       :source-el="containerRef"
       :primary-rgb="vortexPrimaryRgb"
       @captured="onVortexCaptured"
+      @failed="onVortexFailed"
       @cleared="onVortexCleared"
     />
     <PhotoGlitchLayer
@@ -25,6 +26,7 @@
       :source-el="containerRef"
       :intensity="glitchIntensity"
       @captured="onGlitchCaptured"
+      @failed="onGlitchFailed"
       @cleared="onGlitchCleared"
     />
 
@@ -36,9 +38,11 @@
         'pt-12': !config.settings.grid.showFilmStrip,
         'pb-8': !config.settings.grid.showFilmStrip && config.settings.showStatusBar,
         'pb-1': !config.settings.grid.showFilmStrip && !config.settings.showStatusBar,
+        'cp-glitch-fallback': glitchUsesCssFallback && glitchLayerActive,
         // Hide live grid after freeze-frame capture so only the warped layer shows
         'opacity-0 pointer-events-none': vortexHidesGrid || glitchHidesGrid,
       }"
+      :style="glitchFallbackStyle"
       :items="renderItems"
       :direction="config.settings.grid.showFilmStrip && config.settings.grid.previewPosition < 2 ? 'horizontal' : 'vertical'"
       :grid-items="config.settings.grid.showFilmStrip ? 1 : columnCount"
@@ -90,6 +94,7 @@
           :is-selected="selectMode ? Boolean(getFileItem(item).isSelected) : getFileIndex(item, index) === selectedItemIndex"
           :is-active="getFileIndex(item, index) === selectedItemIndex"
           :select-mode="selectMode"
+          :plugin-menu-items="pluginContextMenuItems"
           @clicked="(modifiers) => $emit('item-clicked', getFileIndex(item, index), modifiers)"
           @dblclicked="(modifiers) => $emit('item-dblclicked', getFileIndex(item, index), modifiers)"
           @select-toggled="(shiftKey) => $emit('item-select-toggled', getFileIndex(item, index), shiftKey)"
@@ -128,6 +133,7 @@
 import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick, inject, unref, type Ref, type ComputedRef } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
+import { usePluginStore } from '@/stores/pluginStore';
 import { config } from '@/common/config';
 import { formatDate } from '@/common/utils';
 import Thumbnail from '@/components/Thumbnail.vue';
@@ -138,8 +144,7 @@ import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColu
 import { IconCalendarDay, IconCalendarMonth, IconSearch } from '@/common/icons';
 import { readPrimaryColor, type RadiiValue } from '@/common/blackHoleMath';
 import { isBlackHoleTheme, isCyberpunkTheme } from '@/common/utils';
-// CSS per-card warp kept available but NOT driven while WebGL vortex is primary
-// import { useGravityWarp } from '@/composables/useGravityWarp';
+import { useGravityWarp } from '@/composables/useGravityWarp';
 
 const props = withDefaults(defineProps<{
   selectedItemIndex: number;
@@ -187,8 +192,12 @@ const emit = defineEmits([
 ]);
 
 const uiStore = useUIStore();
+const pluginStore = usePluginStore();
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
+const pluginContextMenuItems = computed(() =>
+  pluginStore.getMenuItems('image.selection.single', 'image.contextMenu')
+);
 const containerRef = ref<HTMLElement | null>(null);
 const bhGravityActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('bhGravityActive', null);
 const cpGlitchActive = inject<Ref<boolean> | ComputedRef<boolean> | null>('cpGlitchActive', null);
@@ -217,11 +226,21 @@ const cyberpunkThemeOn = computed(() =>
 const vortexEnabled = computed(() => blackHoleThemeOn.value && bhGravityActive != null);
 const vortexActive = computed(() => blackHoleThemeOn.value && !!unref(bhGravityActive));
 const vortexHidesGrid = ref(false);
+const vortexUsesCssFallback = ref(false);
 const vortexPrimaryRgb = ref<[number, number, number]>([180, 80, 200]);
+const cssVortexActive = computed(() => vortexActive.value && vortexUsesCssFallback.value);
+const effectiveBhRadii = computed<RadiiValue>(() => unref(bhRadii) || radiiFallback.value);
+
+useGravityWarp({
+  rootEl: containerRef,
+  gravityActive: cssVortexActive,
+  radii: effectiveBhRadii,
+});
 
 // Cyberpunk continuous glitch layer (photo area only)
 const glitchEnabled = computed(() => cyberpunkThemeOn.value && cpGlitchActive != null);
 const glitchHidesGrid = ref(false);
+const glitchUsesCssFallback = ref(false);
 const glitchLayerActive = computed(() => {
   const intensity = Number(config.settings.dynamicThemeIntensity);
   return (
@@ -235,6 +254,9 @@ const glitchIntensity = computed(() => {
   const n = Number(config.settings.dynamicThemeIntensity);
   return Number.isFinite(n) ? n : 1;
 });
+const glitchFallbackStyle = computed(() => ({
+  '--cp-glitch-strength': String(Math.max(0.5, glitchIntensity.value)),
+}));
 
 function parsePrimaryRgb(): [number, number, number] {
   const raw = readPrimaryColor();
@@ -257,34 +279,52 @@ function parsePrimaryRgb(): [number, number, number] {
 }
 
 function onVortexCaptured() {
+  vortexUsesCssFallback.value = false;
   vortexHidesGrid.value = true;
+}
+
+function onVortexFailed() {
+  vortexHidesGrid.value = false;
+  vortexUsesCssFallback.value = true;
 }
 
 function onVortexCleared() {
   vortexHidesGrid.value = false;
+  vortexUsesCssFallback.value = false;
 }
 
 function onGlitchCaptured() {
+  glitchUsesCssFallback.value = false;
   glitchHidesGrid.value = true;
+}
+
+function onGlitchFailed() {
+  glitchHidesGrid.value = false;
+  glitchUsesCssFallback.value = true;
 }
 
 function onGlitchCleared() {
   glitchHidesGrid.value = false;
+  glitchUsesCssFallback.value = false;
 }
 
 watch(vortexActive, (on) => {
   if (on) vortexPrimaryRgb.value = parsePrimaryRgb();
-  else vortexHidesGrid.value = false;
+  else {
+    vortexHidesGrid.value = false;
+    vortexUsesCssFallback.value = false;
+  }
 });
 
 watch(glitchLayerActive, (on) => {
-  if (!on) glitchHidesGrid.value = false;
+  if (!on) {
+    glitchHidesGrid.value = false;
+    glitchUsesCssFallback.value = false;
+  }
 });
 
-// Silence unused inject fallbacks (kept for future CSS-warp toggle)
+// Silence the active fallback; radiiFallback is used when Home does not provide radii.
 void gravityActiveFallback;
-void radiiFallback;
-void bhRadii;
 
 const scroller = ref<any>(null);
 const columnCount = ref(4);

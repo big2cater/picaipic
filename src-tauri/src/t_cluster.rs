@@ -1,5 +1,5 @@
 use crate::t_common;
-use crate::t_sqlite::{Face, Person};
+use crate::t_sqlite::{Face, FaceClusterAssignment, Person};
 use instant_distance::{Builder as HnswBuilder, Search as HnswSearch};
 // HnswMap stores face indices so PointId reshuffling does not break mapping.
 use rand::seq::SliceRandom;
@@ -878,23 +878,22 @@ where
 
     let total_clusters = valid_clusters.len();
 
-    // 9. Assign only previously-unassigned faces
+    // 9. Plan assignments outside the write transaction. This keeps the long graph
+    // work lock-free while making the final person/face changes atomic.
     let assign_start = Instant::now();
-    let mut total_assigned = 0usize;
     let mut next_person_num = Face::next_auto_person_number()?;
+    let mut assignments = Vec::new();
 
     for (cluster_idx, (label, cluster_face_indices)) in valid_clusters.into_iter().enumerate() {
         if is_cancelled_fn() {
-            // Partial assigns already committed; surface cancel so UI does not look like full success.
             eprintln!(
-                "[cluster] cancelled mid-assign assigned={} clusters_seen={}/{} assign_ms={} total_ms={}",
-                total_assigned,
+                "[cluster] cancelled while planning assignments clusters_seen={}/{} assign_ms={} total_ms={}",
                 cluster_idx,
                 total_clusters,
                 assign_start.elapsed().as_millis(),
                 cluster_start.elapsed().as_millis()
             );
-            return Err(format!("cancelled after assigning {total_assigned} faces"));
+            return Err("cancelled before cluster assignments commit".to_string());
         }
 
         progress_fn(ClusterProgress {
@@ -914,24 +913,33 @@ where
             }
         }
 
-        let person_id = if let Some(pid) = person_id {
-            pid
+        let (person_id, person_name) = if let Some(pid) = person_id {
+            (Some(pid), None)
         } else {
             // Brand-new cluster of only unassigned faces → create a person.
             let person_name = format!("Person {}", next_person_num);
             next_person_num += 1;
-            Person::create(Some(&person_name))?
+            (None, Some(person_name))
         };
 
-        for face_idx in cluster_face_indices {
+        let face_ids = cluster_face_indices
+            .into_iter()
             // Never overwrite an existing assignment (handles multi-person seeds in one label).
-            if slim_faces[face_idx].2.is_some() {
-                continue;
-            }
-            Face::assign_to_person(slim_faces[face_idx].0, person_id)?;
-            total_assigned += 1;
+            .filter(|&face_idx| slim_faces[face_idx].2.is_none())
+            .map(|face_idx| slim_faces[face_idx].0)
+            .collect::<Vec<_>>();
+        if !face_ids.is_empty() {
+            assignments.push(FaceClusterAssignment {
+                person_id,
+                person_name,
+                face_ids,
+            });
         }
     }
+    if is_cancelled_fn() {
+        return Err("cancelled before cluster assignments commit".to_string());
+    }
+    let total_assigned = Face::apply_cluster_assignments(&assignments)?;
     let assign_ms = assign_start.elapsed().as_millis();
 
     drop(slim_faces);

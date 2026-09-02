@@ -30,6 +30,15 @@ function forcesDarkDataTheme(themeId) {
   return id === THEME_ID.BLACK_HOLE || id === THEME_ID.CYBERPUNK;
 }
 
+function migrateThemeSettings(settings) {
+  settings.lightTheme = clampThemeId(settings.lightTheme);
+  settings.darkTheme = clampThemeId(settings.darkTheme);
+  const intensity = Number(settings.dynamicThemeIntensity);
+  if (!Number.isFinite(intensity) || ![0, 0.5, 1, 1.5].includes(intensity)) {
+    settings.dynamicThemeIntensity = 1;
+  }
+}
+
 assert.equal(clampThemeId(4), 4);
 assert.equal(clampThemeId(5), 0);
 assert.equal(clampThemeId(-1), 0);
@@ -39,4 +48,10 @@ assert.equal(isBlackHoleTheme(1, 0, 3), true);
 assert.equal(forcesDarkDataTheme(3), true);
 assert.equal(forcesDarkDataTheme(4), true);
 assert.equal(forcesDarkDataTheme(1), false);
+const legacySettings = { lightTheme: 3, darkTheme: 4 };
+migrateThemeSettings(legacySettings);
+assert.equal(legacySettings.dynamicThemeIntensity, 1);
+const intentionallyDisabled = { lightTheme: 3, darkTheme: 4, dynamicThemeIntensity: 0 };
+migrateThemeSettings(intentionallyDisabled);
+assert.equal(intentionallyDisabled.dynamicThemeIntensity, 0);
 console.log('check_theme_ids: ok');

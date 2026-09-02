@@ -1,7 +1,7 @@
 ---
 name: change-face-index
 description: Runbook for face detection/embedding index and clustering performance.
-last_updated: 2026-07-22
+last_updated: 2026-07-30
 ---
 
 # Change face indexing
@@ -33,11 +33,12 @@ last_updated: 2026-07-22
 - **Detection model is InsightFace SCRFD** (`det_500m.onnx`), not classic RetinaFace. Decode uses single-channel scores + distance boxes; anchor centers are cell origin `(x*stride, y*stride)`. Runtime checks: ≥9 outputs and `scores/boxes` count == anchor count per stride — fail closed on mismatch.
 - **CPU parallel (2026-07-19):** `run_face_indexing` uses a worker pool (2–4 threads, ~half cores). Each worker loads its **own** ONNX sessions (`load_models_from_paths`) — `ort::Session` is not Sync; do not share one engine across threads under a Mutex (that re-serializes inference).
 - Per-session `intra_threads` is 1–2 when multi-worker so total ONNX threads stay bounded.
-- **Batched DB writes:** workers send scan results on a channel; coordinator flushes with `Face::apply_scan_batch_with_conn` (BEGIN IMMEDIATE + mark + inserts + COMMIT) every ~32 files.
+- **Batched DB writes:** workers send scan results on a channel; coordinator flushes with `Face::apply_scan_batch_with_conn` (BEGIN IMMEDIATE + mark + inserts + COMMIT) every ~32 files. A failed batch rolls back, stops indexing, and emits `face_index_finished.error`; never log-and-continue.
 - Thumbnail-first path preserved; bbox scaled to original size when thumb used.
 - Inference failure leaves `has_faces` untouched so a later run can retry.
 - Cancel is cooperative: stop feeding jobs, workers still report discarded jobs so progress can hit 100%; clustering skipped if cancelled during index.
 - **Incremental clustering (2026-07-20):** `cluster_faces` must **not** call `Face::reset_all_assignments()`. Existing `person_id` / person names are seeds and frozen; only unassigned faces move; new auto names use `Face::next_auto_person_number()`. `reset_all_assignments` remains only for explicit full-reset paths.
+- **Atomic assignment (2026-07-30):** build the graph and assignment plan outside SQLite transactions, check cancellation, then create new persons and conditionally assign all unassigned faces in one immediate transaction. A changed face or write error rolls back the full plan; never commit per-face assignment loops.
 
 ## Clustering performance (current + next)
 

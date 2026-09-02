@@ -36,7 +36,10 @@ pub const RAW_IMGS: &[&str] = &[
     "mrw", // Minolta / Konica Minolta
     "3fr", // Hasselblad
     "mos", // Leaf / Phase One
-    // "x3f", // Sigma / Foveon - temporarily disabled: current LibRaw path reports FileUnsupported for sampled X3F files, so indexing fails at RAW dimensions.
+    "iiq", // Phase One
+    "x3f", // Sigma / Foveon - LibRaw may report FileUnsupported for sampled files.
+    // Safe to list: `AFile::new_profiled` degrades to unknown dimensions now
+    // instead of failing the whole index.
     "dcr", "kdc", // Kodak
     "erf", // Epson
     "mef", // Mamiya

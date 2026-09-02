@@ -2085,7 +2085,7 @@ const effectiveSaveAsNew = computed(() => config.imageEditor.saveAs === 1 || !ca
 
 const showOverwriteConfirm = ref(false);
 
-const handleOverwriteConfirm = () => {
+const handleOverwriteConfirm = async () => {
   showOverwriteConfirm.value = false;
 
   if (!canOverwriteOriginal.value) {
@@ -2096,10 +2096,15 @@ const handleOverwriteConfirm = () => {
   const ext = getFileExtension(fileInfo.value.name).toLowerCase();
   const outputFormat = (ext === 'jpg' || ext === 'jpeg') ? 'jpg' : ext;
 
-  executeSave({
-    destFilePath: originalPath,
-    outputFormat,
-  });
+  try {
+    await executeSave({
+      destFilePath: originalPath,
+      outputFormat,
+    });
+  } catch {
+    isProcessing.value = false;
+    sendToParent({ type: 'failed' });
+  }
 };
 
 const handleOverwriteCancel = () => {
@@ -3099,6 +3104,7 @@ const setEditParams = (overrides: { fileName?: string; destFilePath?: string; ou
   }
 
   return {
+    fileId: fileInfo.value.id,
     sourceFilePath: fileInfo.value.file_path,
     destFilePath,
     outputFormat,
@@ -3298,26 +3304,24 @@ async function exportColorMatchCube() {
 
 const executeSave = async (overrides: { fileName?: string; destFilePath?: string; outputFormat?: string } = {}) => {
   isProcessing.value = true;
-  let success = false;
   const savedFilePath = overrides.destFilePath || fileInfo.value.file_path;
   const saveAsNew = savedFilePath !== fileInfo.value.file_path;
   try {
-    success = await editImage(setEditParams(overrides));
+    // `editImage` rejects on failure, so everything below only runs on success and
+    // callers own the single failure notification.
+    await editImage(setEditParams(overrides));
   } finally {
     isProcessing.value = false;
-    if (success) {
-      uiStore.updateFileVersion(fileInfo.value.file_path);
-      if (savedFilePath !== fileInfo.value.file_path) {
-        uiStore.updateFileVersion(savedFilePath);
-      }
-      if (uiStore.activeAdjustments.filePath === fileInfo.value.file_path) {
-        uiStore.clearActiveAdjustments();
-      }
-      sendToParent({ type: 'success', saveAsNew, filePath: savedFilePath });
-    } else {
-      sendToParent({ type: 'failed' });
-    }
   }
+
+  uiStore.updateFileVersion(fileInfo.value.file_path);
+  if (savedFilePath !== fileInfo.value.file_path) {
+    uiStore.updateFileVersion(savedFilePath);
+  }
+  if (uiStore.activeAdjustments.filePath === fileInfo.value.file_path) {
+    uiStore.clearActiveAdjustments();
+  }
+  sendToParent({ type: 'success', saveAsNew, filePath: savedFilePath });
 };
 
 const clickSave = async () => {

@@ -832,6 +832,7 @@ const quickSave = async (): Promise<boolean> => {
   const outputFormat = (ext === 'jpg' || ext === 'jpeg') ? 'jpg' : ext;
 
   const editParams = {
+    fileId: props.fileInfo.id,
     sourceFilePath: props.fileInfo.file_path,
     destFilePath: props.fileInfo.file_path,
     outputFormat,
@@ -854,18 +855,16 @@ const quickSave = async (): Promise<boolean> => {
   };
 
   try {
-    const success = await editImage(editParams);
-    if (!success) {
-      toast.error(localeMsg.value.tooltip.save_image.failed);
-      return false;
-    }
+    // `editImage` rejects on failure; a resolved value means the save committed.
+    await editImage(editParams);
 
     uiStore.updateFileVersion(props.fileInfo.file_path);
     uiStore.clearActiveAdjustments();
     emit('success');
     toast.success(localeMsg.value.tooltip.save_image.success);
     return true;
-  } catch {
+  } catch (error) {
+    console.error('Failed to save image:', error);
     toast.error(localeMsg.value.tooltip.save_image.failed);
     return false;
   }

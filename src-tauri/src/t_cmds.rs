@@ -18,7 +18,7 @@ use crate::t_utils;
 use crate::{t_ai, t_sqlite};
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
@@ -103,10 +103,12 @@ pub fn change_db_storage_dir(
     status_state: State<t_face::FaceIndexingStatus>,
 ) -> Result<String, String> {
     ensure_db_storage_change_allowed(&status_state)?;
-    let path = t_storage::change_db_storage_dir(new_dir)?;
-    // Drop pooled connections still holding handles to the old DB paths.
+    // Release idle handles before the storage layer stages source DB files.
     t_sqlite::clear_conn_pool(); // also clears embed matrix cache
-    Ok(path)
+    let result = t_storage::change_db_storage_dir(new_dir);
+    // Drop any handles reopened during validation/checkpointing.
+    t_sqlite::clear_conn_pool();
+    result
 }
 
 #[tauri::command]
@@ -114,10 +116,12 @@ pub fn reset_db_storage_dir(
     status_state: State<t_face::FaceIndexingStatus>,
 ) -> Result<String, String> {
     ensure_db_storage_change_allowed(&status_state)?;
-    let path = t_storage::reset_db_storage_dir()?;
-    // Drop pooled connections still holding handles to the old DB paths.
+    // Release idle handles before the storage layer stages source DB files.
     t_sqlite::clear_conn_pool(); // also clears embed matrix cache
-    Ok(path)
+    let result = t_storage::reset_db_storage_dir();
+    // Drop any handles reopened during validation/checkpointing.
+    t_sqlite::clear_conn_pool();
+    result
 }
 
 #[tauri::command]
@@ -145,14 +149,28 @@ pub fn edit_library(id: &str, name: &str) -> Result<(), String> {
 
 /// remove a library (also deletes the database file)
 #[tauri::command]
-pub fn remove_library(id: &str) -> Result<(), String> {
-    t_config::remove_library(id)
+pub async fn remove_library(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let _rebind_guard = t_utils::LibraryRebindGuard::acquire()?;
+        t_config::remove_library(&id)?;
+        // The removed database may still be pooled; also invalidate the old embed matrix.
+        t_sqlite::clear_conn_pool();
+        t_sqlite::create_db()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Failed to join remove library task: {}", e))??;
+
+    t_utils::restore_album_scopes(&app_handle)?;
+    t_utils::start_folder_mtime_sync(app_handle);
+    Ok(())
 }
 
 /// switch to a different library
 #[tauri::command]
 pub async fn switch_library(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let _rebind_guard = t_utils::LibraryRebindGuard::acquire()?;
         t_config::switch_library(&id)?;
         t_sqlite::clear_conn_pool();
         t_sqlite::create_db()?;
@@ -289,6 +307,9 @@ pub fn index_album(
     thumbnail_size: u32,
     skip_file_path: Option<String>,
 ) -> Result<(), String> {
+    if t_utils::dedup_scan_active() {
+        return Err("A deduplication scan is currently running".to_string());
+    }
     // Worker also guards via AlbumScanGuard; skip spawn when already active.
     if t_utils::album_scan_active(album_id) {
         return Ok(());
@@ -492,21 +513,119 @@ pub fn copy_folder(
 /// delete a folder (move to trash)
 #[tauri::command]
 pub fn delete_folder(folder_path: &str) -> Result<usize, String> {
-    // trash the folder
-    t_utils::trash_path(folder_path)?;
-
-    // delete the folder and all children from db
-    AFolder::delete_folder(folder_path)
-        .map_err(|e| format!("Error while deleting folder from DB: {}", e))
+    validate_folder_delete_target(folder_path)?;
+    let staged = t_utils::stage_folder_for_delete(folder_path)?;
+    let (deleted, staged) =
+        delete_staged_from_db(staged, "folder", || AFolder::delete_folder(folder_path))?;
+    staged.finalize_trash()?;
+    Ok(deleted)
 }
 
 /// permanently delete a folder (skip trash)
 #[tauri::command]
 pub fn delete_folder_permanently(folder_path: &str) -> Result<usize, String> {
-    t_utils::delete_folder_permanently(folder_path)?;
+    validate_folder_delete_target(folder_path)?;
+    let staged = t_utils::stage_folder_for_delete(folder_path)?;
+    let (deleted, staged) =
+        delete_staged_from_db(staged, "folder", || AFolder::delete_folder(folder_path))?;
+    staged.finalize_permanent().map_err(|error| {
+        format!(
+            "Folder DB record was deleted, but permanent disk cleanup failed: {}",
+            error
+        )
+    })?;
+    Ok(deleted)
+}
 
-    AFolder::delete_folder(folder_path)
-        .map_err(|e| format!("Error while deleting folder from DB: {}", e))
+fn validate_folder_delete_target(folder_path: &str) -> Result<(), String> {
+    if AFolder::fetch(folder_path)?.is_none() {
+        return Err(format!(
+            "Refusing to delete folder not present in the current library: {}",
+            folder_path
+        ));
+    }
+    Ok(())
+}
+
+fn delete_staged_from_db<F>(
+    staged: t_utils::StagedDelete,
+    item_label: &str,
+    delete_from_db: F,
+) -> Result<(usize, t_utils::StagedDelete), String>
+where
+    F: FnOnce() -> Result<usize, String>,
+{
+    let deleted = match delete_from_db() {
+        Ok(0) => {
+            let rollback_error = staged.rollback().err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "Database contained no matching {}; rollback also failed: {}",
+                    item_label, rollback_error
+                ),
+                None => format!(
+                    "Database contained no matching {}; staged path was restored",
+                    item_label
+                ),
+            });
+        }
+        Ok(deleted) => deleted,
+        Err(error) => {
+            let rollback_error = staged.rollback().err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "Error while deleting {} from DB: {}; rollback also failed: {}",
+                    item_label, error, rollback_error
+                ),
+                None => format!(
+                    "Error while deleting {} from DB; staged path was restored: {}",
+                    item_label, error
+                ),
+            });
+        }
+    };
+    Ok((deleted, staged))
+}
+
+#[cfg(test)]
+mod destructive_delete_tests {
+    use super::delete_staged_from_db;
+    use crate::t_utils;
+    use std::fs;
+
+    fn staged_test_file(name: &str) -> (std::path::PathBuf, t_utils::StagedDelete) {
+        let root = std::env::temp_dir().join(format!(
+            "picaipic-delete-command-{}-{}",
+            name,
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.jpg");
+        fs::write(&source, b"original file").unwrap();
+        let staged = t_utils::stage_file_for_delete(source.to_str().unwrap()).unwrap();
+        (source, staged)
+    }
+
+    #[test]
+    fn db_error_restores_staged_delete() {
+        let (source, staged) = staged_test_file("db-error");
+        let error =
+            delete_staged_from_db(staged, "file", || Err("locked".to_string())).unwrap_err();
+
+        assert!(error.contains("staged path was restored"));
+        assert_eq!(fs::read(&source).unwrap(), b"original file");
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn zero_db_rows_restores_staged_delete() {
+        let (source, staged) = staged_test_file("zero-rows");
+        let error = delete_staged_from_db(staged, "file", || Ok(0)).unwrap_err();
+
+        assert!(error.contains("no matching file"));
+        assert_eq!(fs::read(&source).unwrap(), b"original file");
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
 }
 
 /// reveal a file or folder in the file explorer (or finder)
@@ -670,8 +789,8 @@ pub fn get_folder_thumb_count(file_type: i64, folder_id: i64) -> i64 {
 
 /// edit an image
 #[tauri::command]
-pub async fn edit_image(params: t_image::EditParams) -> Result<bool, String> {
-    Ok(t_image::edit_image(params).await)
+pub async fn edit_image(params: t_image::EditParams) -> Result<(), String> {
+    t_image::edit_image(params).await
 }
 
 /// traditional color-match preview (JPEG bytes)
@@ -922,19 +1041,33 @@ pub fn move_file(
     } else {
         AFile::update_column(file_id, "folder_id", &new_folder_id)
     };
-    if let Err(error) = db_result {
+    // A zero-row update means the record is absent from the current library, so
+    // committing would move the media on disk while leaving the DB pointing at the
+    // old path (and, for replace, would destroy the overwritten target).
+    let db_error = match db_result {
+        Ok(rows) if rows > 0 => None,
+        Ok(_) => Some(format!(
+            "No file record was updated while moving '{}'",
+            file_path
+        )),
+        Err(error) => Some(format!("Error while moving file in DB: {}", error)),
+    };
+    if let Some(error) = db_error {
         let rollback_error = transfer.rollback_move(Path::new(file_path)).err();
         return Err(match rollback_error {
-            Some(rollback_error) => format!(
-                "Error while moving file in DB: {}; rollback also failed: {}",
-                error, rollback_error
-            ),
-            None => format!("Error while moving file in DB: {}", error),
+            Some(rollback_error) => format!("{}; rollback also failed: {}", error, rollback_error),
+            None => format!("{}; the move was rolled back", error),
         });
     }
     if let (Some(old_album_id), Some(new_album_id)) = (old_album_id, new_album_id) {
-        let _ = AThumb::relocate_for_file(file_id, old_album_id, new_album_id)
-            .map_err(|e| format!("Error while relocating thumbnail cache: {}", e));
+        if let Err(error) = AThumb::relocate_for_file(file_id, old_album_id, new_album_id) {
+            // Thumbnail cache is derived data and will be regenerated on demand, but a failed
+            // relocation must remain diagnosable instead of silently masking a cache miss.
+            eprintln!(
+                "Failed to relocate thumbnail cache after moving file {} from album {} to {}: {}",
+                file_id, old_album_id, new_album_id, error
+            );
+        }
     }
 
     // Refresh album totals and Live Photo pairing after a successful move.
@@ -947,8 +1080,18 @@ pub fn move_file(
         albums_to_refresh.insert(id);
     }
     for album_id in albums_to_refresh {
-        let _ = AFile::pair_live_photos(album_id);
-        let _ = Album::recount_album(album_id);
+        if let Err(error) = AFile::pair_live_photos(album_id) {
+            eprintln!(
+                "Failed to refresh Live Photo pairings after moving file {} in album {}: {}",
+                file_id, album_id, error
+            );
+        }
+        if let Err(error) = Album::recount_album(album_id) {
+            eprintln!(
+                "Failed to recount album {} after moving file {}: {}",
+                album_id, file_id, error
+            );
+        }
     }
 
     let final_path = transfer.finalize()?;
@@ -964,24 +1107,12 @@ pub fn move_file_outside_library(
     new_folder_path: &str,
     conflict_policy: &str,
 ) -> Result<String, String> {
-    let transfer = t_utils::move_file_with_policy(
+    crate::t_transfer_recovery::move_file_outside_library(
+        file_id,
         file_path,
         new_folder_path,
         t_utils::FileConflictPolicy::from_str(conflict_policy),
-    )?;
-
-    if let Err(error) = AFile::delete(file_id) {
-        let rollback_error = transfer.rollback_move(Path::new(file_path)).err();
-        return Err(match rollback_error {
-            Some(rollback_error) => format!(
-                "Error while removing file from DB: {}; rollback also failed: {}",
-                error, rollback_error
-            ),
-            None => format!("Error while removing file from DB: {}", error),
-        });
-    }
-
-    transfer.finalize()
+    )
 }
 
 /// copy a file to dest folder
@@ -999,19 +1130,26 @@ pub fn copy_file(
     .finalize()
 }
 
-/// import a file into a folder preserving the original file name
+/// import a file into a folder preserving the original file name;
+/// `target_name` optionally replaces the source basename (sanitized) so the imported
+/// copy can carry a readable name instead of a staging temp name.
 #[tauri::command]
 pub fn import_file(
     file_path: &str,
     folder_id: i64,
     folder_path: &str,
+    target_name: Option<String>,
 ) -> Result<Option<AFile>, String> {
+    let _import_guard = t_utils::ImportGuard::acquire()?;
     // Validate the source is a supported type *before* copying.
     t_utils::get_file_type(file_path)
         .ok_or_else(|| format!("Unsupported file type: {}", file_path))?;
 
-    let new_path = t_utils::import_file(file_path, folder_path)
-        .ok_or_else(|| format!("Failed to copy file: {}", file_path))?;
+    let new_path = match target_name {
+        Some(name) => t_utils::import_file_as(file_path, folder_path, Some(&name)),
+        None => t_utils::import_file(file_path, folder_path),
+    }
+    .ok_or_else(|| format!("Failed to copy file: {}", file_path))?;
     let file_type = t_utils::get_file_type(&new_path).ok_or_else(|| {
         // The renamed file should have a valid extension; if not, remove
         // the orphan so the album folder stays clean.
@@ -1036,6 +1174,7 @@ pub async fn import_url(
     folder_id: i64,
     folder_path: String,
 ) -> Result<Option<AFile>, String> {
+    let _import_guard = t_utils::ImportGuard::acquire()?;
     import_url_inner(url, folder_id, folder_path).await
 }
 
@@ -1046,6 +1185,7 @@ pub async fn import_from_drag(
     folder_id: i64,
     folder_path: String,
 ) -> Result<Option<AFile>, String> {
+    let _import_guard = t_utils::ImportGuard::acquire()?;
     let url = crate::t_pasteboard::get_drag_image_url()
         .ok_or_else(|| "No image URL found in drag pasteboard".to_string())?;
     import_url_inner(&url, folder_id, folder_path).await
@@ -1253,6 +1393,7 @@ pub async fn import_file_bytes(
     folder_id: i64,
     folder_path: String,
 ) -> Result<Option<AFile>, String> {
+    let _import_guard = t_utils::ImportGuard::acquire()?;
     if bytes.is_empty() {
         return Err("Dropped file is empty".to_string());
     }
@@ -1296,6 +1437,13 @@ fn import_clipboard_file(
             Err(error)
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardImportResult {
+    pub files: Vec<AFile>,
+    pub failed_count: usize,
 }
 
 #[tauri::command]
@@ -1342,7 +1490,9 @@ pub async fn import_clipboard(
     _app_handle: tauri::AppHandle,
     folder_id: i64,
     folder_path: &str,
-) -> Result<Vec<AFile>, String> {
+) -> Result<ClipboardImportResult, String> {
+    let _import_guard = t_utils::ImportGuard::acquire()?;
+    let mut failed_count = 0usize;
     #[cfg(target_os = "linux")]
     {
         let clipboard_data = crate::t_pasteboard::get_clipboard_import_data(&_app_handle).await?;
@@ -1360,15 +1510,21 @@ pub async fn import_clipboard(
                 }
                 match import_clipboard_file(path, folder_id, folder_path) {
                     Ok(file) => imported.push(file),
-                    Err(error) => eprintln!(
-                        "Failed to import clipboard file {}: {}",
-                        path.display(),
-                        error
-                    ),
+                    Err(error) => {
+                        failed_count += 1;
+                        eprintln!(
+                            "Failed to import clipboard file {}: {}",
+                            path.display(),
+                            error
+                        );
+                    }
                 }
             }
             if !imported.is_empty() {
-                return Ok(imported);
+                return Ok(ClipboardImportResult {
+                    files: imported,
+                    failed_count,
+                });
             }
         }
 
@@ -1381,7 +1537,10 @@ pub async fn import_clipboard(
             })?;
             let now = chrono::Utc::now().timestamp_millis();
             return match AFile::add_to_db(folder_id, &new_path, file_type, now) {
-                Ok((file, _)) => Ok(vec![file]),
+                Ok((file, _)) => Ok(ClipboardImportResult {
+                    files: vec![file],
+                    failed_count,
+                }),
                 Err(error) => {
                     let _ = std::fs::remove_file(&new_path);
                     Err(error)
@@ -1406,15 +1565,21 @@ pub async fn import_clipboard(
                 }
                 match import_clipboard_file(path, folder_id, folder_path) {
                     Ok(file) => imported.push(file),
-                    Err(error) => eprintln!(
-                        "Failed to import clipboard file {}: {}",
-                        path.display(),
-                        error
-                    ),
+                    Err(error) => {
+                        failed_count += 1;
+                        eprintln!(
+                            "Failed to import clipboard file {}: {}",
+                            path.display(),
+                            error
+                        );
+                    }
                 }
             }
             if !imported.is_empty() {
-                return Ok(imported);
+                return Ok(ClipboardImportResult {
+                    files: imported,
+                    failed_count,
+                });
             }
             return Err("Clipboard does not contain supported image files".to_string());
         }
@@ -1442,7 +1607,10 @@ pub async fn import_clipboard(
     })?;
     let now = chrono::Utc::now().timestamp_millis();
     match AFile::add_to_db(folder_id, &new_path, file_type, now) {
-        Ok((file, _)) => Ok(vec![file]),
+        Ok((file, _)) => Ok(ClipboardImportResult {
+            files: vec![file],
+            failed_count,
+        }),
         Err(error) => {
             let _ = std::fs::remove_file(&new_path);
             Err(error)
@@ -1453,21 +1621,41 @@ pub async fn import_clipboard(
 /// delete a file
 #[tauri::command]
 pub fn delete_file(file_id: i64, file_path: &str) -> Result<usize, String> {
-    // trash the file
-    t_utils::trash_path(file_path)?;
-
-    // delete the file from db
-    AFile::delete(file_id).map_err(|e| format!("Error while deleting file from DB: {}", e))
+    validate_file_delete_target(file_id, file_path)?;
+    let staged = t_utils::stage_file_for_delete(file_path)?;
+    let (deleted, staged) = delete_staged_from_db(staged, "file", || AFile::delete(file_id))?;
+    staged.finalize_trash()?;
+    Ok(deleted)
 }
 
 /// delete a file permanently
 #[tauri::command]
 pub fn delete_file_permanently(file_id: i64, file_path: &str) -> Result<usize, String> {
-    // delete the file from disk first
-    t_utils::delete_file_permanently(file_path)?;
+    validate_file_delete_target(file_id, file_path)?;
+    let staged = t_utils::stage_file_for_delete(file_path)?;
+    let (deleted, staged) = delete_staged_from_db(staged, "file", || AFile::delete(file_id))?;
+    staged.finalize_permanent().map_err(|error| {
+        format!(
+            "File DB record was deleted, but permanent disk cleanup failed: {}",
+            error
+        )
+    })?;
+    Ok(deleted)
+}
 
-    // delete the file from db
-    AFile::delete(file_id).map_err(|e| format!("Error while deleting file from DB: {}", e))
+fn validate_file_delete_target(file_id: i64, file_path: &str) -> Result<(), String> {
+    let file = AFile::get_file_info(file_id)?
+        .ok_or_else(|| format!("Refusing to delete missing file id: {}", file_id))?;
+    let indexed_path = file
+        .file_path
+        .ok_or_else(|| format!("File id {} has no indexed path", file_id))?;
+    if !t_utils::paths_refer_to_same_item(Path::new(&indexed_path), Path::new(file_path)) {
+        return Err(format!(
+            "Refusing to delete path '{}' for file id {}; indexed path is '{}'",
+            file_path, file_id, indexed_path
+        ));
+    }
+    Ok(())
 }
 
 /// delete a file from db
@@ -1497,23 +1685,109 @@ pub async fn batch_delete_files(
     permanently: bool,
 ) -> Result<BatchDeleteResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut deleted_file_ids = Vec::with_capacity(files.len());
+        let mut staged_files = Vec::with_capacity(files.len());
+        let mut failed_count = 0usize;
+        let mut seen_file_ids = HashSet::with_capacity(files.len());
+        let mut seen_file_paths = HashSet::with_capacity(files.len());
         for file in &files {
-            let result = if permanently {
-                t_utils::delete_file_permanently(&file.file_path)
-            } else {
-                t_utils::trash_path(&file.file_path)
-            };
-            if result.is_ok() {
-                deleted_file_ids.push(file.file_id);
+            if !seen_file_ids.insert(file.file_id)
+                || !seen_file_paths.insert(file.file_path.clone())
+            {
+                failed_count += 1;
+                eprintln!(
+                    "Skipping duplicate batch delete target (file_id={}, path={})",
+                    file.file_id, file.file_path
+                );
+                continue;
+            }
+            if let Err(error) = validate_file_delete_target(file.file_id, &file.file_path) {
+                failed_count += 1;
+                eprintln!("Failed to validate batch delete target: {}", error);
+                continue;
+            }
+            match t_utils::stage_file_for_delete(&file.file_path) {
+                Ok(staged) => staged_files.push((file.file_id, staged)),
+                Err(error) => {
+                    failed_count += 1;
+                    eprintln!(
+                        "Failed to stage file {} for delete: {}",
+                        file.file_path, error
+                    );
+                }
             }
         }
 
-        AFile::batch_delete(&deleted_file_ids)
-            .map_err(|e| format!("Error while deleting files from DB: {}", e))?;
+        let staged_ids = staged_files
+            .iter()
+            .map(|(file_id, _)| *file_id)
+            .collect::<Vec<_>>();
+        let deleted_rows = match AFile::batch_delete(&staged_ids) {
+            Ok(deleted_rows) => deleted_rows,
+            Err(error) => {
+                let mut rollback_errors = Vec::new();
+                for (file_id, staged) in staged_files {
+                    if let Err(rollback_error) = staged.rollback() {
+                        rollback_errors.push(format!("file_id={}: {}", file_id, rollback_error));
+                    }
+                }
+                return Err(if rollback_errors.is_empty() {
+                    format!(
+                        "Error while deleting files from DB; staged files were restored: {}",
+                        error
+                    )
+                } else {
+                    format!(
+                        "Error while deleting files from DB: {}; rollback failures: {}",
+                        error,
+                        rollback_errors.join("; ")
+                    )
+                });
+            }
+        };
+        if deleted_rows != staged_ids.len() {
+            let mut rollback_errors = Vec::new();
+            for (file_id, staged) in staged_files {
+                if let Err(rollback_error) = staged.rollback() {
+                    rollback_errors.push(format!("file_id={}: {}", file_id, rollback_error));
+                }
+            }
+            return Err(if rollback_errors.is_empty() {
+                format!(
+                    "Database deleted {} of {} staged files; paths were restored for scan recovery",
+                    deleted_rows,
+                    staged_ids.len()
+                )
+            } else {
+                format!(
+                    "Database deleted {} of {} staged files; rollback failures: {}",
+                    deleted_rows,
+                    staged_ids.len(),
+                    rollback_errors.join("; ")
+                )
+            });
+        }
+
+        let mut deleted_file_ids = Vec::with_capacity(staged_files.len());
+        for (file_id, staged) in staged_files {
+            let finalize_result = if permanently {
+                staged.finalize_permanent()
+            } else {
+                staged.finalize_trash()
+            };
+            match finalize_result {
+                Ok(()) => deleted_file_ids.push(file_id),
+                Err(error) => {
+                    failed_count += 1;
+                    eprintln!(
+                        "File DB record was deleted, but disk cleanup failed (file_id={}): {}",
+                        file_id, error
+                    );
+                }
+            }
+        }
         Ok(BatchDeleteResult {
-            failed_count: files.len().saturating_sub(deleted_file_ids.len()),
             deleted_file_ids,
+            failed_count,
         })
     })
     .await
@@ -1842,6 +2116,12 @@ pub fn set_folder_search_excluded(
         .ok_or_else(|| "Folder was saved without an id".to_string())?;
     AFolder::update_column(folder_id, "is_excluded_from_search", &is_excluded)
         .map_err(|e| format!("Error while setting folder search exclusion: {}", e))
+}
+
+/// every folder of every album, used to build the sidebar folder-search tree
+#[tauri::command]
+pub fn get_all_album_folders() -> Result<Vec<crate::t_sqlite::FolderSearchHit>, String> {
+    AFolder::get_all_for_search()
 }
 
 /// set a file's favorite status (true or false)
@@ -2173,8 +2453,9 @@ pub fn dedup_start_scan(
     state: tauri::State<'_, crate::t_dedup::DedupState>,
     params: Option<crate::t_sqlite::QueryParams>,
     mode: Option<String>,
+    similar_grouping: Option<u32>,
 ) -> Result<(), String> {
-    crate::t_dedup::start_scan(app_handle, state, params, mode)
+    crate::t_dedup::start_scan(app_handle, state, params, mode, similar_grouping)
 }
 
 #[tauri::command]

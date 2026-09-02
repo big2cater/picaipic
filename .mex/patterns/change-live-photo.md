@@ -17,7 +17,7 @@ edges:
     condition: when following coding, IPC, or verify conventions
   - target: context/stack.md
     condition: when checking quick-xml, EXIF crate, or FFprobe dependency details
-last_updated: 2026-07-22
+last_updated: 2026-07-30
 ---
 
 # Change Live Photo / Motion Photo Features
@@ -73,11 +73,12 @@ The `afiles` table (schema v6) has three columns: `content_id` (UUID, `motion:<o
 - `AFile::get_file_info` uses `build_base_query()` which populates `file_path` via folder+name join — do not construct paths manually in commands.
 - The `file_path` field on `AFile` is output-only (populated by `from_row`, set to `None` in `AFile::new`).
 - File-name stem pairing uses `Path::file_stem()` which strips only the last extension; `IMG_1234.tar.gz` would stem to `IMG_1234.tar`, but media files rarely have double extensions.
-- Motion Photo extracts go to `app_cache_dir()/motion_cache/` with source-keyed names (`picaipic_motion_{fnv(path)}_{size}_{mtime}_{offset}_{length}.mp4`). Cache hits skip re-read; writes use `*.tmp` then rename. Soft cap 2GB → prune to ~1.4GB (oldest first). Startup purges legacy OS-temp `picaipic_motion_*.mp4`. `clear_video_cache` also clears `motion_cache`.
+- Motion Photo extracts go to `app_cache_dir()/motion_cache/` with source-keyed names (`picaipic_motion_{fnv(path)}_{size}_{mtime}_{offset}_{length}.mp4`). Cache hits require the expected length plus an ISO-BMFF `ftyp` header and refresh mtime. Writes use UUID `*.tmp` files then rename, accepting a valid concurrent winner. Soft cap 2GB → prune to ~1.4GB (oldest first), but protect entries used in the last 15 minutes and remove abandoned `.tmp` after one hour. Startup performs the legacy OS-temp purge once via `.legacy-temp-purge-v1`. `clear_video_cache` also clears `motion_cache`.
 - Always parse `motion:<offset>:<length>` via `t_xmp::parse_motion_content_id` — do not reimplement in `t_cmds` / `t_live_photo`.
 - MediaViewer must use optional chaining on `props.file` in toolbar class and Live Photo playback; long-press timers can fire after the file is cleared.
 - The long-press overlay sits at `z-60` — higher than the Image component but below the toolbar; verify it doesn't block toolbar interactions.
 - `scrape_ascii_from_tag` reads from the 128KB file header pre-read buffer, which may not contain ContentIdentifier for all files (especially HEIC where metadata is deeper). The kamadak-exif `get_field` path should be the primary reader.
+- XMP commonly arrives minified onto one line and numeric fields may be elements or attributes. Parse values with `quick-xml` local names; do not take the first `>`/`<` pair from a line or use substring tag matching.
 
 ## Verify
 
@@ -92,6 +93,7 @@ The `afiles` table (schema v6) has three columns: `content_id` (UUID, `motion:<o
 - [ ] Thumbnail shows LIVE badge; FileInfo shows "Live Photo" / "Motion Photo" label.
 - [ ] Export still/video/pair (and conversion modes if used) does not modify library originals.
 - [ ] Existing non-Live-Photo files scan/preview normally (no regression).
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml t_xmp::tests -- --nocapture` passes cache validation/concurrency/cleanup coverage.
 
 ## Debug
 

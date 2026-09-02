@@ -144,16 +144,17 @@ const minimizeWindow = () => {
   appWindow.minimize();
 };
 
-const toggleMaximizeWindow = () => {
-  appWindow.isMaximized().then((maximized) => {
-    if (maximized) {
-      applyMaximizedState(false);
-      appWindow.unmaximize();
+const toggleMaximizeWindow = async () => {
+  try {
+    if (await appWindow.isMaximized()) {
+      await appWindow.unmaximize();
     } else {
-      applyMaximizedState(true);
-      appWindow.maximize();
+      await appWindow.maximize();
     }
-  });
+    await refreshMaximized();
+  } catch (e) {
+    console.warn('TitleBar toggle maximize failed', e);
+  }
 };
 
 const closeWindow = () => {

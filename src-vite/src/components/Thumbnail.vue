@@ -190,7 +190,6 @@
 import { computed, nextTick, ref, watch, toRef, onBeforeUnmount, type CSSProperties, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
-import { usePluginStore } from '@/stores/pluginStore';
 import { config } from '@/common/config';
 import { isMac, shortenFilename, formatFileSize, formatDimensionText, formatDuration, formatTimestamp, formatCaptureSettings, formatCaptureSettingValue, formatCameraInfo, getAssetSrc, getThumbUrl, getFileExtension } from '@/common/utils';
 import ContextMenu from '@/components/ContextMenu.vue';
@@ -222,6 +221,10 @@ const props = defineProps({
   selectMode: {
     type: Boolean,
     default: false,
+  },
+  pluginMenuItems: {
+    type: Array,
+    default: () => [],
   },
 });
 
@@ -463,15 +466,12 @@ const imgStyle = computed((): CSSProperties => {
 });
 
 const uiStore = useUIStore();
-const pluginStore = usePluginStore();
 const isContentActive = computed(() =>
   uiStore.activePane === 'content' && uiStore.inputStack.length === 0
 );
 const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
-const pluginContextMenuItems = computed(() =>
-  pluginStore.getMenuItems('image.selection.single', 'image.contextMenu')
-);
+const pluginContextMenuItems = toRef(props, 'pluginMenuItems');
 
 const menuItems = useFileMenuItems(
   toRef(props, 'file'),

@@ -1,5 +1,14 @@
 # Cyberpunk Idle Glitch Implementation Plan
 
+> **Status update (2026-07-30): Completed.** The shipped implementation also
+> includes changes beyond the original checklist: Home-owned native maximize
+> synchronization, legacy intensity migration, GPU texture/viewport clamping,
+> WebGL upload/context failure detection, and a CSS live-card glitch fallback.
+> Current behavior is documented in
+> `docs/guide/fx-theme-runtime-compatibility.md` and
+> `.mex/patterns/change-cyberpunk-theme.md`. The unchecked boxes below are the
+> historical execution plan, not remaining work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add theme **Cyberpunk** (`THEME_ID=4`): dark + neon chrome daily; maximize + 6s idle freezes the photo grid into a continuous WebGL1 glitch layer until activity.

@@ -8,7 +8,7 @@
     @keydown="handleLocalTreeKeyDown"
     @mousedown.capture="focusTreeRoot"
   >
-    <li v-for="child in (children as Folder[])"
+    <li v-for="child in visibleChildren"
       :key="child.id" 
       :id="'folder-' + child.id" 
       :class="{ 'pl-4': child.path !== rootPath }"
@@ -19,6 +19,7 @@
         :class="[
           'p-1 h-8 flex items-center rounded-box whitespace-nowrap cursor-pointer group border-2',
           !selection.selected.value && selection.folderPath.value === child.path && !isRenamingFolder ? 'text-primary bg-base-100 hover:bg-base-100 border-transparent' : 'hover:text-base-content hover:bg-base-100/30 border-transparent',
+          isFolderMatched(child) ? 'text-primary/70!' : isFolderFiltering ? 'text-base-content/60' : '',
         ]"
         @click="clickFolder(albumId, child)"
         @dblclick="expandFolder(child)"
@@ -35,7 +36,19 @@
         <IconFolder class="p-1 w-6 h-6 shrink-0"/>
 
         <!-- name -->
-        <input v-if="isRenamingFolder && selection.folderPath.value === child.path"
+        <input v-if="isCreatingFolder && creatingFolderPath === child.path"
+          :data-new-folder-path="child.path"
+          type="text"
+          maxlength="255"
+          class="input px-1 w-full text-base"
+          v-model="newFolderName"
+          @click.stop
+          @mousedown.stop
+          @keydown.enter.prevent="confirmNewFolder"
+          @keydown.esc.stop.prevent="cancelNewFolder"
+          @blur="confirmNewFolder"
+        >
+        <input v-else-if="isRenamingFolder && selection.folderPath.value === child.path"
           ref="folderInputRef"
           type="text"
           maxlength="255"
@@ -74,13 +87,15 @@
           </div>
         </template>
       </div>
-      <AlbumFolder v-if="child.is_expanded && child.id != 0 && !child.is_excluded_from_search"
+      <AlbumFolder v-if="shouldRenderChildren(child)"
         :key="child.id"
         :children="child.children" 
         :albumId="albumId"
         :rootPath="rootPath"
         :allowContextMenu="allowContextMenu"
         :treeRoot="false"
+        :filterVisiblePaths="filterVisiblePaths"
+        :filterMatchedPaths="filterMatchedPaths"
       />
     </li>
   </ul>
@@ -136,7 +151,7 @@
 
 <script setup lang="ts">
 
-import { ref, nextTick, computed } from 'vue';
+import { ref, nextTick, computed, inject, provide } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
@@ -184,6 +199,8 @@ const props = withDefaults(defineProps<{
   rootPath: string;         // root folder path (album path)
   allowContextMenu?: boolean; // whether to show context menu
   treeRoot?: boolean;       // only root tree listens to keyboard
+  filterVisiblePaths?: string[]; // folder search: paths to keep visible (matches + ancestors)
+  filterMatchedPaths?: string[]; // folder search: paths that matched the query
 }>(), {
   treeRoot: true,
 });
@@ -236,6 +253,26 @@ const isRenamingFolder = ref(false);
 const folderInputRef = ref<HTMLInputElement[]>([]);     // input text box ref
 const originalFolderName = ref(''); // restore original folder name when cancel renaming(press ESC)
 
+// Shared across every level of the recursive tree so only one inline "new folder"
+// input can ever be open, and the row that owns it can be found by path.
+const NEW_FOLDER_CONTEXT = 'album-folder-new-folder-context';
+const inheritedNewFolderContext = inject<any>(NEW_FOLDER_CONTEXT, null);
+const newFolderContext = inheritedNewFolderContext || {
+  isCreatingFolder: ref(false),
+  isCreatingFolderRequest: ref(false),
+  creatingFolderParent: ref<Folder | null>(null),
+  creatingFolderPath: ref(''),
+  newFolderName: ref(''),
+};
+if (!inheritedNewFolderContext) provide(NEW_FOLDER_CONTEXT, newFolderContext);
+const {
+  isCreatingFolder,
+  isCreatingFolderRequest,
+  creatingFolderParent,
+  creatingFolderPath,
+  newFolderName,
+} = newFolderContext;
+
 // message boxes
 const showNewFolderMsgbox = ref(false);
 const showTrashFolderMsgbox = ref(false);
@@ -269,7 +306,7 @@ const getMenuItemsForFolder = async (folder: any) => {
       label: localeMsg.value.menu.file.new_folder,
       icon: IconNewFolder,
       action: () => {
-        showNewFolderMsgbox.value = true;
+        void startNewFolder(folder);
       }
     },
     {
@@ -380,6 +417,32 @@ const getMenuItemsForFolder = async (folder: any) => {
 };
 
 /// click folder to select
+// --- Sidebar folder filtering ----------------------------------------------
+// `AlbumList` owns the folder search and passes down two path sets: every path that
+// must stay visible (matches plus their ancestors) and the paths that matched. The
+// tree cannot be filtered from `children` alone, because it only holds the folders
+// the user already expanded.
+const isFolderFiltering = computed(() => Array.isArray(props.filterVisiblePaths));
+const visibleFolderPaths = computed(() => new Set(props.filterVisiblePaths || []));
+const matchedFolderPaths = computed(() => new Set(props.filterMatchedPaths || []));
+
+const visibleChildren = computed(() => (props.children || []).filter((folder: Folder) =>
+  !isFolderFiltering.value || visibleFolderPaths.value.has(folder.path)
+) as Folder[]);
+
+const isFolderMatched = (folder: Folder) =>
+  isFolderFiltering.value && matchedFolderPaths.value.has(folder.path);
+
+const shouldShowFilteredChildren = (folder: Folder) =>
+  Boolean(folder.children?.some((child: Folder) => visibleFolderPaths.value.has(child.path)));
+
+const shouldRenderChildren = (folder: Folder) => {
+  if (folder.id === 0 || folder.is_excluded_from_search) return false;
+  // Ignore `is_expanded` while filtering: the filtered tree is built from the full
+  // folder list, so a collapsed ancestor must still reveal its matched branch.
+  return isFolderFiltering.value ? shouldShowFilteredChildren(folder) : Boolean(folder.is_expanded);
+};
+
 const clickFolder = async (albumIdVal: number, folder: Folder) => {
   if (props.allowContextMenu) {
     uiStore.setActivePane('left-sidebar');
@@ -523,6 +586,86 @@ const handleLocalTreeKeyDown = (event: KeyboardEvent) => {
 };
 
 /// Create new folder
+const focusNewFolderInput = async (select = false) => {
+  await nextTick();
+  const input = Array.from(document.querySelectorAll<HTMLInputElement>('input[data-new-folder-path]'))
+    .find(element => element.dataset.newFolderPath === creatingFolderPath.value);
+  input?.focus();
+  if (select) input?.select();
+};
+
+/// Inline subfolder creation: insert a placeholder row under `folder` and let the
+/// user type its name in place instead of going through a modal dialog.
+const startNewFolder = async (folder: Folder) => {
+  if (isCreatingFolder.value) return;
+  const refreshed = await fetchFolder(folder.path, false, config.settings.folderSort);
+  if (refreshed) {
+    folder.children = refreshed.children || [];
+  }
+
+  // Pick a name that does not collide with an existing child.
+  const existingNames = new Set((folder.children || []).map(child => child.name.toLowerCase()));
+  const baseName = t('msgbox.new_folder.title');
+  let index = 0;
+  let name = baseName;
+  while (existingNames.has(name.toLowerCase())) name = `${baseName} ${++index}`;
+
+  const path = getFullPath(folder.path, name);
+  folder.children = [...(folder.children || []), { id: -1, name, path }];
+  folder.is_expanded = true;
+  creatingFolderParent.value = folder;
+  creatingFolderPath.value = path;
+  newFolderName.value = name;
+  isCreatingFolder.value = true;
+  uiStore.pushInputHandler('AlbumFolder-new');
+  await focusNewFolderInput(true);
+};
+
+const cancelNewFolder = () => {
+  const parent = creatingFolderParent.value;
+  if (parent?.children) {
+    parent.children = parent.children.filter(child => child.path !== creatingFolderPath.value);
+  }
+  isCreatingFolder.value = false;
+  isCreatingFolderRequest.value = false;
+  creatingFolderParent.value = null;
+  creatingFolderPath.value = '';
+  newFolderName.value = '';
+  uiStore.removeInputHandler('AlbumFolder-new');
+};
+
+const confirmNewFolder = async () => {
+  if (!isCreatingFolder.value || isCreatingFolderRequest.value) return;
+  const parent = creatingFolderParent.value;
+  const name = newFolderName.value.trim();
+  if (!parent || !name || !isValidFileName(name)) return;
+
+  isCreatingFolderRequest.value = true;
+  const newFolderPath = await createFolder(parent.path, name);
+  if (!newFolderPath) {
+    isCreatingFolderRequest.value = false;
+    toast.error(localeMsg.value.msgbox.new_folder.error);
+    await focusNewFolderInput();
+    return;
+  }
+
+  // Re-read the real children so the placeholder row (id -1) is replaced by the row
+  // the backend actually created.
+  const refreshed = await fetchFolder(parent.path, false, config.settings.folderSort);
+  if (refreshed) {
+    parent.children = refreshed.children || [];
+  }
+  parent.is_expanded = true;
+  isCreatingFolder.value = false;
+  isCreatingFolderRequest.value = false;
+  creatingFolderParent.value = null;
+  creatingFolderPath.value = '';
+  newFolderName.value = '';
+  uiStore.removeInputHandler('AlbumFolder-new');
+  const newFolder = parent.children?.find(child => child.path === newFolderPath);
+  if (newFolder) await clickFolder(props.albumId, newFolder);
+};
+
 const clickNewFolder = async (newFolderName: string) => {
   const newFolderPath = await createFolder(selection.folderPath.value, newFolderName);
   
@@ -790,8 +933,11 @@ const clickTrashFolder = async () => {
   const folderName = selectedFolder.value?.name || '';
   permanentDeleteChecked.value = deletePermanently.value;
   const deleteFn = deletePermanently.value ? deleteFolderPermanently : deleteFolder;
-  const isDeleted = await deleteFn(selection.folderPath.value);
-  if (isDeleted) {
+  try {
+    const isDeleted = await deleteFn(selection.folderPath.value);
+    if (!isDeleted) {
+      throw new Error(`No folder record was deleted for ${selection.folderPath.value}`);
+    }
     const deletedFolderPath = selection.folderPath.value;
 
     // The deleted folder is a direct child of props.children in this component's context
@@ -821,7 +967,8 @@ const clickTrashFolder = async () => {
         ? t('msgbox.permanent_delete.folder_success', { folder: folderName })
         : t('msgbox.move_to_trash.folder_success', { folder: folderName })
     );
-  } else {
+  } catch (error) {
+    console.error('Failed to delete folder:', error);
     toast.error(
       deletePermanently.value
         ? t('msgbox.permanent_delete.folder_error')

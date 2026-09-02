@@ -76,7 +76,15 @@ function Test-JsonFile {
     param([string]$Path)
 
     $fullPath = (Resolve-Path $Path).Path
-    $null = Get-Content -Raw -LiteralPath $fullPath | ConvertFrom-Json
+    # Windows PowerShell 5.1's ConvertFrom-Json throws ArgumentException
+    # ("Invalid object passed in, ':' or '}' expected") on these manifests even
+    # though they are valid JSON, which aborted the whole check on Windows.
+    # Node is already required above, so validate with it instead.
+    $global:LASTEXITCODE = 0
+    & node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" $fullPath | Out-Null
+    if ($global:LASTEXITCODE -ne 0) {
+        throw "Invalid JSON: $fullPath"
+    }
     Write-Ok "JSON valid: $fullPath"
 }
 

@@ -20,7 +20,7 @@ edges:
     condition: when working on Live Photo / Motion Photo features
   - target: patterns/change-photo-frame.md
     condition: when changing EXIF photo frame / 相框
-last_updated: 2026-07-22
+last_updated: 2026-07-30
 ---
 
 
@@ -67,6 +67,16 @@ The Rust command must be registered in `main.rs`; event listeners must return/cl
 
 **Disk/DB rename consistency:** for rename/move of user media, if the filesystem succeeds and the DB update fails, rollback the disk change (same pattern as `move_file` / `rename_file` / `rename_folder`) so the frontend failure path does not leave paths desynchronized.
 
+**Outside-library move recovery:** persist and sync an app-data journal before moving bytes. The journal must name the original library and deterministic destination-side staging/backup paths. Normal completion removes it last; startup reconciliation uses the original library connection, rolls back provably unchanged disk states, completes provable moves, and retains ambiguity.
+
+**Destructive operation consistency:** trash and permanent deletion must validate the current-library file ID/path or folder record before staging the path with a same-directory rename. Restore the path on DB failure or zero-row deletion. Permanent deletion removes the staged path after commit; trash restores the original name before calling the system trash API. Batch deletion rejects duplicate targets, verifies the DB deleted-row count, and lists only paths whose final cleanup completed. Dedup trash additionally revalidates keep/selection eligibility in the same immediate transaction as DB deletion. Keep mutating delete IPC errors observable in the frontend; see `patterns/change-destructive-file-ops.md`.
+
+**In-place image edit consistency:** encode pixels and preserved metadata into a same-directory temp before touching the destination. Stage an existing destination so finalize/DB-refresh failure can restore it. Pass and validate the current-library `fileId` for overwrite saves, then transactionally refresh metadata and invalidate thumbnail, embedding, exact-hash, and perceptual-hash state. See `patterns/audit-image-edit-save.md`.
+
+**Arbitrary-root output temp recovery:** batch, collage, photo-frame, and future user-selected exports must register and sync their exact UUID-namespaced temp path in app data before writing it. Own the temp with an RAII guard for success/error/cancel/task-abort cleanup, and recover only strictly validated journal entries at startup. Never enumerate arbitrary user export roots or delete by a broad `*.picaipic-*.tmp` pattern. See `t_output_temp.rs` and `patterns/audit-image-edit-save.md`.
+
+**Long media work and SQLite:** never hold a write transaction while reading media, decoding images, hashing, running O(n²) comparisons, or sorting large result sets. Compute outside the transaction, flush bounded prepared-statement batches, and keep visible group replacement atomic. Dedup and full album indexing use the shared `ActiveMediaScans` RAII gate; see `patterns/change-dedup-scan.md`.
+
 **Database migration pattern:** inspect `PRAGMA user_version`, apply idempotent/table-column-aware migration logic, then advance the version only after successful changes. Never edit an existing migration to redefine databases already in the field.
 
 **Plugin safety pattern:** validate normalized paths remain inside the intended store/task/output root before deletion or adoption. Preserve signature verification, trust prompts, permission gates, runtime probes/conflict checks, loopback binding, auth token, and input staging.
@@ -78,6 +88,8 @@ The Rust command must be registered in `main.rs`; event listeners must return/cl
 **Search file-type mask pattern:** Library, filename, and AI/similar search share the same bitmask (0 all, 1 image, 2 video, 4 raw). Pass as `searchFileType` / `search_file_type`; apply in SQL (`build_file_type_condition`) before ranking when possible. See `patterns/change-ai-search-filters.md`.
 
 **Viewer presentation pattern:** Thumbnail media badges and viewer canvas background are Pinia presentation flags only—no schema. Prefer helpers in `utils.ts` and existing settings event sync across main/settings windows. See `patterns/change-media-badges.md` and `patterns/change-viewer-background.md`.
+
+**Cyberpunk scope pattern:** `setTheme` owns the global `html.is-cyberpunk` class and `app.css` owns route-wide neon daisyUI variables. Keep the city canvas and idle WebGL photo glitch scoped to Home/GridView; ImageViewer, ImageEditor, Settings, and auxiliary routes inherit chrome only. Animation callbacks must check active/render prerequisites before scheduling their next frame. See `patterns/change-cyberpunk-theme.md`.
 
 **Photo frame / 相框 pattern:** Multi-select creative dialog (not ImageEditor tab). Host reads EXIF/LibRaw, composites classic bar or float/sink blur+shadow, optional local logo. IPC camelCase options via `photoFramePreview` / `exportPhotoFrame`; progress event `photo-frame-progress`. Save-as only; optional import copies outputs into the open album. See `patterns/change-photo-frame.md` and roadmap Phase G.
 

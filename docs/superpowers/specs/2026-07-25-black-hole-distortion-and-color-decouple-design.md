@@ -1,10 +1,10 @@
 # 黑洞主题扭曲增强 + 配色解耦 设计稿
 
-> 状态：设计稿 v1（CSS 多层 warp + 强度/配色）；**2026-07-26 产品引力主路径 = PhotoVortex WebGL**，本稿 CSS 层作算法/强度参考与可选回退
+> 状态：设计稿 v1（CSS 多层 warp + 强度/配色）；**2026-07-30 产品引力主路径 = PhotoVortex WebGL，CSS 层 = 自动失败回退**
 > 范围：纯前端（`src-vite`）；扫描/RAW 见 `docs/guide/目前的开发情况.md`
 > 分支：`feat/black-hole-idle-theme`
 > 目标：①（历史）CSS 多层扭曲；②黑洞不受配色模式影响；③动态主题强度
-> **现状：** 空闲 **6s**；照片区 **`PhotoVortexLayer`**；GridView **不驱动** `useGravityWarp`
+> **现状：** 空闲 **6s**；照片区首选 **`PhotoVortexLayer`**；GridView 在 WebGL 初始化、缩略图捕获、纹理上传或上下文失败时驱动 `useGravityWarp`
 
 ---
 
@@ -457,7 +457,7 @@ settings.general.intensity_options
 | 1 | 主题=默认/复古/CMYK | 无宇宙层、无扭曲、appearance 正常切换 chrome |
 | 2 | 选黑洞 | appearance select 置灰 + hint；data-theme=dark；宇宙+黑洞 |
 | 3 | 黑洞下切 appearance（若强制启用） | UI chrome 不变、宇宙调色不变、特效不消失 _(替代 v1.4 §11 case 3b：v1.4 允许黑洞下切换 appearance，v1.5 已把 appearance select 在黑洞下 `disabled`，不再允许切换——属有意行为变更)_ |
-| 4 | 黑洞+最大化静止 ≥6s, I=1 | **产品：** PhotoVortex；**若重开 CSS warp：** 拉伸+色散+撕裂+透镜环 |
+| 4 | 黑洞+最大化静止 ≥6s, I=1 | **产品：** PhotoVortex；WebGL/capture 失败时自动使用 CSS 拉伸+色散+撕裂+透镜环 |
 | 5 | 同上, I=0 | 卡片不动（含不旋转、不位移、不拉伸）；宇宙背景在 |
 | 6 | 同上, I=1.5 | 撕裂/色散明显更强 |
 | 7 | 同上, I=0.5 | 温和扭曲（拉伸>1 非<1，确认无「压缩」回归） |
@@ -468,7 +468,7 @@ settings.general.intensity_options
 | 10c | 选黑洞→切默认→翻 appearance 到 dark | isBlackHole 仍 false、宇宙不重载、特效不复活（验证残留槽已清，复活路径堵死） |
 | 11 | 卡片可见数 >80（异常） | L4/L5 跳过，只 L1+L2，不卡顿 |
 | 12 | reduced-motion | BlackHoleBackground 不挂载（零开销），无宇宙层、无扭曲（与 I 取值无关；区别于 case 5/6「I=0 但组件仍挂载、宇宙背景在」） |
-| 13 | 旧配置无 dynamicThemeIntensity | hydrate 填 1，不报错 |
+| 13 | 旧配置无/非法 dynamicThemeIntensity | 启动 migration 填 1；显式 0 保持关闭 |
 | 14 | 切换主题后 appearance 值 | 仍保留原值（黑洞期间冻结不丢失） |
 
 ---
@@ -478,7 +478,7 @@ settings.general.intensity_options
 - 卡片级 WebGL 真透镜扭曲（逐像素位移）
 - SVG `feDisplacementMap` 真透镜
 - 强度影响黑洞本体半径增长
-- 新增除黑洞外的其他动态主题（仅预留 `dynamicThemeIntensity` 字段与 `isDynamicTheme` 派生点）
+- 新增除黑洞外的其他动态主题（赛博朋克已落地并复用 `dynamicThemeIntensity`）
 - 改 Rust / IPC / DB / AI / 包体模型
 - range 滑块（用 select 四档）
 

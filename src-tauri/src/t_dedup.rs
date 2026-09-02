@@ -1,5 +1,5 @@
 use crate::t_common;
-use crate::t_sqlite::{AFile, AThumb, QueryParams};
+use crate::t_sqlite::{AFile, AThumb, PooledConn, QueryParams};
 use crate::t_utils;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 /// Max Hamming distance for dHash pairs to share a similar-duplicate group.
+///
+/// This groups the "Related Photos" panel by perceptual hash, which is a completely
+/// different measure from the AI-search cosine threshold behind "Find Similar
+/// Photos". Keeping it configurable means tightening related-photo groups no longer
+/// changes how the similarity search ranks results.
 const DHASH_HAMMING_THRESHOLD: u32 = 8;
+const DEDUP_WRITE_BATCH_SIZE: usize = 256;
+
+/// Distances behind the Related Photos grouping strictness: strict / normal / loose.
+pub const SIMILAR_GROUPING_DISTANCES: [u32; 3] = [6, 8, 12];
+
+/// Map a user-facing strictness index onto a concrete Hamming distance, falling
+/// back to the default for anything out of range.
+pub fn resolve_similar_grouping_distance(strictness: Option<u32>) -> u32 {
+    SIMILAR_GROUPING_DISTANCES
+        .get(strictness.unwrap_or(1) as usize)
+        .copied()
+        .unwrap_or(DHASH_HAMMING_THRESHOLD)
+}
 
 // ----------------------------------------------------------------------------
 // Types and Structs
@@ -62,6 +80,29 @@ struct KeepCandidate {
     created_at: i64,
 }
 
+struct SimilarGroupPlan {
+    hash: String,
+    file_size: i64,
+    file_count: i64,
+    total_size: i64,
+    candidates: Vec<i64>,
+}
+
+struct ExactHashWrite {
+    file_id: i64,
+    hash: String,
+    file_size: i64,
+    mtime: i64,
+    computed_at: i64,
+}
+
+struct PerceptualHashWrite {
+    file_id: i64,
+    hash: u64,
+    mtime: i64,
+    computed_at: i64,
+}
+
 // ----------------------------------------------------------------------------
 // Core Logic
 // ----------------------------------------------------------------------------
@@ -71,7 +112,10 @@ pub fn start_scan(
     dedup_state: tauri::State<'_, DedupState>,
     query_params: Option<QueryParams>,
     mode: Option<String>,
+    similar_grouping: Option<u32>,
 ) -> Result<(), String> {
+    let similar_max_distance = resolve_similar_grouping_distance(similar_grouping);
+    let scan_guard = t_utils::DedupScanGuard::acquire()?;
     if dedup_state
         .is_scanning
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -102,8 +146,15 @@ pub fn start_scan(
     }
 
     std::thread::spawn(move || {
+        let _scan_guard = scan_guard;
         let result = if similar {
-            scan_and_phash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params)
+            scan_and_phash_files(
+                &app_handle,
+                &status_clone,
+                &cancel_flag_clone,
+                query_params,
+                similar_max_distance,
+            )
         } else {
             scan_and_hash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params)
         };
@@ -180,11 +231,10 @@ fn scan_and_hash_files(
         t_common::lock_mutex(&status_mutex).clone(),
     );
 
-    // Step 3: Hash them
+    // Step 3: Hash them. Expensive file I/O stays outside write transactions;
+    // only ready rows are flushed in short batches.
     let mut processed = 0;
-
-    // We do batch inserts to speed up DB operations
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut pending_writes = Vec::with_capacity(DEDUP_WRITE_BATCH_SIZE);
 
     for file in files_to_check {
         if cancel_flag.load(Ordering::SeqCst) {
@@ -192,7 +242,7 @@ fn scan_and_hash_files(
         }
 
         // Only hash if mtime changed or hash is missing
-        let needs_hash = check_if_needs_hash(&tx, &file)?;
+        let needs_hash = check_if_needs_hash(&conn, &file)?;
 
         if needs_hash {
             let Some(file_id) = file.id else {
@@ -207,11 +257,16 @@ fn scan_and_hash_files(
                             .as_secs() as i64;
                         let mtime = file.modified_at.unwrap_or(0);
 
-                        tx.execute(
-                            "INSERT OR REPLACE INTO file_hashes (file_id, hash, file_size, mtime, computed_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5)",
-                            params![file_id, hash, file.size, mtime, now],
-                        ).map_err(|e| e.to_string())?;
+                        pending_writes.push(ExactHashWrite {
+                            file_id,
+                            hash,
+                            file_size: file.size,
+                            mtime,
+                            computed_at: now,
+                        });
+                        if pending_writes.len() >= DEDUP_WRITE_BATCH_SIZE {
+                            flush_exact_hash_writes(&mut conn, &mut pending_writes)?;
+                        }
                     }
                     Err(e) => eprintln!("Failed to hash file {}: {}", path, e),
                 }
@@ -231,7 +286,7 @@ fn scan_and_hash_files(
         }
     }
 
-    tx.commit().map_err(|e| e.to_string())?;
+    flush_exact_hash_writes(&mut conn, &mut pending_writes)?;
 
     // Step 4: Rebuild duplicate groups
     if !cancel_flag.load(Ordering::SeqCst) {
@@ -258,13 +313,8 @@ fn scan_and_hash_files(
     Ok(())
 }
 
-fn get_db_conn() -> Result<Connection, String> {
-    let path = crate::t_storage::get_current_db_path()
-        .map_err(|e| format!("Failed to get db path: {}", e))?;
-    let conn = Connection::open(&path).map_err(|e| format!("Failed to open db: {}", e))?;
-    conn.execute("PRAGMA foreign_keys = ON", [])
-        .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
-    Ok(conn)
+fn get_db_conn() -> Result<PooledConn, String> {
+    crate::t_sqlite::open_conn().map_err(|e| format!("Failed to open dedup database: {}", e))
 }
 
 fn get_suspicious_file_sizes(conn: &Connection) -> Result<Vec<i64>, String> {
@@ -440,6 +490,38 @@ fn check_if_needs_hash(conn: &Connection, file: &AFile) -> Result<bool, String> 
     }
 }
 
+fn flush_exact_hash_writes(
+    conn: &mut Connection,
+    writes: &mut Vec<ExactHashWrite>,
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO file_hashes
+                 (file_id, hash, file_size, mtime, computed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(|e| e.to_string())?;
+        for write in writes.iter() {
+            stmt.execute(params![
+                write.file_id,
+                write.hash,
+                write.file_size,
+                write.mtime,
+                write.computed_at,
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    writes.clear();
+    Ok(())
+}
+
 /// Difference hash (dHash) 64-bit from grayscale 9x8 → horizontal gradients.
 fn compute_dhash_u64_from_gray(gray: &image::GrayImage) -> u64 {
     // Expect at least 9x8; resize caller guarantees.
@@ -507,11 +589,43 @@ fn check_if_needs_phash(conn: &Connection, file: &AFile) -> Result<bool, String>
     }
 }
 
+fn flush_perceptual_hash_writes(
+    conn: &mut Connection,
+    writes: &mut Vec<PerceptualHashWrite>,
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO file_phashes
+                 (file_id, hash, mtime, computed_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|e| e.to_string())?;
+        for write in writes.iter() {
+            stmt.execute(params![
+                write.file_id,
+                write.hash as i64,
+                write.mtime,
+                write.computed_at,
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    writes.clear();
+    Ok(())
+}
+
 fn scan_and_phash_files(
     app_handle: &tauri::AppHandle,
     status_mutex: &Arc<Mutex<DedupScanStatus>>,
     cancel_flag: &Arc<AtomicBool>,
     query_params: Option<QueryParams>,
+    max_distance: u32,
 ) -> Result<(), String> {
     let mut conn = get_db_conn()?;
     let _ = crate::t_migration::ensure_similar_dedup_tables(&conn);
@@ -530,7 +644,7 @@ fn scan_and_phash_files(
             .collect();
         drop(stmt);
         if ids.is_empty() {
-            rebuild_similar_groups(&mut conn, None)?;
+            rebuild_similar_groups(&mut conn, None, cancel_flag, max_distance)?;
             return Ok(());
         }
         let mut out = Vec::new();
@@ -565,7 +679,12 @@ fn scan_and_phash_files(
     };
 
     if files_to_check.is_empty() {
-        rebuild_similar_groups(&mut conn, scoped_file_ids.as_deref())?;
+        rebuild_similar_groups(
+            &mut conn,
+            scoped_file_ids.as_deref(),
+            cancel_flag,
+            max_distance,
+        )?;
         return Ok(());
     }
 
@@ -581,13 +700,13 @@ fn scan_and_phash_files(
     );
 
     let mut processed = 0u64;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut pending_writes = Vec::with_capacity(DEDUP_WRITE_BATCH_SIZE);
 
     for file in &files_to_check {
         if cancel_flag.load(Ordering::SeqCst) {
             break;
         }
-        let needs = check_if_needs_phash(&tx, file)?;
+        let needs = check_if_needs_phash(&conn, file)?;
         if needs {
             if let (Some(file_id), Some(hash)) = (file.id, compute_dhash_for_file(file)) {
                 let now = SystemTime::now()
@@ -595,12 +714,15 @@ fn scan_and_phash_files(
                     .unwrap_or_default()
                     .as_secs() as i64;
                 let mtime = file.modified_at.unwrap_or(0);
-                tx.execute(
-                    "INSERT OR REPLACE INTO file_phashes (file_id, hash, mtime, computed_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![file_id, hash as i64, mtime, now],
-                )
-                .map_err(|e| e.to_string())?;
+                pending_writes.push(PerceptualHashWrite {
+                    file_id,
+                    hash,
+                    mtime,
+                    computed_at: now,
+                });
+                if pending_writes.len() >= DEDUP_WRITE_BATCH_SIZE {
+                    flush_perceptual_hash_writes(&mut conn, &mut pending_writes)?;
+                }
             }
         }
         processed += 1;
@@ -615,10 +737,15 @@ fn scan_and_phash_files(
             );
         }
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    flush_perceptual_hash_writes(&mut conn, &mut pending_writes)?;
 
     if !cancel_flag.load(Ordering::SeqCst) {
-        rebuild_similar_groups(&mut conn, scoped_file_ids.as_deref())?;
+        rebuild_similar_groups(
+            &mut conn,
+            scoped_file_ids.as_deref(),
+            cancel_flag,
+            max_distance,
+        )?;
         let groups_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM similar_duplicate_groups", [], |row| {
                 row.get(0)
@@ -641,12 +768,14 @@ fn scan_and_phash_files(
 fn rebuild_similar_groups(
     conn: &mut Connection,
     scope_file_ids: Option<&[i64]>,
+    cancel_flag: &AtomicBool,
+    max_distance: u32,
 ) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-    // Scoped rebuild: only remove groups that touch the scope (keep global results outside).
-    // Full rebuild: clear all similar groups.
     if let Some(scope_ids) = scope_file_ids {
+        if scope_ids.is_empty() {
+            return Ok(());
+        }
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute("DROP TABLE IF EXISTS temp_scope_ids", [])
             .map_err(|e| e.to_string())?;
         tx.execute(
@@ -654,10 +783,6 @@ fn rebuild_similar_groups(
             [],
         )
         .map_err(|e| e.to_string())?;
-        if scope_ids.is_empty() {
-            tx.commit().map_err(|e| e.to_string())?;
-            return Ok(());
-        }
         {
             let mut ins = tx
                 .prepare("INSERT OR IGNORE INTO temp_scope_ids (file_id) VALUES (?1)")
@@ -666,6 +791,54 @@ fn rebuild_similar_groups(
                 ins.execute(params![id]).map_err(|e| e.to_string())?;
             }
         }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+
+    let rows: Vec<(i64, u64, i64, i64, i64)> = {
+        // Byte-identical files already appear in the Duplicates panel; listing them
+        // again as "related" would double-report every exact pair.
+        let sql = if scope_file_ids.is_some() {
+            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
+             FROM file_phashes fp
+             JOIN afiles a ON a.id = fp.file_id
+             JOIN temp_scope_ids ts ON ts.file_id = fp.file_id
+             WHERE fp.file_id NOT IN (SELECT file_id FROM duplicate_group_items)"
+        } else {
+            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
+             FROM file_phashes fp
+             JOIN afiles a ON a.id = fp.file_id
+             WHERE fp.file_id NOT IN (SELECT file_id FROM duplicate_group_items)"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2).unwrap_or(0),
+                    row.get::<_, i64>(3).unwrap_or(0),
+                    row.get::<_, i64>(4).unwrap_or(0),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        iter.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+
+    let plans = build_similar_group_plans(&rows, cancel_flag, max_distance);
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Keep the visible group replacement atomic, but do all expensive
+    // clustering and sorting before acquiring the main database writer lock.
+    if scope_file_ids.is_some() {
         tx.execute(
             "DELETE FROM similar_duplicate_group_items
              WHERE group_id IN (
@@ -688,41 +861,45 @@ fn rebuild_similar_groups(
             .map_err(|e| e.to_string())?;
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    let rows: Vec<(i64, u64, i64, i64, i64)> = {
-        let sql = if scope_file_ids.is_some() {
-            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
-             FROM file_phashes fp
-             JOIN afiles a ON a.id = fp.file_id
-             JOIN temp_scope_ids ts ON ts.file_id = fp.file_id"
-        } else {
-            "SELECT fp.file_id, fp.hash, a.size, a.taken_date, a.created_at
-             FROM file_phashes fp
-             JOIN afiles a ON a.id = fp.file_id"
-        };
-        let mut stmt = tx.prepare(sql).map_err(|e| e.to_string())?;
-        let iter = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, i64>(2).unwrap_or(0),
-                    row.get::<_, i64>(3).unwrap_or(0),
-                    row.get::<_, i64>(4).unwrap_or(0),
-                ))
-            })
+    for plan in plans {
+        tx.execute(
+            "INSERT INTO similar_duplicate_groups (hash, file_size, file_count, total_size, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                plan.hash,
+                plan.file_size,
+                plan.file_count,
+                plan.total_size,
+                now
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let group_id = tx.last_insert_rowid();
+        let total_candidates = plan.candidates.len() as f64;
+        for (index, file_id) in plan.candidates.iter().enumerate() {
+            let is_keep = i32::from(index == 0);
+            let score = total_candidates - index as f64;
+            tx.execute(
+                "INSERT INTO similar_duplicate_group_items
+                 (group_id, file_id, is_keep, is_selected, score)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![group_id, file_id, is_keep, 0, score],
+            )
             .map_err(|e| e.to_string())?;
-        iter.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
-    };
+        }
+    }
 
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn build_similar_group_plans(
+    rows: &[(i64, u64, i64, i64, i64)],
+    cancel_flag: &AtomicBool,
+    max_distance: u32,
+) -> Vec<SimilarGroupPlan> {
     if rows.len() < 2 {
-        tx.commit().map_err(|e| e.to_string())?;
-        return Ok(());
+        return Vec::new();
     }
 
     let n = rows.len();
@@ -743,10 +920,13 @@ fn rebuild_similar_groups(
     }
 
     // O(n²) Hamming — OK for scoped/medium libraries; whole-library large N may be slow
-    // but still acceptable for offline dedup scan (cancelable outer loop already ran).
+    // but it now runs without a database write lock and remains cancelable.
     for i in 0..n {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
         for j in (i + 1)..n {
-            if hamming64(rows[i].1, rows[j].1) <= DHASH_HAMMING_THRESHOLD {
+            if hamming64(rows[i].1, rows[j].1) <= max_distance {
                 union(&mut parent, i, j);
             }
         }
@@ -758,6 +938,7 @@ fn rebuild_similar_groups(
         clusters.entry(r).or_default().push(i);
     }
 
+    let mut plans = Vec::new();
     for (_root, members) in clusters {
         if members.len() < 2 {
             continue;
@@ -778,28 +959,18 @@ fn rebuild_similar_groups(
         let count = members.len() as i64;
         let total_size = members.iter().map(|&i| rows[i].2).sum::<i64>();
 
-        tx.execute(
-            "INSERT INTO similar_duplicate_groups (hash, file_size, file_count, total_size, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![rep_hash, max_size, count, total_size, now],
-        )
-        .map_err(|e| e.to_string())?;
-        let gid = tx.last_insert_rowid();
-        let total_c = candidates.len() as f64;
-        for (i, c) in candidates.iter().enumerate() {
-            let is_keep = if i == 0 { 1 } else { 0 };
-            let score = total_c - i as f64;
-            tx.execute(
-                "INSERT INTO similar_duplicate_group_items (group_id, file_id, is_keep, is_selected, score)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![gid, c.id, is_keep, 0, score],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        plans.push(SimilarGroupPlan {
+            hash: rep_hash,
+            file_size: max_size,
+            file_count: count,
+            total_size,
+            candidates: candidates
+                .into_iter()
+                .map(|candidate| candidate.id)
+                .collect(),
+        });
     }
-
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
+    plans
 }
 
 fn compute_blake3_hash(path: &str) -> Result<String, io::Error> {
@@ -1266,15 +1437,23 @@ fn set_keep_in(
     )
     .map_err(|e| e.to_string())?;
 
-    let changed = tx
-        .execute(
-            &format!("UPDATE {items_table} SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2"),
-            params![group_id, file_id],
-        )
-        .map_err(|e| e.to_string())?;
+    // `file_id <= 0` clears the keep flag without designating a replacement. That
+    // is "unkeep": every candidate in the group becomes selectable again. Without
+    // it a group could never get back to an unreviewed, all-selectable state after
+    // the user picked a keeper by mistake.
+    if file_id > 0 {
+        let changed = tx
+            .execute(
+                &format!(
+                    "UPDATE {items_table} SET is_keep = 1 WHERE group_id = ?1 AND file_id = ?2"
+                ),
+                params![group_id, file_id],
+            )
+            .map_err(|e| e.to_string())?;
 
-    if changed == 0 {
-        return Err("Item not found in group".into());
+        if changed == 0 {
+            return Err("Item not found in group".into());
+        }
     }
 
     tx.execute(
@@ -1292,6 +1471,7 @@ pub fn delete_selected(
     file_ids: Option<Vec<i64>>,
     mode: Option<String>,
 ) -> Result<DedupDeleteResult, String> {
+    let require_selected_guard = file_ids.is_none();
     let similar = matches!(
         mode.as_deref()
             .map(|s| s.trim().to_ascii_lowercase())
@@ -1402,16 +1582,33 @@ pub fn delete_selected(
             ));
             continue;
         }
-        if !file_path.is_empty() {
-            if let Err(e) = t_utils::trash_path(&file_path) {
-                failures.push(format!("Failed to move to trash: {} ({})", file_path, e));
+        if file_path.is_empty() {
+            failures.push(format!("File id={} has no indexed path", file_id));
+            continue;
+        }
+        let staged = match t_utils::stage_file_for_delete(&file_path) {
+            Ok(staged) => staged,
+            Err(e) => {
+                failures.push(format!(
+                    "Failed to stage duplicate for trash: {} ({})",
+                    file_path, e
+                ));
                 continue;
             }
-        }
-        match AFile::delete(file_id) {
-            Ok(0) => failures.push(format!("File not removed from DB: id={}", file_id)),
-            Ok(_) => deleted_file_ids.push(file_id),
-            Err(e) => failures.push(format!("Failed to delete DB row for id={}: {}", file_id, e)),
+        };
+        match delete_staged_duplicate(
+            &mut conn,
+            file_id,
+            staged,
+            items_table,
+            require_selected_guard,
+        ) {
+            Ok(true) => deleted_file_ids.push(file_id),
+            Ok(false) => failures.push(format!(
+                "Duplicate id={} is no longer eligible for deletion; file was restored",
+                file_id
+            )),
+            Err(e) => failures.push(e),
         }
     }
 
@@ -1470,9 +1667,101 @@ pub fn delete_selected(
     })
 }
 
+fn delete_staged_duplicate(
+    conn: &mut Connection,
+    file_id: i64,
+    staged: t_utils::StagedDelete,
+    items_table: &str,
+    require_selected: bool,
+) -> Result<bool, String> {
+    let selected_clause = if require_selected {
+        " AND is_selected = 1"
+    } else {
+        ""
+    };
+    let guard_sql = format!(
+        "SELECT EXISTS(
+            SELECT 1 FROM {items_table}
+            WHERE file_id = ?1 AND is_keep = 0{selected_clause}
+        )"
+    );
+    let deleted = AFile::delete_with_conn_if(conn, file_id, |tx| {
+        tx.query_row(&guard_sql, params![file_id], |row| row.get::<_, bool>(0))
+            .map_err(|e| e.to_string())
+    });
+    match deleted {
+        Ok(0) => {
+            staged.rollback().map_err(|rollback_error| {
+                format!(
+                    "Duplicate id={} is no longer deletable; restore failed: {}",
+                    file_id, rollback_error
+                )
+            })?;
+            Ok(false)
+        }
+        Err(e) => {
+            let rollback_error = staged.rollback().err();
+            Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "Failed to delete DB row for id={}: {}; restore also failed: {}",
+                    file_id, e, rollback_error
+                ),
+                None => format!(
+                    "Failed to delete DB row for id={}: {}; file was restored",
+                    file_id, e
+                ),
+            })
+        }
+        Ok(_) => staged.finalize_trash().map(|()| true).map_err(|e| {
+            format!(
+                "DB row deleted for id={}, but moving the restored file to trash failed: {}",
+                file_id, e
+            )
+        }),
+    }
+}
+
 #[cfg(test)]
 mod dhash_tests {
-    use super::{compute_dhash_u64_from_gray, hamming64};
+    use super::{
+        ExactHashWrite, PerceptualHashWrite, build_similar_group_plans,
+        compute_dhash_u64_from_gray, delete_staged_duplicate, flush_exact_hash_writes,
+        flush_perceptual_hash_writes, hamming64,
+    };
+    use crate::t_utils;
+    use rusqlite::{Connection, params};
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    fn staged_delete_fixture(
+        is_keep: i64,
+    ) -> (Connection, std::path::PathBuf, t_utils::StagedDelete) {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-dedup-delete-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("duplicate.jpg");
+        fs::write(&source, b"duplicate bytes").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE afiles (id INTEGER PRIMARY KEY);
+             CREATE TABLE duplicate_group_items (
+                 group_id INTEGER NOT NULL,
+                 file_id INTEGER NOT NULL,
+                 is_keep INTEGER NOT NULL,
+                 is_selected INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO afiles (id) VALUES (1);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO duplicate_group_items (group_id, file_id, is_keep) VALUES (1, 1, ?1)",
+            params![is_keep],
+        )
+        .unwrap();
+        let staged = t_utils::stage_file_for_delete(source.to_str().unwrap()).unwrap();
+        (conn, source, staged)
+    }
 
     #[test]
     fn identical_images_have_zero_hamming() {
@@ -1503,5 +1792,149 @@ mod dhash_tests {
             "dist={}",
             hamming64(a, b)
         );
+    }
+
+    #[test]
+    fn hash_write_batches_commit_all_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file_hashes (
+                file_id INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                computed_at INTEGER NOT NULL
+             );
+             CREATE TABLE file_phashes (
+                file_id INTEGER PRIMARY KEY,
+                hash INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                computed_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+
+        let mut exact = vec![
+            ExactHashWrite {
+                file_id: 1,
+                hash: "aaa".to_string(),
+                file_size: 10,
+                mtime: 11,
+                computed_at: 12,
+            },
+            ExactHashWrite {
+                file_id: 2,
+                hash: "bbb".to_string(),
+                file_size: 20,
+                mtime: 21,
+                computed_at: 22,
+            },
+        ];
+        flush_exact_hash_writes(&mut conn, &mut exact).unwrap();
+        assert!(exact.is_empty());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+
+        let mut perceptual = vec![PerceptualHashWrite {
+            file_id: 3,
+            hash: 0x1234,
+            mtime: 31,
+            computed_at: 32,
+        }];
+        flush_perceptual_hash_writes(&mut conn, &mut perceptual).unwrap();
+        assert!(perceptual.is_empty());
+        assert_eq!(
+            conn.query_row(
+                "SELECT hash FROM file_phashes WHERE file_id = 3",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+            0x1234
+        );
+    }
+
+    #[test]
+    fn similar_group_plans_cluster_and_cancel() {
+        let rows = vec![
+            (1, 0b0000, 100, 10, 30),
+            (2, 0b0001, 120, 20, 40),
+            (3, u64::MAX, 90, 0, 50),
+        ];
+        let cancel = AtomicBool::new(false);
+        let plans = build_similar_group_plans(&rows, &cancel, super::DHASH_HAMMING_THRESHOLD);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].file_count, 2);
+        assert_eq!(plans[0].total_size, 220);
+        assert_eq!(plans[0].candidates, vec![1, 2]);
+
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            build_similar_group_plans(&rows, &cancel, super::DHASH_HAMMING_THRESHOLD).is_empty()
+        );
+    }
+
+    #[test]
+    fn dedup_delete_restores_file_when_keep_choice_changed() {
+        let (mut conn, source, staged) = staged_delete_fixture(1);
+
+        assert!(
+            !delete_staged_duplicate(&mut conn, 1, staged, "duplicate_group_items", false,)
+                .unwrap()
+        );
+
+        assert_eq!(fs::read(&source).unwrap(), b"duplicate bytes");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM afiles WHERE id = 1", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dedup_delete_restores_file_on_database_failure() {
+        let (mut conn, source, staged) = staged_delete_fixture(0);
+
+        let error = delete_staged_duplicate(&mut conn, 1, staged, "duplicate_group_items", false)
+            .unwrap_err();
+
+        assert!(error.contains("file was restored"));
+        assert_eq!(fs::read(&source).unwrap(), b"duplicate bytes");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM afiles WHERE id = 1", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dedup_delete_restores_file_when_selection_changed() {
+        let (mut conn, source, staged) = staged_delete_fixture(0);
+        conn.execute(
+            "UPDATE duplicate_group_items SET is_selected = 0 WHERE file_id = 1",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            !delete_staged_duplicate(&mut conn, 1, staged, "duplicate_group_items", true,).unwrap()
+        );
+
+        assert_eq!(fs::read(&source).unwrap(), b"duplicate bytes");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM afiles WHERE id = 1", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
     }
 }

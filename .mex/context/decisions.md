@@ -16,12 +16,19 @@ edges:
     condition: when a decision concerns plugin security or lifecycle
   - target: context/setup.md
     condition: when a decision affects release or platform workflow
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 ---
 
 
 
 # Decisions
+
+## Plugin install and uninstall retain a recoverable disk state until registry commit
+**Date:** 2026-07-30
+**Status:** Accepted
+**Decision:** Managed plugin replacement renames the former code directory to a hidden sibling backup, then places the staged package and performs all post-install storage/registry work before deleting that backup. Uninstall similarly renames code and optional private storage to hidden siblings, commits registry cleanup, then deletes them. Registry writes use a synced temporary file plus a prior-file backup.
+**Reasoning:** Directly deleting code before a replacement rename could leave neither old nor new plugin; directly deleting during uninstall before saving the registry could leave stale registrations. The filesystem and registry cannot share one OS transaction, so hidden same-volume directory staging provides a recoverable commit boundary.
+**Consequences:** Hidden `.replacing-*` and `.uninstalling-*` directories are excluded from discovery after an interrupted process. Failed transactions may retain a hidden recovery directory only when rollback itself cannot complete; shared runtimes and external model bindings remain outside the transaction. Package extraction rejects declared payloads over the 2 GiB file / 4 GiB total budget, and directory deletion has a bounded retry for delayed Windows handle release.
 
 ## Profile cold metadata before altering media parsing
 **Date:** 2026-07-29

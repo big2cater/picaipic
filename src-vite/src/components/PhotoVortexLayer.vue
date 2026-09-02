@@ -27,6 +27,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** Fired after a successful capture — parent may hide the live grid */
   captured: [];
+  /** Fired when the WebGL snapshot path cannot run; parent may use CSS fallback */
+  failed: [];
   /** Fired when layer is fully cleared */
   cleared: [];
 }>();
@@ -43,6 +45,10 @@ let raf = 0;
 let captureRaf = 0;
 let startMs = 0;
 let hasTexture = false;
+let failed = false;
+let maxTextureSize = 4096;
+let maxViewportWidth = 4096;
+let maxViewportHeight = 4096;
 
 // Uniforms
 let uRes: WebGLUniformLocation | null = null;
@@ -153,6 +159,10 @@ function initGl(canvas: HTMLCanvasElement): boolean {
     (canvas.getContext('experimental-webgl', { alpha: false }) as WebGLRenderingContext | null);
   if (!ctx) return false;
   gl = ctx;
+  maxTextureSize = Math.max(1, Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096);
+  const viewportDims = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array | number[] | null;
+  maxViewportWidth = Math.max(1, Number(viewportDims?.[0]) || maxTextureSize);
+  maxViewportHeight = Math.max(1, Number(viewportDims?.[1]) || maxTextureSize);
 
   const vs = compile(gl, gl.VERTEX_SHADER, VERT);
   const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
@@ -211,9 +221,14 @@ function measureSource() {
 function applyCanvasSize() {
   const canvas = canvasRef.value;
   if (!canvas || !gl) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.max(1, Math.floor(cachedCssW * dpr));
-  const h = Math.max(1, Math.floor(cachedCssH * dpr));
+  const wantedDpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = Math.min(
+    wantedDpr,
+    maxViewportWidth / Math.max(cachedCssW, 1),
+    maxViewportHeight / Math.max(cachedCssH, 1),
+  );
+  const w = Math.max(1, Math.floor(cachedCssW * scale));
+  const h = Math.max(1, Math.floor(cachedCssH * scale));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -246,7 +261,12 @@ function captureSource(el: HTMLElement): HTMLCanvasElement | null {
   const rect = el.getBoundingClientRect();
   if (rect.width < 2 || rect.height < 2) return null;
 
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const wantedDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const dpr = Math.min(
+    wantedDpr,
+    maxTextureSize / Math.max(rect.width, 1),
+    maxTextureSize / Math.max(rect.height, 1),
+  );
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.floor(rect.width * dpr));
   out.height = Math.max(1, Math.floor(rect.height * dpr));
@@ -293,9 +313,8 @@ function captureSource(el: HTMLElement): HTMLCanvasElement | null {
   });
 
   if (drawn === 0) {
-    // Fallback: try drawing the whole element via foreignObject is unreliable;
-    // leave solid dark — still better than crashing.
     console.warn('PhotoVortexLayer: no thumbnails drawn into capture');
+    return null;
   }
   return out;
 }
@@ -314,9 +333,33 @@ function uploadTexture(source: HTMLCanvasElement) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  for (let i = 0; i < 8 && gl.getError() !== gl.NO_ERROR; i++) {
+    // Clear bounded stale errors so this upload's result is authoritative.
+  }
+  try {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  } catch (error) {
+    console.warn('PhotoVortexLayer texture upload failed', error);
+    return false;
+  }
+  const uploadError = gl.getError();
+  if (uploadError !== gl.NO_ERROR) {
+    console.warn('PhotoVortexLayer texture upload GL error', uploadError);
+    return false;
+  }
   hasTexture = true;
   return true;
+}
+
+function failSession(reason: string) {
+  if (failed) return;
+  failed = true;
+  ready.value = false;
+  hasTexture = false;
+  cancelAnimationFrame(raf);
+  raf = 0;
+  console.warn(`PhotoVortexLayer: ${reason}; using CSS fallback`);
+  emit('failed');
 }
 
 function progressAt(elapsedSec: number): number {
@@ -355,7 +398,7 @@ function beginSession() {
 
   if (!gl) {
     if (!initGl(canvas)) {
-      console.warn('PhotoVortexLayer: WebGL unavailable');
+      failSession('WebGL unavailable');
       return;
     }
   }
@@ -371,12 +414,19 @@ function beginSession() {
     captureRaf = 0;
     if (!props.active || !props.sourceEl) return;
     const snap = captureSource(props.sourceEl);
-    if (!snap) return;
+    if (!snap) {
+      failSession('thumbnail capture unavailable');
+      return;
+    }
     measureSource();
     applyCanvasSize();
-    if (!uploadTexture(snap)) return;
+    if (!uploadTexture(snap)) {
+      failSession('texture upload unavailable');
+      return;
+    }
 
     startMs = performance.now();
+    failed = false;
     ready.value = true;
     emit('captured');
 
@@ -393,6 +443,7 @@ function endSession() {
   cancelAnimationFrame(raf);
   raf = 0;
   ready.value = false;
+  failed = false;
   hasTexture = false;
   startMs = 0;
   if (gl && tex) {
@@ -413,10 +464,21 @@ watch(
 onMounted(() => {
   // Lazy GL: only init on first active session (saves a context when unmounted by theme gate)
   ensureSourceObserver();
+  canvasRef.value?.addEventListener('webglcontextlost', onContextLost);
   if (props.active) beginSession();
 });
 
+function onContextLost(event: Event) {
+  event.preventDefault();
+  gl = null;
+  program = null;
+  tex = null;
+  buf = null;
+  failSession('WebGL context lost');
+}
+
 onUnmounted(() => {
+  canvasRef.value?.removeEventListener('webglcontextlost', onContextLost);
   endSession();
   sourceRo?.disconnect();
   sourceRo = null;

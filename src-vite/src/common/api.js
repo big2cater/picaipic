@@ -569,14 +569,11 @@ export async function copyFolder(folderPath, newFolderPath, newAlbumId = 0, conf
 // delete a folder (move to trash)
 export async function deleteFolder(folderPath) {
   try {
-    const result = await invoke('delete_folder', { folderPath });
-    if(result) {
-      return result;
-    };
+    return await invoke('delete_folder', { folderPath });
   } catch (error) {
     console.error('Failed to delete folder:', error);
+    throw error;
   }
-  return null;
 };
 
 // permanently delete a folder (skip trash)
@@ -585,8 +582,8 @@ export async function deleteFolderPermanently(folderPath) {
     return await invoke('delete_folder_permanently', { folderPath });
   } catch (error) {
     console.error('Failed to permanently delete folder:', error);
+    throw error;
   }
-  return null;
 };
 
 /// reveal a file or folder in file explorer (or finder)
@@ -762,14 +759,24 @@ export async function getFolderThumbCount(folderId) {
   return 0;
 }
 
+// every folder of every album, used to build the sidebar folder-search tree
+export async function getAllAlbumFolders() {
+  try {
+    return await invoke('get_all_album_folders');
+  } catch (error) {
+    console.error('getAllAlbumFolders error:', error);
+    throw error;
+  }
+}
+
 // edit an image
-// params: { sourceFilePath, destFilePath, outputFormat, orientation, flipHorizontal, flipVertical, rotate, crop, resize, quality, filter, brightness, contrast, blur, colorMatch? }
+// params: { fileId?, sourceFilePath, destFilePath, outputFormat, orientation, flipHorizontal, flipVertical, rotate, crop, resize, quality, filter, brightness, contrast, blur, colorMatch? }
 export async function editImage(params) {
   try {
     return await invoke('edit_image', { params });
   } catch (error) {
     console.error('Failed to edit image:', error);
-    return false;
+    throw error;
   }
 }
 
@@ -970,8 +977,8 @@ export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, co
     return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy });
   } catch (error) {
     console.error('Failed to move file outside library:', error);
+    throw error;
   }
-  return null;
 }
 
 // copy a file
@@ -993,7 +1000,7 @@ export async function deleteFile(fileId, filePath) {
     return await invoke('delete_file', { fileId, filePath });
   } catch (error) {
     console.error('deleteFile error:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -1003,7 +1010,7 @@ export async function deleteFilePermanently(fileId, filePath) {
     return await invoke('delete_file_permanently', { fileId, filePath });
   } catch (error) {
     console.error('deleteFilePermanently error:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -1021,7 +1028,7 @@ export async function batchDeleteFiles(files, permanently = false) {
     return await invoke('batch_delete_files', { files, permanently });
   } catch (error) {
     console.error('batchDeleteFiles error:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -1113,9 +1120,9 @@ export async function updateFileInfo(fileId, filePath) {
   }
 }
 
-export async function importFile(filePath, folderId, folderPath) {
+export async function importFile(filePath, folderId, folderPath, targetName = null) {
   try {
-    return await invoke('import_file', { filePath, folderId, folderPath });
+    return await invoke('import_file', { filePath, folderId, folderPath, targetName });
   } catch (error) {
     console.error('importFile error:', error);
     throw error;
@@ -2042,6 +2049,7 @@ export async function indexAlbum(albumId, skipFilePath = null) {
     });
   } catch (error) {
     console.error('indexAlbum error:', error);
+    throw error;
   }
 }
 
@@ -2081,8 +2089,50 @@ export async function listenIndexProgress(callback) {
 // deduplication
 
 // start deduplication scan (mode: 'exact' | 'similar')
-export async function dedupStartScan(params = null, mode = 'exact') {
-  return await invoke('dedup_start_scan', { params, mode });
+// ---------------------------------------------------------------------------
+// ComfyUI server integration
+// ---------------------------------------------------------------------------
+
+/// check whether a ComfyUI server is reachable and report version/device
+export async function comfyTestConnection(serverUrl) {
+  return await invoke('comfy_test_connection', { serverUrl });
+}
+
+/// fetch ComfyUI node definitions, reduced to the widget layout needed to convert
+/// a UI-format workflow into the API format
+export async function comfyObjectInfo(serverUrl) {
+  return await invoke('comfy_object_info', { serverUrl });
+}
+
+/// upload a library image into ComfyUI's input directory
+export async function comfyUploadImage(serverUrl, filePath) {
+  return await invoke('comfy_upload_image', { serverUrl, filePath });
+}
+
+/// submit an API-format workflow and wait for it to finish.
+/// Pass `promptId` if the run needs to be cancellable — the command blocks until ComfyUI
+/// finishes, so cancelling means invoking comfy_cancel_run with that same id meanwhile.
+export async function comfyRunWorkflow(serverUrl, workflow, promptId = null) {
+  return await invoke('comfy_run_workflow', { serverUrl, workflow, promptId });
+}
+
+/// interrupt a running workflow, identified by the promptId passed to comfyRunWorkflow
+export async function comfyCancelRun(serverUrl, promptId) {
+  return await invoke('comfy_cancel_run', { serverUrl, promptId });
+}
+
+/// ask ComfyUI to unload models and release VRAM
+export async function comfyFreeMemory(serverUrl) {
+  return await invoke('comfy_free_memory', { serverUrl });
+}
+
+/// download one workflow output image to a local path
+export async function comfyDownloadOutput(serverUrl, image, destPath) {
+  return await invoke('comfy_download_output', { serverUrl, image, destPath });
+}
+
+export async function dedupStartScan(params = null, mode = 'exact', similarGrouping = null) {
+  return await invoke('dedup_start_scan', { params, mode, similarGrouping });
 }
 
 // get deduplication scan status
@@ -2137,6 +2187,7 @@ export async function dedupDeleteSelected(groupIds = null, fileIds = null, mode 
     return result;
   } catch (error) {
     console.error('dedupDeleteSelected error:', error);
+    throw error;
   }
 }
 

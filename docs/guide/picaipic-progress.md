@@ -1,8 +1,8 @@
 # PicAiPic Progress
 
-Updated: 2026-07-29
+Updated: 2026-07-30
 
-## Status board (2026-07-29)
+## Status board (2026-07-30)
 
 | Track | Status |
 |-------|--------|
@@ -11,9 +11,10 @@ Updated: 2026-07-29
 | Plugin action lifecycle visibility | **Fixed** — SA-LUT/manifest actions require managed + reachable; status changes broadcast across windows |
 | Supported desktop platforms | **Windows + Linux only** — Android/iOS icon trees and macOS ICNS/Info.plist/native bridge/menu assets removed |
 | Theme menu | **Default / Retro / CMYK / Black hole / Cyberpunk** (`THEME_ID` 0–4) — branch `feat/black-hole-idle-theme` / PR #3 |
-| Black-hole cosmos + PhotoVortex | **Shipped** — maximize + **6s** idle; UV lens; RO size cache; theme-gated mount — `change-black-hole-theme.md` |
+| Black-hole cosmos + PhotoVortex | **Shipped / cross-GPU hardened** — native maximize + **6s** idle; GPU-limit-clamped UV lens; Canvas2D ambient fallback; CSS per-card photo fallback on capture/GL failure — `change-black-hole-theme.md` |
 | Cyberpunk night-city ambient | **Shipped** — `CyberpunkBackground` (sprite-baked rain/particles/kana) — `change-cyberpunk-theme.md` |
-| Cyberpunk idle photo glitch | **Shipped** — `PhotoGlitchLayer` WebGL1; **mediump-safe** hash + mod time; intensity `>0` — `change-cyberpunk-theme.md` |
+| Cyberpunk idle photo glitch | **Shipped / cross-GPU hardened** — GPU-limit-clamped `PhotoGlitchLayer`; **mediump-safe** hash + mod time; CSS translation/color/RGB-edge fallback; intensity `>0` — `change-cyberpunk-theme.md` |
+| Cross-machine FX activation | **Fixed** — Home owns native maximize startup/resize sync; legacy missing/invalid `dynamicThemeIntensity` migrates to 1 while explicit 0 remains off; reduced-motion remains intentional — `fx-theme-runtime-compatibility.md` |
 | FX correctness/perf follow-up | **Shipped** — `130b33a` (hash, sprites, reflow, theme-gate GL); `1aa0a59` (resize seedField false; capture rAF cancel) |
 | Audit harden pack (2026-07-26) | **Shipped** — import_url limits, copy orphan cleanup, restore atomic write, path_inside, embed warm — `docs/review/code-review-2026-07-26.md` |
 | SQLite audit follow-up: S1/S6 | **Shipped / paused at a safe boundary** — `AFile::new` metadata helpers (header/EXIF/orientation/identity/descriptions/capture/RAW merge), temporary SQLite CRUD and binary EXIF fixtures; `cargo check` + full Rust test **107 passed / 3 ignored** — `docs/review/code-review-2026-07-26-supplement.md` |
