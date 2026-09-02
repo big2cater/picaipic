@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/public/icon.png" alt="PicAiPic Logo" width="120" style="border-radius: 20px">
   <h1>PicAiPic - Private Local Photo Manager</h1>
-  <h3>Local-first desktop photo manager for Windows and Linux.</h3>
+  <h3>Local-first desktop photo manager for Windows. Linux builds are experimental and not yet fully verified.</h3>
   <p>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/v/release/big2cater/picaipic" alt="GitHub release"></a>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/downloads/big2cater/picaipic/total" alt="GitHub all releases"></a>
@@ -24,7 +24,7 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 | Platform | Package | Note |
 | :-- | :-- | :-- |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Unsigned — if SmartScreen blocks the download, click **Keep anyway** |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | For Debian-based distros (Ubuntu, Debian, Linux Mint, etc.) |
+| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Experimental builds for Debian-based distros (Ubuntu, Debian, Linux Mint, etc.) — **not yet fully verified** |
 
 ## Screenshots
 
@@ -75,7 +75,7 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 - **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview, export/convert, confirmed JPEG keyframe replacement, and album metadata repair. See the [Live Photo guide](docs/guide/live-photo.md).
 - **Broad media support** for 60+ image, RAW, and video formats through LibRaw, libheif, libjpeg-turbo, jxl-oxide, FFmpeg, and Rust image codecs.
 - **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects, GPU-limit-aware WebGL rendering, and visible CSS photo fallbacks on constrained Windows/WebView2 devices.
-- **Windows and Linux releases only**, with x64/ARM64 Windows packages and x86_64/ARM64 Linux packages.
+- **Windows is the fully verified platform** (x64/ARM64 packages). Linux packages (x86_64/ARM64) are built but **experimental and not yet fully verified**.
 
 ## Uninstall PicAiPic
 
