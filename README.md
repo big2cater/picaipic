@@ -15,7 +15,6 @@ English | [简体中文](i18n/README.zh-CN.md)
 PicAiPic is a local-first photo manager for browsing family albums, finding old photos quickly, and managing large personal media libraries offline.
 It works directly with your existing folders and keeps indexing, thumbnails, metadata, semantic search, face processing, and editing on your own computer. No cloud account or media upload is required.
 
-- Website: [https://big2cater.github.io/picaipic/](https://big2cater.github.io/picaipic/)
 - Privacy: [PRIVACY.md](PRIVACY.md)
 
 ## Download PicAiPic
@@ -55,12 +54,12 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 - **Collections** for manually grouping files without moving the originals.
 - **Duplicate cleanup** with exact hashing and visual similarity modes, plus guarded trash/permanent-delete workflows.
 
-### Local AI and Plugins
+### Local AI and External Tools
 
 - **On-device semantic search** with English/Chinese text search, visual similarity, smart tags, and 512-dimensional local image embeddings.
 - **Face detection and clustering** with local ONNX models and large-set nearest-neighbor support.
-- **Independent AI plugins** with signed packages, publisher trust, explicit permissions, bearer-token loopback authentication, runtime profiles, model bindings, input staging, progress/cancellation, and controlled output adoption.
-- **Lifecycle-aware plugin actions**: contributed tools such as SA-LUT appear only while their managed runtime is reachable.
+- **ComfyUI integration**: import saved workflows — API-format exports, or UI-format graphs with one-click conversion — and run them against your own ComfyUI server (desktop build or a remote box). Selected photos are uploaded, submitted, and the finished images are downloaded back and imported into the album under readable workflow-derived names, with serial batch, interruptible cancellation, and a configurable VRAM cooldown. The first result is scrolled into view automatically.
+- **Optional third-party AI plugins** (can be hidden entirely in Settings): signed packages, publisher trust, explicit permissions, bearer-token loopback authentication, runtime profiles, model bindings, input staging, progress/cancellation, and controlled output adoption.
 
 ### Edit and Create
 
@@ -75,7 +74,7 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 
 - **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview, export/convert, confirmed JPEG keyframe replacement, and album metadata repair. See the [Live Photo guide](docs/guide/live-photo.md).
 - **Broad media support** for 60+ image, RAW, and video formats through LibRaw, libheif, libjpeg-turbo, jxl-oxide, FFmpeg, and Rust image codecs.
-- **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects, GPU-limit-aware WebGL rendering, and visible CSS photo fallbacks on constrained Windows/WebView2 devices. See the [runtime compatibility guide](docs/guide/fx-theme-runtime-compatibility.md).
+- **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects, GPU-limit-aware WebGL rendering, and visible CSS photo fallbacks on constrained Windows/WebView2 devices.
 - **Windows and Linux releases only**, with x64/ARM64 Windows packages and x86_64/ARM64 Linux packages.
 
 ## Uninstall PicAiPic
@@ -120,14 +119,14 @@ PicAiPic is now on the `v1.1.0` development line. A private draft multi-architec
 - smoother large-library browsing through stale viewport cancellation, deduplicated thumbnail/metadata requests, lazy per-card menus, and contained GPU-friendly virtual item positioning
 - faster warm rescans through scan-local folder/file-state caches and bounded timestamp transactions; a 10,343-file unchanged rescan improved from 10.164s to 8.786s
 - batched local CLIP embedding, bounded preprocessing prefetch, lower startup matrix allocation, and exact-search-by-default behavior validated with 110k vectors
-- signed AI plugin packages, publisher trust, bearer-token authentication, permission/setup flows, runtime conflict gates, and input-file staging
-- plugin-contributed actions such as SA-LUT appear only while the managed plugin runtime is reachable; start/stop/restart state is synchronized across windows
+- signed AI plugin packages, publisher trust, bearer-token authentication, permission/setup flows, runtime conflict gates, and input-file staging; the whole plugin feature can be hidden from the UI via a Settings toggle when unused
+- ComfyUI integration: workflow import with API/UI format handling, serial run/batch/cancel against a user-managed server, readable result names, and automatic reveal of the first imported result
 - built-in crop, collage, batch processing, print layouts, color match, LUT/photo styles, photo frames, smart albums, collections, and Live Photo / Motion Photo workflows
 - a refreshed application icon across Windows packaging, Linux/shared PNG assets, title bars, About/Welcome views, and documentation
 - cross-machine dynamic-theme hardening: native maximize synchronization, legacy intensity migration, GPU texture/viewport clamping, and photo-effect fallbacks for integrated-GPU laptops
 - a Windows/Linux-only release scope; Android/iOS assets and macOS bundle/native bridge files have been removed
 
-The highest-priority remaining work is release-executable regression, representative cold-import/embedding profiling, signing-key rotation/revocation design, and stronger network/Linux plugin isolation beyond default input staging. See [v1.1.0 release notes](docs/guide/release-notes/v1.1.0.md) and the [development progress board](docs/guide/picaipic-progress.md).
+The highest-priority remaining work is release-executable regression, representative cold-import/embedding profiling, and signing-key rotation/revocation design. See [v1.1.0 release notes](docs/guide/release-notes/v1.1.0.md).
 
 ## Build from Source
 
