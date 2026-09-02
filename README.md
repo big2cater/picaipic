@@ -190,3 +190,9 @@ sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+PicAiPic is developed and modified from the open-source
+[Lap](https://github.com/julyx10/lap) photo manager by
+[julyx10](https://github.com/julyx10) (2024-2026, GPL-3.0-or-later).
+The upstream project inspired the local-first, folder-based model this
+application is built around.
