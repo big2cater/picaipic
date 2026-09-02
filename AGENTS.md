@@ -39,5 +39,5 @@ After meaningful work:
 ## Navigation
 - Product state and recent history: `README.md` (EN) + `i18n/README.zh-CN.md`, plus per-version `docs/guide/release-notes/`.
 - User-facing feature guides live in `docs/guide/`; the VitePress site renders `docs/` (`docs/index.md` homepage, `docs/.vitepress/config.mts` sidebar).
-- ComfyUI integration status and runbook: `docs/comfyui-integration-status.md` is local-only; the backend module is `src-tauri/src/t_comfy.rs`, frontend conversion in `src-vite/src/common/comfyConvert.js`.
+- ComfyUI integration: backend module `src-tauri/src/t_comfy.rs`, UI-format conversion in `src-vite/src/common/comfyConvert.js`, dialogs `ComfyWorkflowDialog.vue` / `ComfyRunDialog.vue`.
 - Release/updater plumbing: `tauri.conf.json` updater endpoint + `latest.json` on GitHub Releases (four platforms; Windows entries are merged by `release-windows.yml`), `.github/workflows/release.yml` and `release-windows.yml`.
