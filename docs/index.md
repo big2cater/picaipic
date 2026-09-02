@@ -6,8 +6,8 @@ hero:
   text: "Local-first, AI-powered Photo manager."
   tagline: "Built for family albums, photographers, and large local libraries."
   image:
-    src: /screenshots/picaipic-v1.1-smart-tags.png
-    alt: PicAiPic local photo library manager screenshot
+    src: /screenshots/hero-black-hole.png
+    alt: PicAiPic black hole visual effect
   actions:
     - theme: brand
       text: Download
