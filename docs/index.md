@@ -1,584 +1,426 @@
 ---
-layout: home
-
-hero:
-  name: "PicAiPic"
-  text: "Local-first, AI-powered Photo manager."
-  tagline: "Built for family albums, photographers, and large local libraries."
-  image:
-    src: /screenshots/hero-black-hole.png
-    alt: PicAiPic black hole visual effect
-  actions:
-    - theme: brand
-      text: Download
-      link: https://github.com/big2cater/picaipic/releases/latest
-    - theme: alt
-      text: Release Notes
-      link: /guide/release-notes/v1.1.0
-    - theme: alt
-      text: View on GitHub
-      link: https://github.com/big2cater/picaipic
-
-features:
-  - title: No Cloud Required
-    details: Keep your photos on your own disk. PicAiPic is a local-first photo manager with no forced cloud upload.
-    icon: ☁️
-  - title: Private by Default
-    details: Browsing, indexing, and search run locally on your device so your family albums stay under your control.
-    icon: 🔒
-  - title: Folder-First Workflow
-    details: Use your existing folders directly. No import lock-in, no proprietary library migration.
-    icon: 📂
-  - title: Local AI Search
-    details: Find photos with text search, similar-image search, face clustering, and smart tags processed on-device.
-    icon: 🧠
-  - title: ComfyUI Ready
-    details: Run your own ComfyUI workflows on selected photos — import saved workflows, batch-process, and import results back with readable names.
-    icon: 🎨
-  - title: Built-in Creative Tools
-    details: Crop presets, collage, batch processing, print layouts, photo frames, color match, and LUT photo styles — all offline.
-    icon: 🖌️
-  - title: Built for Large Libraries
-    details: Smooth browsing and organization across thousands of photos and videos in real-world collections.
-    icon: ⚡
-  - title: Free to Use
-    details: No subscription plan or recurring fee. Install and manage your memories freely.
-    icon: 💸
+layout: page
+title: PicAiPic
+description: Local-first, AI-powered photo manager with a black hole for a theme.
 ---
 
-<script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+<div class="bh-home">
+  <section class="bh-hero">
+    <canvas ref="bhCanvas" class="bh-canvas" aria-hidden="true"></canvas>
 
-const isZoomed = ref(false)
-const imgSrc = ref('')
-let heroCleanup = null
+    <div class="bh-hero-inner">
+      <p class="bh-eyebrow">PIC A I · PIC A PIC</p>
+      <h1 class="bh-title">把整片星空，<br />收进你的相册。</h1>
+      <p class="bh-tagline">
+        本地优先的照片管理器 —— 浏览、搜索、整理都以你自己的磁盘为家。
+        连黑洞主题都是认真的：照片会被吸进事件视界。
+      </p>
+      <div class="bh-cta">
+        <a class="bh-btn bh-btn-primary" href="https://github.com/big2cater/picaipic/releases/latest">下载 PicAiPic</a>
+        <a class="bh-btn bh-btn-ghost" href="/guide/introduction">了解 PicAiPic</a>
+        <a class="bh-btn bh-btn-ghost" href="https://github.com/big2cater/picaipic">GitHub ↗</a>
+      </div>
+      <p class="bh-hint">← 试试移动鼠标，别让黑洞发现你</p>
+    </div>
+  </section>
+
+  <section class="bh-features">
+    <h2 class="bh-section-title">本地优先，<span>不交付你的回忆</span></h2>
+
+    <div class="bh-grid">
+      <article class="bh-card">
+        <div class="bh-card-icon">📁</div>
+        <h3>文件夹即图库</h3>
+        <p>直接用你现有的照片文件夹，没有导入锁、没有专有格式绑架。卸载应用，照片原样还在。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">🔒</div>
+        <h3>隐私是默认值</h3>
+        <p>索引、缩略图、语义搜索、人脸处理全部在本机完成。不需要云账号，也不会上传一张照片。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">🧠</div>
+        <h3>本地 AI 搜索</h3>
+        <p>中英文语义搜索、找相似图、智能标签、人脸聚类，都跑在你自己的 CPU 上，10 万张图也跟得上。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">🎨</div>
+        <h3>接住你的 ComfyUI</h3>
+        <p>把你保存的 ComfyUI 工作流直接跑在选中的照片上：导入、批量、取消、结果自动回到相册。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">🖌️</div>
+        <h3>内置创作工具</h3>
+        <p>裁剪预设、拼图、批处理、冲印排版、相框、追色与 LUT 风格，全部离线可用。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">⚡</div>
+        <h3>为大图库而生</h3>
+        <p>虚拟化网格、增量扫描、批量化推理与精确向量搜索，为 1 万到 10 万+ 文件的图库设计。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">💸</div>
+        <h3>免费，无订阅</h3>
+        <p>GPL-3.0 开源，零付费墙。应用与数据都在你的掌控之下。</p>
+      </article>
+
+      <article class="bh-card">
+        <div class="bh-card-icon">🕳️</div>
+        <h3>五套主题，含黑洞</h3>
+        <p>默认、复古、CMYK、赛博朋克与黑洞。空闲时照片真的会被吸进去 —— 这就是我们的品味。</p>
+      </article>
+    </div>
+  </section>
+</div>
+
+<script setup>
+import { onMounted, onBeforeUnmount, ref } from 'vue'
+
+const bhCanvas = ref(null)
+let raf = 0
+let cleanup = () => {}
 
 onMounted(() => {
-  // Use a MutationObserver or a timeout to wait for VPHero to render if needed,
-  // but usually onMounted is enough for static SSR content in VitePress.
-  const interval = setInterval(() => {
-    const heroImg = document.querySelector('.VPHero .image-src')
-    const heroImageWrap = document.querySelector('.VPHero .image')
-    if (heroImg && heroImageWrap) {
-      heroImg.style.cursor = 'zoom-in'
-      heroImg.addEventListener('click', (e) => {
-        imgSrc.value = e.target.src
-        isZoomed.value = true
-      })
+  const canvas = bhCanvas.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
 
-      const handleMove = (event) => {
-        const rect = heroImageWrap.getBoundingClientRect()
-        const rx = ((event.clientX - rect.left) / rect.width - 0.5) * 2
-        const ry = ((event.clientY - rect.top) / rect.height - 0.5) * 2
-        heroImageWrap.style.setProperty('--hero-tilt-x', `${rx.toFixed(3)}`)
-        heroImageWrap.style.setProperty('--hero-tilt-y', `${ry.toFixed(3)}`)
-      }
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
 
-      const resetMove = () => {
-        heroImageWrap.style.setProperty('--hero-tilt-x', '0')
-        heroImageWrap.style.setProperty('--hero-tilt-y', '0')
-      }
+  const stars = []
+  const STAR_COUNT = reduceMotion ? 90 : 260
+  const mouse = { x: 0.5, y: 0.42, active: false }
 
-      heroImageWrap.addEventListener('mousemove', handleMove)
-      heroImageWrap.addEventListener('mouseleave', resetMove)
-      heroCleanup = () => {
-        heroImageWrap.removeEventListener('mousemove', handleMove)
-        heroImageWrap.removeEventListener('mouseleave', resetMove)
-      }
-      clearInterval(interval)
+  let w = 0
+  let h = 0
+
+  function resize() {
+    const rect = canvas.parentElement.getBoundingClientRect()
+    w = Math.max(320, rect.width)
+    h = Math.max(240, rect.height)
+    canvas.width = Math.round(w * dpr)
+    canvas.height = Math.round(h * dpr)
+    canvas.style.width = `${w}px`
+    canvas.style.height = `${h}px`
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  }
+
+  function spawnStar(init = false) {
+    // 粒子按高斯分布在黑洞核心附近形成吸积盘，少量远星
+    const near = Math.random() < 0.72
+    const r = near
+      ? Math.abs((Math.random() + Math.random() + Math.random()) / 3 - 0.42) * 0.62
+      : 0.55 + Math.random() * 0.45
+    const a = Math.random() * Math.PI * 2
+    const speed = near ? 0.12 + Math.random() * 0.9 : 0.02 + Math.random() * 0.07
+    return {
+      // 半径方向围绕中心 0.5/0.45，旋转
+      baseR: r,
+      baseA: a,
+      speed,
+      drift: 0.04 + Math.random() * 0.2,
+      twinkle: Math.random() * Math.PI * 2,
+      twinkleSpeed: 0.5 + Math.random() * 2,
+      size: near ? 0.6 + Math.random() * 1.9 : 0.4 + Math.random() * 1.1,
+      hue: Math.random() < 0.82 ? 200 : Math.random() < 0.5 ? 45 : 320, // 蓝白为主，暖金点缀
+      init,
     }
-  }, 100)
-  
-  // Clean up interval after 5 seconds just in case
-  setTimeout(() => clearInterval(interval), 5000)
+  }
+
+  for (let i = 0; i < STAR_COUNT; i += 1) stars.push(spawnStar(true))
+
+  const cxT = { x: 0.5, y: 0.42 }
+  function draw(now) {
+    const t = now / 1000
+    // 黑洞核心跟随鼠标，但保持在一个小范围内缓慢移动
+    cxT.x += ((mouse.active ? mouse.x : 0.5) - cxT.x) * 0.035
+    cxT.y += ((mouse.active ? mouse.y : 0.42) - cxT.y) * 0.035
+    const cx = cxT.x * w
+    const cy = cxT.y * h
+
+    // 星轨背景
+    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(w, h) * 0.75)
+    bg.addColorStop(0, 'rgba(10, 12, 28, 1)')
+    bg.addColorStop(0.55, 'rgba(8, 10, 24, 1)')
+    bg.addColorStop(1, 'rgba(4, 6, 16, 1)')
+    ctx.fillStyle = bg
+    ctx.fillRect(0, 0, w, h)
+
+    // 粒子
+    for (const s of stars) {
+      s.baseA += s.speed * 0.0016
+      s.twinkle += s.twinkleSpeed * 0.016
+      const pull = mouse.active ? 0.9 : 1
+      const r = s.baseR * Math.min(w, h) * 0.62 * pull
+      const x = cx + Math.cos(s.baseA) * r + Math.sin(s.baseA + s.drift) * 2
+      const y = cy + Math.sin(s.baseA) * r * 0.72 + Math.cos(s.baseA + s.drift) * 2
+      const alpha = 0.22 + 0.55 * (0.5 + 0.5 * Math.sin(s.twinkle))
+      const size = s.size * (0.8 + 0.4 * Math.sin(s.twinkle * 1.3))
+      ctx.beginPath()
+      ctx.fillStyle = `hsla(${s.hue}, 85%, ${72 + 18 * Math.sin(s.twinkle)}%, ${alpha})`
+      ctx.arc(x, y, size, 0, Math.PI * 2)
+      ctx.fill()
+
+      // 光子拖尾：少数近轨粒子画出小弧线
+      if (s.speed > 0.7 && Math.random() < 0.08) {
+        ctx.beginPath()
+        ctx.strokeStyle = `hsla(${s.hue}, 90%, 78%, 0.16)`
+        ctx.lineWidth = 1
+        ctx.arc(cx, cy, r, s.baseA - 0.22, s.baseA)
+        ctx.stroke()
+      }
+    }
+
+    // 黑洞事件视界
+    const pulse = reduceMotion ? 0 : Math.sin(t * 1.1) * 0.03
+    const er = Math.min(w, h) * (0.085 + pulse) // event horizon
+    const glow1 = ctx.createRadialGradient(cx, cy, er * 0.2, cx, cy, er * 3.2)
+    glow1.addColorStop(0, 'rgba(190, 220, 255, 0.5)')
+    glow1.addColorStop(0.25, 'rgba(90, 140, 255, 0.22)')
+    glow1.addColorStop(0.6, 'rgba(60, 90, 200, 0.08)')
+    glow1.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    ctx.fillStyle = glow1
+    ctx.beginPath()
+    ctx.arc(cx, cy, er * 3.2, 0, Math.PI * 2)
+    ctx.fill()
+
+    // 光子环：黑洞最迷人的部分
+    ctx.beginPath()
+    ctx.arc(cx, cy, er * 1.28, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(255, 214, 150, ${0.35 + 0.2 * Math.sin(t * 2.2)})`
+    ctx.lineWidth = 2.4
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(cx, cy, er * 1.28, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(200, 235, 255, 0.16)'
+    ctx.lineWidth = 9
+    ctx.stroke()
+
+    // 纯黑核心（事件视界）
+    ctx.beginPath()
+    ctx.arc(cx, cy, er, 0, Math.PI * 2)
+    ctx.fillStyle = '#000'
+    ctx.fill()
+  }
+
+  function tick(now) {
+    draw(now)
+    raf = requestAnimationFrame(tick)
+  }
+
+  function onPointer(e) {
+    const rect = canvas.getBoundingClientRect()
+    mouse.x = (e.clientX - rect.left) / rect.width
+    mouse.y = (e.clientY - rect.top) / rect.height
+    mouse.active = true
+  }
+  function onLeave() {
+    mouse.active = false
+  }
+
+  resize()
+  window.addEventListener('resize', resize)
+  window.addEventListener('pointermove', onPointer, { passive: true })
+  window.addEventListener('pointerleave', onLeave)
+  if (!reduceMotion) {
+    raf = requestAnimationFrame(tick)
+  } else {
+    draw(performance.now())
+  }
+
+  cleanup = () => {
+    cancelAnimationFrame(raf)
+    window.removeEventListener('resize', resize)
+    window.removeEventListener('pointermove', onPointer)
+    window.removeEventListener('pointerleave', onLeave)
+  }
 })
 
-onBeforeUnmount(() => {
-  heroCleanup?.()
-})
+onBeforeUnmount(cleanup)
 </script>
 
 <style>
-:root {
-  --vp-home-hero-name-color: var(--vp-c-text-1);
-  --vp-home-hero-name-background: none;
+.bh-home {
+  --bh-ink: #e8edff;
+  --bh-dim: rgba(232, 237, 255, 0.62);
+  --bh-line: rgba(255, 255, 255, 0.1);
 }
 
-.VPNavBarTitle .logo {
-  border-radius: 8px;
-}
-
-.VPHome {
-  background:
-    radial-gradient(circle at 15% 20%, rgba(14, 165, 233, 0.18), transparent 26%),
-    radial-gradient(circle at 85% 18%, rgba(245, 158, 11, 0.16), transparent 24%),
-    radial-gradient(circle at 72% 72%, rgba(15, 118, 110, 0.18), transparent 30%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 25%);
-}
-
-.VPHero {
+.bh-hero {
   position: relative;
+  border-radius: 28px;
   overflow: hidden;
+  min-height: 560px;
+  margin: 0 auto 4.5rem;
+  max-width: 1180px;
+  border: 1px solid var(--bh-line);
+  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.45);
 }
 
-.VPHero::before,
-.VPHero::after {
-  content: "";
+.bh-canvas {
   position: absolute;
-  border-radius: 999px;
-  filter: blur(70px);
+  inset: 0;
+  display: block;
+}
+
+.bh-hero-inner {
+  position: relative;
+  z-index: 2;
+  padding: clamp(2.4rem, 6vw, 5rem);
+  max-width: 60%;
   pointer-events: none;
-  opacity: 0.7;
 }
 
-.VPHero::before {
-  top: 2rem;
-  right: -4rem;
-  width: 18rem;
-  height: 18rem;
-  background: rgba(14, 165, 233, 0.2);
-  animation: heroFloat 12s ease-in-out infinite;
+.bh-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.42em;
+  color: rgba(190, 220, 255, 0.75);
+  margin-bottom: 1.2rem;
 }
 
-.VPHero::after {
-  left: -3rem;
-  bottom: 1rem;
-  width: 16rem;
-  height: 16rem;
-  background: rgba(245, 158, 11, 0.16);
-  animation: heroFloat 14s ease-in-out infinite reverse;
+.bh-title {
+  font-size: clamp(2.2rem, 5vw, 3.6rem);
+  line-height: 1.12;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--bh-ink);
+  margin: 0 0 1.1rem;
+  text-shadow: 0 6px 30px rgba(0, 0, 0, 0.55);
 }
 
-.VPHero .container {
-  position: relative;
-  z-index: 1;
-}
-
-.VPHero .main {
-  position: relative;
-}
-
-.VPHero .name,
-.VPHero .text,
-.VPHero .tagline {
+.bh-tagline {
+  color: var(--bh-dim);
+  font-size: 1.04rem;
+  line-height: 1.8;
+  margin: 0 0 2rem;
   max-width: 34rem;
 }
 
-.VPHero .name {
+.bh-cta {
   display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  pointer-events: auto;
 }
 
-.VPHero .name::before {
-  content: "";
-  width: 4.6rem;
-  height: 4.6rem;
-  flex: 0 0 4.6rem;
-  border-radius: 1rem;
-  background: url('/icon.png') center/cover no-repeat;
-  box-shadow:
-    0 10px 30px rgba(14, 165, 233, 0.22),
-    0 4px 12px rgba(0, 0, 0, 0.16);
-}
-
-.VPHero .text {
-  font-weight: 700;
-  letter-spacing: -0.03em;
-}
-
-.VPHero .tagline {
-  font-size: 1.05rem;
-  line-height: 1.75;
-}
-
-.VPHero .actions {
-  gap: 0.9rem;
-}
-
-.VPHero .action .VPButton {
+.bh-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  padding: 0 1.1rem;
-  min-height: 2.9rem;
-  line-height: 1;
-  transition: transform 0.2s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+  padding: 0.7rem 1.35rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.25s ease, background 0.25s ease, border-color 0.25s ease;
 }
 
-.VPHero .action .VPButton.brand {
-  box-shadow: 0 16px 40px rgba(14, 165, 233, 0.28);
+.bh-btn-primary {
+  background: linear-gradient(135deg, #6aa8ff, #3b6ef0);
+  color: #fff;
+  box-shadow: 0 14px 40px rgba(59, 110, 240, 0.45);
 }
 
-.VPHero .action .VPButton.alt {
-  border-color: rgba(255, 255, 255, 0.14);
+.bh-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 52px rgba(59, 110, 240, 0.55);
+}
+
+.bh-btn-ghost {
+  border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.05);
   backdrop-filter: blur(10px);
+  color: var(--bh-ink);
 }
 
-.VPHero .action .VPButton:hover {
+.bh-btn-ghost:hover {
   transform: translateY(-2px);
+  border-color: rgba(140, 190, 255, 0.45);
 }
 
-.VPHero .image {
-  position: relative;
-  --hero-tilt-x: 0;
-  --hero-tilt-y: 0;
+.bh-hint {
+  margin-top: 1.6rem;
+  font-size: 0.82rem;
+  color: rgba(200, 225, 255, 0.5);
+  letter-spacing: 0.06em;
 }
 
-.VPHero .image::before {
-  content: "";
-  position: absolute;
-  inset: 10% 0% -8% 8%;
-  border-radius: 2rem;
+.bh-features {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.bh-section-title {
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0 0 2.2rem;
+}
+
+.bh-section-title span {
+  background: linear-gradient(90deg, #6aa8ff, #f5b76a);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.bh-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.bh-card {
+  border-radius: 20px;
+  padding: 1.3rem 1.2rem 1.2rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
   background:
-    linear-gradient(135deg, rgba(14, 165, 233, 0.18), rgba(15, 118, 110, 0.1)),
-    rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.28);
-  transform: rotate(-6deg);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02)),
+    rgba(13, 15, 32, 0.55);
+  transition: transform 0.22s ease, border-color 0.22s ease, background 0.22s ease;
 }
 
-.VPHero .image::after {
-  content: "";
-  position: absolute;
-  inset: 16% 8% -12% 16%;
-  border-radius: 2rem;
-  background:
-    radial-gradient(circle at top, rgba(245, 158, 11, 0.24), transparent 55%),
-    linear-gradient(115deg, transparent 28%, rgba(255, 255, 255, 0.12) 42%, transparent 56%);
-  background-size: auto, 220% 100%;
-  background-position: center, 140% 0;
-  filter: blur(36px);
-  opacity: 0.75;
-  animation: glowSweep 8s ease-in-out infinite;
-}
-
-.VPHero .image-container {
-  isolation: isolate;
-}
-
-.VPFeatures {
-  position: relative;
-  padding-top: 2rem !important;
-}
-
-.VPFeatures .container {
-  max-width: 1180px !important;
-}
-
-.VPFeatures .items {
-  gap: 0.75rem !important;
-}
-
-.VPFeatures .item {
-  padding: 0 !important;
-  width: 100% !important;
-  max-width: none !important;
-  flex: 1 1 auto !important;
-}
-
-.VPFeatures .VPLink {
-  height: 100%;
-}
-
-.VPFeatures .box {
-  height: 100%;
-  border-radius: 24px !important;
-  padding: 1.15rem 1.05rem 1.05rem !important;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03)),
-    rgba(255, 255, 255, 0.02);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 18px 50px rgba(0, 0, 0, 0.16);
-  transition:
-    transform 0.22s ease,
-    border-color 0.22s ease,
-    box-shadow 0.22s ease,
-    background 0.22s ease;
-}
-
-.VPFeatures .box:hover {
+.bh-card:hover {
   transform: translateY(-6px);
-  border-color: rgba(14, 165, 233, 0.28);
+  border-color: rgba(120, 180, 255, 0.35);
   background:
-    linear-gradient(180deg, rgba(14, 165, 233, 0.08), rgba(255, 255, 255, 0.04)),
-    rgba(255, 255, 255, 0.03);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 24px 60px rgba(0, 0, 0, 0.22);
+    linear-gradient(180deg, rgba(106, 168, 255, 0.1), rgba(255, 255, 255, 0.03)),
+    rgba(13, 15, 32, 0.6);
 }
 
-.VPFeatures .icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2.8rem;
-  height: 2.8rem;
-  margin-bottom: 0.9rem;
-  border-radius: 0.95rem;
-  font-size: 1.25rem;
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.16), rgba(245, 158, 11, 0.14));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+.bh-card-icon {
+  font-size: 1.6rem;
+  margin-bottom: 0.8rem;
 }
 
-.VPFeatures .title {
-  font-size: 1.02rem !important;
-  font-weight: 700 !important;
-  line-height: 1.35 !important;
+.bh-card h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 0.5rem;
 }
 
-.VPFeatures .details {
-  margin-top: 0.55rem !important;
-  font-size: 0.95rem !important;
-  line-height: 1.65 !important;
-  color: var(--vp-c-text-2) !important;
+.bh-card p {
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--bh-dim);
+  margin: 0;
 }
 
-@media (min-width: 960px) {
-  .VPFeatures .items {
-    display: grid !important;
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    gap: 0.85rem !important;
-  }
-
-  .VPFeatures .item {
-    min-width: 0 !important;
-  }
-
-  .VPHero .container {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0 16px;
-  }
-
-  .VPHero.has-image .main {
-    flex: 0 0 50% !important;
-    width: 50% !important;
-    max-width: none !important;
-    padding-right: 48px;
-  }
-
-  .VPHero .image {
-    flex: 0 0 50% !important;
-    width: 50% !important;
-    display: flex !important;
-    justify-content: center;
-    align-items: center;
-    order: 2 !important;
-    margin: 0 !important;
-  }
-
-  .VPHero .image-container {
-    width: 100% !important;
-    height: auto !important;
-    max-width: none !important;
-    transform: none !important;
-    perspective: 1600px !important;
-    position: relative !important;
-  }
-
-  .VPHero .image-src,
-  .VPHero .image-bg {
-    position: relative !important;
-    top: auto !important;
-    left: auto !important;
-    transform: none !important;
-    max-width: 100% !important;
-    max-height: none !important;
-    width: 100% !important;
-  }
-
-  .VPHero .image-container::before,
-  .VPHero .image-container::after {
-    content: "";
-    position: absolute;
-    inset: auto;
-    width: 78%;
-    aspect-ratio: 16 / 10;
-    border-radius: 18px;
-    background-size: cover;
-    background-position: center;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.26);
-    transform-style: preserve-3d;
-    pointer-events: none;
-  }
-
-  .VPHero .image-container::before {
-    top: 9%;
-    left: -7%;
-    background-image: url('/screenshots/02 lap-ai-search.jpg');
-    transform:
-      rotateX(calc(10deg + var(--hero-tilt-y) * -2deg))
-      rotateY(calc(22deg + var(--hero-tilt-x) * 4deg))
-      rotateZ(-10deg)
-      translateY(calc(var(--hero-tilt-y) * 10px))
-      scale(0.9);
-    opacity: 0.92;
-    animation: sideCardLeft 10s ease-in-out infinite;
-  }
-
-  .VPHero .image-container::after {
-    right: -5%;
-    bottom: 6%;
-    background-image: url('/screenshots/03 lap-calendar.jpg');
-    transform:
-      rotateX(calc(2deg + var(--hero-tilt-y) * 2deg))
-      rotateY(calc(-18deg + var(--hero-tilt-x) * 4deg))
-      rotateZ(8deg)
-      translateY(calc(var(--hero-tilt-y) * -8px))
-      scale(0.86);
-    opacity: 0.88;
-    animation: sideCardRight 11s ease-in-out infinite;
-  }
-
-  .VPHero .image-src {
-    border-radius: 18px !important;
-    border: 1px solid rgba(255, 255, 255, 0.16) !important;
-    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.34) !important;
-    transform:
-      rotateX(calc(7deg + var(--hero-tilt-y) * -3deg))
-      rotateY(calc(-10deg + var(--hero-tilt-x) * 7deg))
-      rotateZ(1deg)
-      translate3d(calc(var(--hero-tilt-x) * 6px), calc(var(--hero-tilt-y) * -10px), 0) !important;
-    transition:
-      transform 0.5s cubic-bezier(0.4, 0, 0.2, 1),
-      box-shadow 0.5s ease !important;
-    position: relative !important;
-    z-index: 2;
-    will-change: transform;
-  }
-
-  .VPHero .image-src:hover {
-    box-shadow: 0 40px 110px rgba(0, 0, 0, 0.42) !important;
-  }
-
-  .VPHero .name {
-    font-size: 3.8rem !important;
-    line-height: 1 !important;
-  }
-
-  .VPHero .text {
-    font-size: 2.35rem !important;
-    line-height: 1.08 !important;
-  }
+@media (max-width: 1024px) {
+  .bh-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-@media (max-width: 959px) {
-  .VPHero .text {
-    font-size: 2.1rem !important;
-    line-height: 1.12 !important;
-  }
-
-  .VPHero .tagline {
-    font-size: 0.98rem;
-  }
-
-  .VPHero .name::before {
-    width: 3.6rem;
-    height: 3.6rem;
-    flex-basis: 3.6rem;
-    border-radius: 0.9rem;
-  }
-
-  .VPHero .image::before {
-    inset: 6% 4% -4% 6%;
-    transform: rotate(-2deg);
-  }
-
-  .VPHero .image::after,
-  .VPHero .image-container::before,
-  .VPHero .image-container::after {
-    display: none;
-  }
-
-  .VPFeatures {
-    padding-top: 1rem !important;
-  }
+@media (max-width: 700px) {
+  .bh-hero { min-height: 480px; }
+  .bh-hero-inner { max-width: 88%; padding: 2rem 1.4rem; }
+  .bh-grid { grid-template-columns: 1fr; }
 }
-
-@keyframes heroFloat {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  50% { transform: translate3d(0, 18px, 0); }
-}
-
-@keyframes sideCardLeft {
-  0%, 100% { transform: rotateX(10deg) rotateY(22deg) rotateZ(-10deg) translateY(0) scale(0.9); }
-  50% { transform: rotateX(8deg) rotateY(18deg) rotateZ(-8deg) translateY(10px) scale(0.92); }
-}
-
-@keyframes sideCardRight {
-  0%, 100% { transform: rotateX(2deg) rotateY(-18deg) rotateZ(8deg) translateY(0) scale(0.86); }
-  50% { transform: rotateX(4deg) rotateY(-14deg) rotateZ(6deg) translateY(-8px) scale(0.88); }
-}
-
-@keyframes glowSweep {
-  0%, 100% { background-position: center, 140% 0; }
-  50% { background-position: center, -40% 0; }
-}
-
-/* Lightbox Styles */
-.lightbox-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 9999;
-  backdrop-filter: blur(8px);
-  cursor: zoom-out;
-  animation: fadeIn 0.3s ease;
-}
-
-.lightbox-img {
-  max-width: 90vw;
-  max-height: 90vh;
-  object-fit: contain;
-  box-shadow: 0 0 40px rgba(0,0,0,0.5);
-  transform-origin: center;
-  animation: zoomIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes zoomIn {
-  from { transform: scale(0.8); opacity: 0; }
-  to { transform: scale(1); opacity: 1; }
-}
-
-.close-btn {
-  position: absolute;
-  top: 20px;
-  right: 40px;
-  color: white;
-  font-size: 48px;
-  font-weight: 200;
-  cursor: pointer;
-  line-height: 1;
-  transition: transform 0.2s ease;
-}
-
-.close-btn:hover {
-  transform: scale(1.1);
-}
-
 </style>
-
-<div v-if="isZoomed" class="lightbox-overlay" @click="isZoomed = false">
-  <img :src="imgSrc" class="lightbox-img" />
-  <div class="close-btn">&times;</div>
-</div>
