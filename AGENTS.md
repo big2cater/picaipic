@@ -31,13 +31,15 @@ Current release line is **1.2.0** (public: Windows x64/ARM64 MSI + Linux amd64/a
 - Docs site (local): `pnpm --dir docs build`; deployed from `docs/` on main via `deploy-docs.yml` (manual trigger).
 
 ## After Every Task
-After meaningful work:
-- Record what actually changed (behavior, command, dependency, workflow) in a commit message that states it plainly.
-- Keep user-facing docs accurate: `docs/guide/` (getting-started, live-photo) and, when behavior ships, a new `docs/guide/release-notes/<version>.md` entry.
-- If a change is worth remembering, note it in the release notes for the current line rather than scattered agent docs.
+After meaningful work, run GROW (local, `.mex/` is not tracked — it stays on this machine):
+- Ground: state what behavior, command, dependency, or workflow actually changed.
+- Record: update `.mex/ROUTER.md` and the relevant `.mex/context/` files.
+- Orient: create or improve a `.mex/patterns/` runbook when the task can recur.
+- Write: bump `last_updated` on changed scaffold files; use `mex log` when rationale, risk, or follow-up matters. Keep user-facing docs (`docs/guide/`, release notes) accurate in the same pass.
 
 ## Navigation
-- Product state and recent history: `README.md` (EN) + `i18n/README.zh-CN.md`, plus per-version `docs/guide/release-notes/`.
-- User-facing feature guides live in `docs/guide/`; the VitePress site renders `docs/` (`docs/index.md` homepage, `docs/.vitepress/config.mts` sidebar).
-- ComfyUI integration: backend module `src-tauri/src/t_comfy.rs`, UI-format conversion in `src-vite/src/common/comfyConvert.js`, dialogs `ComfyWorkflowDialog.vue` / `ComfyRunDialog.vue`.
+At the start of every session, read `.mex/ROUTER.md` (local-only; restore from git history via `git archive <pre-cleanup-commit> .mex | tar -x -C .` if missing). It routes architecture, stack, conventions, decisions, setup, plugin-runtime, and recurring-task guidance.
+- User-facing docs: `docs/guide/` (getting-started / live-photo) + per-version `docs/guide/release-notes/`; the VitePress site renders `docs/` (homepage `docs/index.md`, sidebar `docs/.vitepress/config.mts`).
+- ComfyUI integration: backend `src-tauri/src/t_comfy.rs`, UI-format conversion in `src-vite/src/common/comfyConvert.js`, dialogs `ComfyWorkflowDialog.vue` / `ComfyRunDialog.vue`.
+- Release/updater plumbing: `tauri.conf.json` updater endpoint → `/releases/latest/download/latest.json` (four platforms; Windows entries merged by `release-windows.yml`), `.github/workflows/release.yml` + `release-windows.yml`.
 - Release/updater plumbing: `tauri.conf.json` updater endpoint + `latest.json` on GitHub Releases (four platforms; Windows entries are merged by `release-windows.yml`), `.github/workflows/release.yml` and `release-windows.yml`.
