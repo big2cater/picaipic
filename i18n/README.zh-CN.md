@@ -187,3 +187,7 @@ sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
 ## 开源协议
 
 GPL-3.0-or-later。详情请参阅 [LICENSE](../LICENSE)。
+
+PicAiPic 基于开源照片管理器 [Lap](https://github.com/julyx10/lap)（作者
+[julyx10](https://github.com/julyx10)，2024-2026，GPL-3.0-or-later）修改开发。
+上游项目启发了本应用所依赖的本地优先、文件夹即图库的产品模型。
