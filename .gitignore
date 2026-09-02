@@ -66,3 +66,24 @@ target-codex-*/
 favicon (8).ico
 picaipic-profile-screen.png
 scan-*.log
+
+# Internal dev docs (kept locally, removed from remote main)
+.mex/
+docs/superpowers/
+docs/review/
+docs/ai-plugin-*.md
+docs/comfyui-integration-status.md
+docs/guide/ai-plugin-development-roadmap.md
+docs/guide/ai-plugin-interface.md
+docs/guide/altclip-phase0-probe.md
+docs/guide/black-hole-idle-theme-design.md
+docs/guide/builtin-tools-roadmap.md
+docs/guide/clip-multilingual-fp32-vs-int8-report.json
+docs/guide/clip-vs-multilingual-v1-compare-report.json
+docs/guide/face-cluster-ann-plan.md
+docs/guide/fx-theme-runtime-compatibility.md
+docs/guide/library-scan-profiling.md
+docs/guide/plugin-runtime-status-2026-06-20.md
+docs/guide/siglip2-phase0-probe.md
+docs/guide/目前的开发情况.md
+docs/guide/picaipic-progress.md

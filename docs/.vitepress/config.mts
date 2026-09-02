@@ -34,24 +34,7 @@ export default defineConfig({
                 items: [
                     { text: 'Introduction', link: '/guide/introduction' },
                     { text: 'Getting Started', link: '/guide/getting-started' },
-                    { text: 'Live Photo / Motion Photo', link: '/guide/live-photo' },
-                    { text: 'AI Plugin Interface', link: '/guide/ai-plugin-interface' },
-                    { text: 'AI Plugin Roadmap', link: '/guide/ai-plugin-development-roadmap' },
-                    { text: 'AI Runtime Status', link: '/guide/plugin-runtime-status-2026-06-20' },
-                    { text: 'PicAiPic Progress', link: '/guide/picaipic-progress' }
-                ]
-            },
-            {
-                text: 'AI Plugins',
-                items: [
-                    { text: 'Current Status', link: '/ai-plugin-current-status' },
-                    { text: 'Contract v1', link: '/ai-plugin-contract-v1' },
-                    { text: 'Contract v1 Draft', link: '/ai-plugin-contract-v1-draft' },
-                    { text: 'Author Checklist', link: '/ai-plugin-author-checklist' },
-                    { text: 'E2E Regression 2026-06-30', link: '/ai-plugin-e2e-regression-2026-06-30' },
-                    { text: 'UI Verification 2026-06-30', link: '/ai-plugin-ui-verification-2026-06-30' },
-                    { text: 'Release Build 2026-06-30', link: '/release-build-2026-06-30' },
-                    { text: 'Stop State Fix 2026-06-30', link: '/ai-plugin-stop-state-fix-2026-06-30' }
+                    { text: 'Live Photo / Motion Photo', link: '/guide/live-photo' }
                 ]
             },
             {
