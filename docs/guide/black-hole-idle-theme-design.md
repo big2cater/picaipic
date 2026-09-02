@@ -1,20 +1,21 @@
 # 黑洞主题（Black Hole Idle Theme）设计文档
 
-> 状态：设计稿 **v1.4** 为基线；**2026-07-26 产品实现已收敛**（见下方「现状」）。
+> 状态：设计稿 **v1.4** 为基线；**2026-07-30 产品实现已收敛并完成跨 GPU 加固**（见下方「现状」）。
 > 范围：纯前端（`src-vite`）；扫描/RAW 与审查加固见 `docs/guide/目前的开发情况.md`。
 > 目标（v1.4）：设置主题选「黑洞」启用宇宙氛围；主窗最大化且空闲后启动照片区引力特效。
 > 背景渲染：**宇宙场景 + 中心黑洞**（WebGL 解析近似 + Canvas2D 降级）。
 > **无独立「黑洞主题」开关**；主题列表现为：**默认 / 复古 / CMYK / 黑洞 / 赛博朋克**（赛博朋克见独立 design/spec）。
 > 历史 v1.3 实施计划（`blackHoleMode` 布尔）已删除，勿再实现。
 >
-> ### 2026-07-26 现状（以代码为准，覆盖文内部分 v1.4 表述）
+> ### 2026-07-30 现状（以代码为准，覆盖文内部分 v1.4 表述）
 >
 > | 项 | v1.4 原稿 | 当前实现 |
 > |---|---|---|
 > | 空闲触发 | 15s | **6s**（`Home.vue` `useIdle(6000)`） |
 > | 照片特效主路径 | CSS `useGravityWarp` 刚体/多层 warp | **`PhotoVortexLayer` WebGL UV 透镜**（FragCoord 风格）；仅照片区；冻结可见缩略图纹理 |
 > | 卡片是否消失 | 不消失、可回弹 | 漩涡层可把纹理吸进视界；**退出 idle/最大化立即恢复网格** |
-> | CSS warp | 主路径 | 代码保留，GridView **未驱动** |
+> | CSS warp | 主路径 | WebGL 初始化/捕获/上传/上下文失败时由 GridView 驱动的逐卡片回退 |
+> | 跨 GPU | 未定义 | 捕获纹理和渲染画布钳到 `MAX_TEXTURE_SIZE` / `MAX_VIEWPORT_DIMS`；空捕获不隐藏网格 |
 > | 配色/强度 | v1.5：appearance 锁定 + `dynamicThemeIntensity` | 已落地 |
 > | Chrome | 未强调半透明 | TitleBar z-50；侧栏/顶栏玻璃；内容区 isolate |
 
@@ -62,7 +63,7 @@
 | 回弹 | 任意输入 / 退出最大化 / 阻塞 UI / **换离黑洞主题** → 立即清除 transform |
 | 引力生效 | **当前主题为黑洞** 且 **系统窗口最大化** 且 **空闲 6s** 且 网格可玩（见 §4） |
 | 平时（黑洞主题但未最大化/未空闲） | 宇宙+黑洞氛围慢转，不增长、不拉照片 |
-| 背景画质 | **默认 WebGL 解析近似**；失败/弱 GPU → **Canvas2D 宇宙+盘降级**；照片仍 CSS warp |
+| 背景/照片降级 | 背景 WebGL 失败 → **Canvas2D 宇宙+盘**；照片 WebGL/capture 失败 → **CSS 卡片螺旋**；两条降级相互独立 |
 | 阻塞 UI 时 | **不启引力**；宇宙背景仍可显示 |
 | 独立大图窗 | 大图窗不挂宇宙层；主窗按自身条件 |
 | 无障碍 | `prefers-reduced-motion: reduce` 时**不挂宇宙/不跑引力**（主题仍可显示为「黑洞」名，但无动效层） |
@@ -80,8 +81,10 @@ graph TD
     B --> G{gravityActive?}
     G -->|否| BG[宇宙慢转 黑洞不增长 不拉照片]
     G -->|是| ACT[引力: R_event/R_inf 扩张]
-    ACT --> W[useGravityWarp: GridView .bh-card]
-    W -->|输入/退出最大化/换主题/阻塞| R[clear transform]
+    ACT --> V[PhotoVortexLayer: capture + WebGL UV vortex]
+    V -->|GL/capture/upload/context fail| W[useGravityWarp CSS fallback]
+    V -->|输入/退出最大化/换主题/阻塞| R[show live grid]
+    W -->|输入/退出最大化/换主题/阻塞| R
     ACT -->|document.hidden| P[暂停 rAF + 有效时间]
     T -->|prefers-reduced-motion| X[不挂宇宙层]
 ```
@@ -93,12 +96,13 @@ graph TD
 | `settings.lightTheme` / `darkTheme` | 主题索引（**0 默认 / 1 复古 / 2 CMYK / 3 黑洞**） | 窗口/空闲 |
 | `isBlackHoleTheme`（派生） | `currentThemeId === 3`（见 §3.3） | 持久第二开关 |
 | `uiStore.isMaximized` | **主窗**系统最大化真相源 | 特效；其它窗口最大化 |
-| `TitleBar`（共享） | **仅** `viewName==='Home'` 时同步 `uiStore.isMaximized` | Settings / ImageEditor 写 store |
+| `Home.vue` + `TitleBar`（共享） | Home 启动/resize 直接查询原生最大化；TitleBar 完成 maximize/unmaximize 后回读；仅 Home 同步 store | Settings / ImageEditor 写 store |
 | `setTheme` / `app.css` themes | 精简菜单对应的 Daisy 名；黑洞用约定 base chrome | 画宇宙 |
 | `useIdle` | 全局 **6s** 空闲（Home 生命周期；原 15s） | 是否最大化 |
 | `BlackHoleBackground` | **宇宙 + 黑洞** WebGL/Canvas2D；读 appearance 调色；半径增长 | 改卡片 DOM |
-| `useGravityWarp` | 消费 `gravityActive` + 半径；节流写 `.bh-card` | 拼 inputStack / isSwitchingLibrary |
-| `GridView` | warp 查询根 | 组装全局 UI 条件 |
+| `PhotoVortexLayer` | 捕获可见缩略图；按 GPU 上限降采样；WebGL UV 漩涡；报告失败 | 组装全局 gate |
+| `useGravityWarp` | 仅在照片 WebGL 路径失败时消费 `gravityActive` + 半径，节流写 `.bh-card` | 拼 inputStack / isSwitchingLibrary |
+| `GridView` | 选择 PhotoVortex 主路径或 CSS fallback；只在成功捕获后隐藏 live grid | 组装全局 UI 条件 |
 | `Thumbnail` | **外层 root** `.bh-card` | 自己算引力 |
 | `Home.vue` | 主题=黑洞时挂背景；组装 `gravityActive` | 不进 `App.vue` |
 | `Settings` 外观区 | **仅**配色模式 + **精简主题下拉**（无黑洞 toggle） | 长主题列表 |
@@ -120,14 +124,14 @@ graph TD
 
 ## 3. 新增 / 修改的状态
 
-### 3.1 `src-vite/src/stores/uiStore.js`（**新增字段，当前不存在**）
+### 3.1 `src-vite/src/stores/uiStore.js`（已落地）
 
-现状：`isMaximized` **不在** `uiStore`。现有两处均为**组件本地** `ref`：
+当前 `uiStore.isMaximized` 表示 Home 主窗原生最大化状态；下列本地 ref 仍只负责各自窗口控件：
 
 - `TitleBar.vue` 内部 `const isMaximized = ref(false)`（按钮图标用）
 - `MediaViewer.vue` 内部另一个 `isMaximized`（独立桌面窗控件，**本功能永不接入**）
 
-本期 plan：
+当前状态形状：
 
 ```js
 state: () => ({
@@ -138,7 +142,7 @@ state: () => ({
 ```
 
 - **语义**：只表示 **Home 主窗**是否系统最大化。
-- **写入方**：仅 §3.2 约束下的 Home `TitleBar`（或等价的仅-Home 同步逻辑）。
+- **写入方**：Home 自己在挂载/resize 时查询原生窗口；Home `TitleBar` 同步按钮和系统操作结果。其它窗口禁止写该 store。
 - **不要**与下列概念混用：
   - `configStore` / `settings` 路径上的 **`imageViewer.isFullScreen`**（`configStore.js`：大图窗原生全屏，**非本功能**）
   - `MediaViewer` 组件**本地** `isMaximized` ref（独立桌面窗控件）
@@ -158,10 +162,10 @@ state: () => ({
 实现规则：
 
 1. **守卫**：仅当 `props.viewName === 'Home'` 时调用 `uiStore.setMaximized(...)`；其它 `viewName` 可继续用组件内本地 `ref` 画最大化/还原图标，但**禁止**写 store。
-2. **点击切换**（现有 `toggleMaximizeWindow`）：Home 分支在 `isMaximized()` then 分支里同步 store + 本地 ref。
-3. **非平凡必做（当前代码没有）**——须**新增**，不能只靠点击：
-   - **挂载初始化**：`await getCurrentWindow().isMaximized()` → 本地 ref；若 `viewName==='Home'` 再 `setMaximized`。
-   - **窗口事件监听**：`onResized` 和/或平台 maximize/unmaximize 相关 API，在系统快捷键、双击标题栏、任务栏操作后再次 `isMaximized()` 并同步。
+2. **点击切换**：先等待原生 maximize/unmaximize 完成，再调用 `isMaximized()` 回读真实状态，不乐观写反值。
+3. **非点击路径**：
+   - **挂载初始化**：Home 和 TitleBar 都查询 `getCurrentWindow().isMaximized()`；Home 是特效 gate 的直接拥有者。
+   - **窗口事件监听**：Home 与 TitleBar 的 `onResized` 再次查询原生状态，覆盖系统快捷键、双击标题栏和任务栏操作。
    - **卸载**：取消 listen，避免 Settings 短窗泄漏监听（即使守卫不写 store，监听器也只应在需要同步的实例上挂，或统一挂但写 store 仍受 `viewName` 守卫）。
 4. 推荐实现形状：`const syncMaximizedToStore = viewName === 'Home'`；所有读窗状态的路径都走同一 `applyMaximizedState(bool)`，内部 `localRef = bool; if (sync) uiStore.setMaximized(bool)`。
 
@@ -209,7 +213,7 @@ function isBlackHoleTheme(
 ### 3.4 Settings UI
 
 - **删除**外观区独立「黑洞主题」toggle 行（若分支已加，实现时去掉）。
-- 主题 `<select>` 仅 4 项（i18n `theme_options_light` / `theme_options_dark` 各 4 字符串）。
+- 主题 `<select>` 5 项（i18n `theme_options_light` / `theme_options_dark`：默认、复古、CMYK、黑洞、赛博朋克）。
 - 可选：选中黑洞时在主题行下方一行 hint（原 `black_hole_theme_hint` 文案可复用）。
 
 ---
@@ -402,19 +406,19 @@ filter    = blur > 0 ? blur(Npx) : none
 
 | 文件 | 改动 |
 |---|---|
-| `src-vite/src/common/utils.ts` | `setTheme` 表改为 4 项；导出 `isBlackHoleTheme` / 主题常量（可选） |
+| `src-vite/src/common/utils.ts` | 主题 id 0–4；`isBlackHoleTheme` / `isCyberpunkTheme`；旧主题/强度 migration |
 | `src-vite/src/assets/app.css` | `themes:` 白名单可收紧到实际用到的 Daisy 名 |
-| `src-vite/src/locales/en.json` / `zh.json` | `theme_options_*` 仅 4 项；黑洞 hint；**去掉**独立 toggle 长文案或改作 hint |
+| `src-vite/src/locales/en.json` / `zh.json` | 5 个主题选项；黑洞/赛博朋克 hint；动态强度文案 |
 | `src-vite/src/stores/configStore.js` | 迁移：废 `blackHoleMode`；clamp 旧 theme 索引；setter 不变语义 |
-| `src-vite/src/views/Settings.vue` | 主题下拉 4 项；**删除**黑洞 toggle；可选 hint |
+| `src-vite/src/views/Settings.vue` | 主题下拉 5 项；FX 双钉/appearance lock；动态强度 |
 | `src-vite/src/main.js` | 可删 `settings-blackHoleMode-changed` 监听（若已加） |
 | `src-vite/src/composables/useIdle.ts` | 空闲检测 |
 | `src-vite/src/composables/useGravityWarp.ts` | 卡片 warp |
 | `src-vite/src/components/BlackHoleBackground.vue` | **宇宙+黑洞** WebGL + Canvas2D；appearance 调色 |
 | `src-vite/src/stores/uiStore.js` | `isMaximized` + `setMaximized` |
-| `src-vite/src/components/TitleBar.vue` | 仅 Home 写 maximize |
-| `src-vite/src/views/Home.vue` | `isBlackHoleTheme` 挂载；组装 `gravityActive` |
-| `src-vite/src/components/GridView.vue` | inject warp |
+| `src-vite/src/components/TitleBar.vue` | 仅 Home 写 maximize；等待原生操作后回读 |
+| `src-vite/src/views/Home.vue` | 原生 maximize 直接同步；组装 `gravityActive` / `cpFxActive` |
+| `src-vite/src/components/GridView.vue` | PhotoVortex 主路径 + CSS warp fallback；PhotoGlitch + CSS glitch fallback |
 | `src-vite/src/components/Thumbnail.vue` | 外层 `.bh-card` |
 | `App.vue` / `Content.vue` | 不作宇宙宿主 |
 | `MediaViewer.vue` | 不改本地 maximize |
@@ -482,10 +486,12 @@ settings.general.black_hole_theme_reduced_motion
 | # | 步骤 | 期望 |
 |---|---|---|
 | 1 | 主题=默认 | 无宇宙层、无 transform |
-| 2 | 主题菜单仅 4 项 | 默认/复古/CMYK/黑洞 |
+| 2 | 主题菜单 5 项 | 默认/复古/CMYK/黑洞/赛博朋克 |
 | 3 | 选黑洞，非最大化 | 宇宙+中心黑洞慢转；照片不动 |
 | 3b | 黑洞 + 切换明亮/暗黑 | UI chrome 与宇宙调色都变；仍可读 _(已被 v1.5 替代：v1.5 把 appearance select 在黑洞下 `disabled`，不再允许切换)_ |
 | 3c | WebGL 失败 | Canvas2D 宇宙降级，不崩 |
+| 3d | 高 DPI / 集显纹理上限较低 | 照片捕获与 viewport 自动降采样，不超过 GPU 上限 |
+| 3e | 照片 WebGL/捕获/上传/上下文失败 | 网格保持可见并启动 CSS 卡片螺旋，不只剩背景 |
 | 4 | 黑洞+最大化后立即操作 | 仅氛围，无引力 |
 | 5 | 黑洞+最大化静止 ≥6s | 照片区 WebGL 漩涡（PhotoVortex）；动鼠标回弹网格 |
 | 6 | 引力中输入 | 立即回弹 |
@@ -498,6 +504,7 @@ settings.general.black_hole_theme_reduced_motion
 | 12 | 虚拟列表进出 | 无残留 transform |
 | 13 | reduced-motion | 无宇宙动效层 |
 | 14 | 旧配置 themeId 很大 | 启动后钳到默认，不白屏 |
+| 15 | 旧配置无/非法 dynamicThemeIntensity | 迁移为 1；显式 0 保持关闭 |
 
 ---
 
@@ -520,4 +527,4 @@ settings.general.black_hole_theme_reduced_motion
 - 背景升级为真逐像素测地线 raytracer（GARGANTUA 级，需更强 GPU 预算）
 - 照片近事件视界真透镜扭曲（替代/增强 §6 CSS warp）
 - 黑洞位置：正中 / 跟随鼠标 / 角落
-- 低性能设备自动分级（更细于本期 Canvas2D 降级档）
+- 更细粒度的性能分级（当前已有背景 Canvas2D 与照片 CSS 两级失败回退）

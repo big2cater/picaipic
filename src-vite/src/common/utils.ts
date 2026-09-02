@@ -71,6 +71,7 @@ export function migrateThemeSettings(settings: {
   lightTheme?: number;
   darkTheme?: number;
   blackHoleMode?: boolean;
+  dynamicThemeIntensity?: number;
 }): void {
   if (!settings || typeof settings !== 'object') return;
   if (settings.blackHoleMode) {
@@ -83,22 +84,28 @@ export function migrateThemeSettings(settings: {
   }
   settings.lightTheme = clampThemeId(settings.lightTheme);
   settings.darkTheme = clampThemeId(settings.darkTheme);
+  const intensity = Number(settings.dynamicThemeIntensity);
+  if (!Number.isFinite(intensity) || ![0, 0.5, 1, 1.5].includes(intensity)) {
+    settings.dynamicThemeIntensity = 1;
+  }
 }
 
 // migrateThemeSettings: keep blackHoleMode migration; clamp already uses new max
 
 export function setTheme(appearance: number, themeId: number) {
   const id = clampThemeId(themeId);
+  const root = document.documentElement;
+  root.classList.toggle('is-cyberpunk', id === THEME_ID.CYBERPUNK);
   // BH + CP: force dark; do NOT index LIGHT/DARK arrays (length 4 only)
   if (id === THEME_ID.BLACK_HOLE || id === THEME_ID.CYBERPUNK) {
-    document.documentElement.setAttribute('data-theme', 'dark');
+    root.setAttribute('data-theme', 'dark');
     return;
   }
   const theme =
     appearance === 0
       ? LIGHT_THEMES[id] || 'light'
       : DARK_THEMES[id] || 'dark';
-  document.documentElement.setAttribute('data-theme', theme);
+  root.setAttribute('data-theme', theme);
 }
 
 /// get the select options for a dropdown list

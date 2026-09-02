@@ -12,6 +12,7 @@ use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
@@ -39,8 +40,33 @@ const PLUGIN_RUNTIME_PROBE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const PLUGIN_TASK_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const PLUGIN_TASK_SUCCESS_TTL_SECS: u64 = 24 * 60 * 60;
 const PLUGIN_TASK_TMP_TTL_SECS: u64 = 15 * 60;
+const PLUGIN_PACKAGE_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const PLUGIN_PACKAGE_MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const PLUGIN_DIRECTORY_REMOVE_RETRIES: usize = 3;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+static PLUGIN_PACKAGE_MUTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+struct PluginPackageMutationGuard;
+
+impl PluginPackageMutationGuard {
+    fn acquire() -> Result<Self, String> {
+        PLUGIN_PACKAGE_MUTATION_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                "Another plugin install or uninstall is already in progress".to_string()
+            })?;
+        Ok(Self)
+    }
+}
+
+impl Drop for PluginPackageMutationGuard {
+    fn drop(&mut self) {
+        PLUGIN_PACKAGE_MUTATION_ACTIVE.store(false, Ordering::Release);
+    }
+}
 
 enum SetupCommandOutcome {
     Completed,
@@ -1219,17 +1245,36 @@ fn plugin_home_dir() -> Result<PathBuf, String> {
 
 fn default_plugin_store_dir() -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
-    let base_dir = std::env::current_dir()
-        .map_err(|e| format!("Failed to resolve current directory: {}", e))?;
+    {
+        let base_dir = std::env::current_dir()
+            .map_err(|e| format!("Failed to resolve current directory: {}", e))?;
+        return Ok(base_dir.join("picaipic-local"));
+    }
 
     #[cfg(not(debug_assertions))]
-    let base_dir = std::env::current_exe()
-        .map_err(|e| format!("Failed to resolve executable path: {}", e))?
-        .parent()
-        .map(PathBuf::from)
-        .ok_or_else(|| "Executable path has no parent directory".to_string())?;
+    {
+        let app_data_store = t_config::get_app_data_dir()?.join("picaipic-local");
+        let legacy_store = std::env::current_exe()
+            .map_err(|e| format!("Failed to resolve executable path: {}", e))?
+            .parent()
+            .map(|parent| parent.join("picaipic-local"))
+            .ok_or_else(|| "Executable path has no parent directory".to_string())?;
 
-    Ok(base_dir.join("picaipic-local"))
+        Ok(default_plugin_store_dir_for_paths(
+            &app_data_store,
+            &legacy_store,
+        ))
+    }
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn default_plugin_store_dir_for_paths(app_data_store: &Path, legacy_store: &Path) -> PathBuf {
+    // Preserve existing installs without silently hiding large plugin models/runtimes.
+    if legacy_store.is_dir() && !app_data_store.exists() {
+        legacy_store.to_path_buf()
+    } else {
+        app_data_store.to_path_buf()
+    }
 }
 
 fn resolve_plugin_store_dir() -> Result<PathBuf, String> {
@@ -1475,25 +1520,6 @@ fn plugin_writable_roots(
     Ok(roots)
 }
 
-/// Quietly remove a directory if it exists. Does NOT create it (unlike the
-/// `plugin_data_dir` / `plugin_runtime_root` helpers which call
-/// `create_dir_all`). Returns the stringified path if the directory existed
-/// and was removed, or `None` otherwise. The `root` guard must be the plugin
-/// store root so we never delete outside it.
-fn remove_existing_dir(path: &Path, root: &Path) -> Option<String> {
-    if !path.exists() || !path.is_dir() {
-        return None;
-    }
-    if !is_path_inside(path, root) {
-        return None;
-    }
-    let display = path.to_string_lossy().to_string();
-    match fs::remove_dir_all(path) {
-        Ok(()) => Some(display),
-        Err(_) => None,
-    }
-}
-
 fn program_data_plugin_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -1636,7 +1662,63 @@ fn save_registry(registry: &AiPluginRegistry) -> Result<(), String> {
     let path = registry_path()?;
     let content = serde_json::to_string_pretty(registry)
         .map_err(|e| format!("Failed to serialize plugin registry: {}", e))?;
-    fs::write(path, content).map_err(|e| format!("Failed to write plugin registry: {}", e))
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Plugin registry path has no parent directory".to_string())?;
+    let temp = parent.join(format!(".plugin-registry-{}.tmp", Uuid::new_v4()));
+    let backup = parent.join(format!(".plugin-registry-{}.bak", Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| format!("Failed to create plugin registry temp file: {}", e))?;
+    if let Err(error) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = fs::remove_file(&temp);
+        return Err(format!(
+            "Failed to write plugin registry temp file: {}",
+            error
+        ));
+    }
+    drop(file);
+
+    let had_previous = path.exists();
+    if had_previous {
+        if let Err(error) = fs::rename(&path, &backup) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!(
+                "Failed to stage previous plugin registry: {}",
+                error
+            ));
+        }
+    }
+    if let Err(error) = fs::rename(&temp, &path) {
+        let restore_error = if had_previous {
+            fs::rename(&backup, &path).err()
+        } else {
+            None
+        };
+        let _ = fs::remove_file(&temp);
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "Failed to replace plugin registry: {}; rollback also failed: {}",
+                error, restore_error
+            ),
+            None => format!("Failed to replace plugin registry: {}", error),
+        });
+    }
+    if had_previous {
+        if let Err(error) = fs::remove_file(&backup) {
+            eprintln!(
+                "Updated plugin registry but could not remove backup '{}': {}",
+                backup.display(),
+                error
+            );
+        }
+    }
+    Ok(())
 }
 
 fn profile_state_key(plugin_id: &str, profile_id: &str) -> String {
@@ -3184,7 +3266,19 @@ fn collect_child_manifests(root: &Path, manifests: &mut Vec<PathBuf>, seen: &mut
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // Interrupted install/uninstall transactions keep recoverable hidden
+        // directories here. They are never discoverable plugins.
+        let hidden_transaction_dir = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.starts_with(".installing-")
+                    || name.starts_with(".replacing-")
+                    || name.starts_with(".uninstalling-")
+                    || name.starts_with(".package-snapshot-")
+            })
+            .unwrap_or(false);
+        if path.is_dir() && !hidden_transaction_dir {
             push_manifest_if_exists(manifests, seen, path);
         }
     }
@@ -4810,6 +4904,29 @@ async fn runtime_auth_token(state: &AiPluginRuntimeState, plugin_id: &str) -> Op
         .map(|runtime| runtime.auth_token.clone())
 }
 
+/// Resolve the bearer token for a plugin call, failing closed.
+///
+/// A host-managed runtime always has a token the host generated, so a missing one
+/// means the tracked process is gone (crashed, exited, or reaped) and the manifest
+/// port may now be answered by something else. Sending the payload unauthenticated
+/// in that state would hand staged input paths, output dirs, and task parameters to
+/// whatever owns the port, so the call is refused. Externally managed services (a
+/// manifest `baseUrl` with no `startCommand`) have no host-issued token by design
+/// and remain the only path allowed to call without one.
+async fn resolve_plugin_auth_token(
+    state: &AiPluginRuntimeState,
+    plugin_id: &str,
+    entry: &PluginEntry,
+) -> Result<String, String> {
+    match runtime_auth_token(state, plugin_id).await {
+        Some(token) if !token.is_empty() => Ok(token),
+        _ if entry.start_command.is_none() => Ok(String::new()),
+        _ => Err(format!(
+            "Refusing to call plugin '{plugin_id}' without its runtime auth token; start the plugin again"
+        )),
+    }
+}
+
 fn plugin_port(entry: &PluginEntry) -> Option<u16> {
     if let Some(port) = entry.default_port {
         return Some(port);
@@ -5226,9 +5343,11 @@ impl InputStagingReport {
 /// When default input staging is enabled (all supported platforms unless
 /// `PICAIPIC_DISABLE_PLUGIN_SANDBOX=1`), this rewrites every JSON `path` field
 /// in `inputs` that points outside the plugin's writable directories. The file is
-/// materialized under `<task_dir>/inputs/` via **hardlink when same-volume**
-/// (Phase 2), otherwise a full **copy**, and the path is replaced with the
+/// materialized under `<task_dir>/inputs/` and the path is replaced with the
 /// staged location. Files already inside a writable dir are left untouched.
+///
+/// Materialization is a **copy** unless `allow_hardlink` is set, which the caller
+/// only does for manifests declaring `writeSourceFiles`; see `stage_one_file`.
 ///
 /// Returns the (possibly rewritten) inputs value plus a diagnostics report.
 /// Staging materialize failures fail closed (error, no original external path left).
@@ -5237,6 +5356,7 @@ fn stage_input_files_for_sandbox(
     task_id: &str,
     inputs: &Value,
     writable_dirs: &[PathBuf],
+    allow_hardlink: bool,
 ) -> Result<(Value, InputStagingReport), String> {
     if !t_sandbox::sandbox_enabled() {
         return Ok((inputs.clone(), InputStagingReport::disabled()));
@@ -5253,7 +5373,13 @@ fn stage_input_files_for_sandbox(
     };
     // Fail closed: a staging error must not leave the original external path in
     // the payload (that would silently bypass default confinement).
-    stage_paths_in_value(&mut staged, &staging_dir, writable_dirs, &mut report)?;
+    stage_paths_in_value(
+        &mut staged,
+        &staging_dir,
+        writable_dirs,
+        &mut report,
+        allow_hardlink,
+    )?;
     write_input_staging_report(&staging_dir, &report);
     Ok((staged, report))
 }
@@ -5274,6 +5400,7 @@ fn stage_paths_in_value(
     staging_dir: &Path,
     writable_dirs: &[PathBuf],
     report: &mut InputStagingReport,
+    allow_hardlink: bool,
 ) -> Result<(), String> {
     match value {
         Value::Object(map) => {
@@ -5289,19 +5416,20 @@ fn stage_paths_in_value(
                     if inside_writable || inside_staging {
                         report.skipped_writable = report.skipped_writable.saturating_add(1);
                     } else {
-                        let (staged_path, bytes, method) = stage_one_file(&path, staging_dir)?;
+                        let (staged_path, bytes, method) =
+                            stage_one_file(&path, staging_dir, allow_hardlink)?;
                         map["path"] = Value::String(staged_path.to_string_lossy().into_owned());
                         report.record_materialized(bytes, method);
                     }
                 }
             }
             for (_, child) in map.iter_mut() {
-                stage_paths_in_value(child, staging_dir, writable_dirs, report)?;
+                stage_paths_in_value(child, staging_dir, writable_dirs, report, allow_hardlink)?;
             }
         }
         Value::Array(items) => {
             for item in items.iter_mut() {
-                stage_paths_in_value(item, staging_dir, writable_dirs, report)?;
+                stage_paths_in_value(item, staging_dir, writable_dirs, report, allow_hardlink)?;
             }
         }
         _ => {}
@@ -5312,7 +5440,13 @@ fn stage_paths_in_value(
 /// Materialize a single file into the staging directory, generating a unique
 /// name to avoid collisions when multiple inputs share a basename.
 ///
-/// Preference order (Phase 2):
+/// `allow_hardlink` must be true **only** when the manifest declares
+/// `writeSourceFiles`. A hardlink shares the source inode, so a plugin that writes
+/// back to its input path would silently rewrite the user's original media.
+/// Everything else gets a real copy, which keeps the library file immutable even
+/// though the staged path is inside the plugin's writable roots.
+///
+/// With `allow_hardlink`, the order is (Phase 2):
 /// 1. `hard_link` — near zero-copy when source and staging share a volume
 /// 2. `copy` — fallback for cross-volume paths or hardlink errors
 ///
@@ -5320,6 +5454,7 @@ fn stage_paths_in_value(
 fn stage_one_file(
     src: &Path,
     staging_dir: &Path,
+    allow_hardlink: bool,
 ) -> Result<(PathBuf, u64, StageMaterializeMethod), String> {
     let stem = src
         .file_stem()
@@ -5339,23 +5474,26 @@ fn stage_one_file(
 
     let logical_bytes = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
 
-    // Prefer hardlink: same-volume, no extra disk for large video/RAW.
-    // If the link fails (cross-device, permissions, FAT, etc.), fall back to copy.
-    match fs::hard_link(src, &candidate) {
-        Ok(()) => Ok((candidate, logical_bytes, StageMaterializeMethod::Hardlink)),
-        Err(_hardlink_err) => {
-            // Clean a partial hardlink target if the OS left one (rare).
-            let _ = fs::remove_file(&candidate);
-            let bytes = fs::copy(src, &candidate).map_err(|e| {
-                format!(
-                    "Failed to stage input '{}' (hardlink and copy both failed; last copy error: {})",
-                    src.display(),
-                    e
-                )
-            })?;
-            Ok((candidate, bytes, StageMaterializeMethod::Copy))
+    // Hardlink only for capabilities the user explicitly allowed to edit sources
+    // in place; it is near zero-copy for large video/RAW but shares the inode.
+    if allow_hardlink {
+        match fs::hard_link(src, &candidate) {
+            Ok(()) => return Ok((candidate, logical_bytes, StageMaterializeMethod::Hardlink)),
+            Err(_hardlink_err) => {
+                // Clean a partial hardlink target if the OS left one (rare).
+                let _ = fs::remove_file(&candidate);
+            }
         }
     }
+
+    let bytes = fs::copy(src, &candidate).map_err(|e| {
+        format!(
+            "Failed to stage input '{}' (copying into the staging directory failed: {})",
+            src.display(),
+            e
+        )
+    })?;
+    Ok((candidate, bytes, StageMaterializeMethod::Copy))
 }
 
 fn cleanup_failed_plugin_task_dir(state: &AiPluginTaskState) {
@@ -6056,6 +6194,19 @@ fn plugin_runtime_network_granted(
         .unwrap_or(false))
 }
 
+fn resolve_runtime_network_grant(result: Result<bool, String>, plugin_id: &str) -> bool {
+    match result {
+        Ok(granted) => granted,
+        Err(error) => {
+            eprintln!(
+                "Failed to read runtime network permission for '{}'; denying network: {}",
+                plugin_id, error
+            );
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub fn list_trusted_publishers() -> Result<Vec<AiPluginTrustedPublisher>, String> {
     let registry = load_registry()?;
@@ -6479,16 +6630,231 @@ fn prepare_installed_plugin_storage(manifest: &AiPluginManifest) -> Result<(), S
     Ok(())
 }
 
-fn read_plugin_package_file(zip_path: &Path, entry_path: &str) -> Result<String, String> {
-    let file = fs::File::open(zip_path).map_err(|e| {
+/// Private storage roots that an install may create. Keep this list separate
+/// from shared runtimes and external model bindings: those outlive one plugin.
+fn plugin_private_storage_roots(plugin_id: &str) -> Result<Vec<PathBuf>, String> {
+    let store = plugin_store_dir()?;
+    Ok(plugin_private_storage_roots_in(&store, plugin_id))
+}
+
+fn plugin_private_storage_roots_in(store: &Path, plugin_id: &str) -> Vec<PathBuf> {
+    [
+        "plugin-data",
+        "plugin-cache",
+        "plugin-outputs",
+        "plugin-runtimes",
+    ]
+    .into_iter()
+    .map(|subdir| store.join(subdir).join(plugin_id))
+    .collect()
+}
+
+/// Remove only storage roots this install created. Existing plugin data must
+/// survive a failed code replacement.
+fn cleanup_new_plugin_storage(roots: &[(PathBuf, bool)]) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|(_, existed)| !*existed)
+        .filter_map(|(path, _)| match remove_dir_all_with_retries(path) {
+            Ok(()) => None,
+            Err(error) => Some(error),
+        })
+        .collect()
+}
+
+fn remove_dir_all_with_retries(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut last_error = None;
+    for attempt in 0..=PLUGIN_DIRECTORY_REMOVE_RETRIES {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < PLUGIN_DIRECTORY_REMOVE_RETRIES {
+                    std::thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{}: {}",
+        path.display(),
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown remove error".to_string())
+    ))
+}
+
+fn restore_directory_from_backup(destination: &Path, backup: Option<&Path>) -> Result<(), String> {
+    if destination.exists() {
+        remove_dir_all_with_retries(destination).map_err(|error| {
+            format!(
+                "Failed to remove incomplete plugin directory '{}': {}",
+                destination.display(),
+                error
+            )
+        })?;
+    }
+    if let Some(backup) = backup {
+        fs::rename(backup, destination).map_err(|error| {
+            format!(
+                "Failed to restore previous plugin from '{}' to '{}': {}",
+                backup.display(),
+                destination.display(),
+                error
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Put the new directory in place without ever deleting the old one first.
+/// The returned backup remains available until every post-install step commits.
+fn replace_plugin_directory(
+    staged_destination: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let previous = if destination.exists() {
+        fs::rename(destination, backup).map_err(|error| {
+            format!(
+                "Failed to stage existing plugin '{}' for replacement: {}",
+                destination.display(),
+                error
+            )
+        })?;
+        Some(backup.to_path_buf())
+    } else {
+        None
+    };
+
+    if let Err(error) = fs::rename(staged_destination, destination) {
+        let restore_error = restore_directory_from_backup(destination, previous.as_deref()).err();
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "Failed to move plugin into install directory '{}': {}; rollback also failed: {}",
+                destination.display(),
+                error,
+                restore_error
+            ),
+            None => format!(
+                "Failed to move plugin into install directory '{}': {}; previous plugin was restored",
+                destination.display(),
+                error
+            ),
+        });
+    }
+
+    Ok(previous)
+}
+
+struct StagedPluginDirectory {
+    original: PathBuf,
+    staged: PathBuf,
+}
+
+fn stage_plugin_directory_for_uninstall(
+    path: &Path,
+    root: &Path,
+    plugin_id: &str,
+) -> Result<Option<StagedPluginDirectory>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_dir() || !is_path_inside(path, root) {
+        return Err(format!(
+            "Refusing to stage plugin path outside managed storage: {}",
+            path.display()
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Plugin path has no parent for uninstall staging: {}",
+            path.display()
+        )
+    })?;
+    let staged = parent.join(format!(".uninstalling-{}-{}", plugin_id, Uuid::new_v4()));
+    fs::rename(path, &staged).map_err(|error| {
+        format!(
+            "Failed to stage plugin path '{}' for uninstall: {}",
+            path.display(),
+            error
+        )
+    })?;
+    Ok(Some(StagedPluginDirectory {
+        original: path.to_path_buf(),
+        staged,
+    }))
+}
+
+fn restore_staged_plugin_directories(staged: &[StagedPluginDirectory]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for entry in staged.iter().rev() {
+        if !entry.staged.exists() {
+            continue;
+        }
+        if let Err(error) = fs::rename(&entry.staged, &entry.original) {
+            errors.push(format!(
+                "{} -> {}: {}",
+                entry.staged.display(),
+                entry.original.display(),
+                error
+            ));
+        }
+    }
+    errors
+}
+
+fn remove_staged_plugin_directories(staged: Vec<StagedPluginDirectory>) -> Vec<String> {
+    staged
+        .into_iter()
+        .filter_map(|entry| remove_dir_all_with_retries(&entry.staged).err())
+        .collect()
+}
+
+struct PluginPackageSnapshot {
+    path: PathBuf,
+}
+
+impl Drop for PluginPackageSnapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn create_plugin_package_snapshot(
+    source: &Path,
+    plugin_root: &Path,
+) -> Result<PluginPackageSnapshot, String> {
+    fs::create_dir_all(plugin_root)
+        .map_err(|e| format!("Failed to create plugin directory: {}", e))?;
+    let path = plugin_root.join(format!(".package-snapshot-{}.zip", Uuid::new_v4()));
+    let mut input = fs::File::open(source).map_err(|e| {
         format!(
             "Failed to open plugin package '{}': {}",
-            zip_path.display(),
+            source.display(),
             e
         )
     })?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to create plugin package snapshot: {}", e))?;
+    if let Err(error) = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all()) {
+        let _ = fs::remove_file(&path);
+        return Err(format!("Failed to snapshot plugin package: {}", error));
+    }
+    Ok(PluginPackageSnapshot { path })
+}
+
+fn read_plugin_package_file<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entry_path: &str,
+) -> Result<String, String> {
     let expected = entry_path.replace('\\', "/");
     for index in 0..archive.len() {
         let mut entry = archive
@@ -6640,8 +7006,8 @@ fn verify_package_signature(
     }
 }
 
-fn validate_package_manifest_file_list(
-    zip_path: &Path,
+fn validate_package_manifest_file_list<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     top_level: &str,
     package_manifest: &AiPluginPackageManifest,
 ) -> Result<(), String> {
@@ -6663,16 +7029,6 @@ fn validate_package_manifest_file_list(
     if expected.is_empty() {
         return Err("Package manifest file list is empty".to_string());
     }
-
-    let file = fs::File::open(zip_path).map_err(|e| {
-        format!(
-            "Failed to open plugin package '{}': {}",
-            zip_path.display(),
-            e
-        )
-    })?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
 
     for index in 0..archive.len() {
         let mut entry = archive
@@ -6728,17 +7084,35 @@ fn validate_package_manifest_file_list(
     Ok(())
 }
 
-fn unpack_plugin_package(zip_path: &Path, destination: &Path) -> Result<(), String> {
-    let file = fs::File::open(zip_path).map_err(|e| {
-        format!(
-            "Failed to open plugin package '{}': {}",
-            zip_path.display(),
-            e
-        )
-    })?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|e| format!("Failed to read plugin package zip: {}", e))?;
+fn validate_package_unpacked_size_budget(
+    package_manifest: &AiPluginPackageManifest,
+) -> Result<(), String> {
+    let mut total = 0u64;
+    for file in &package_manifest.files {
+        if file.size > PLUGIN_PACKAGE_MAX_FILE_BYTES {
+            return Err(format!(
+                "Plugin package file '{}' exceeds the {} GiB unpacked-file limit",
+                file.path,
+                PLUGIN_PACKAGE_MAX_FILE_BYTES / 1024 / 1024 / 1024
+            ));
+        }
+        total = total
+            .checked_add(file.size)
+            .ok_or_else(|| "Plugin package declared file sizes overflow u64".to_string())?;
+        if total > PLUGIN_PACKAGE_MAX_UNPACKED_BYTES {
+            return Err(format!(
+                "Plugin package exceeds the {} GiB unpacked-size limit",
+                PLUGIN_PACKAGE_MAX_UNPACKED_BYTES / 1024 / 1024 / 1024
+            ));
+        }
+    }
+    Ok(())
+}
 
+fn unpack_plugin_package<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    destination: &Path,
+) -> Result<(), String> {
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -6785,6 +7159,7 @@ fn unpack_plugin_package(zip_path: &Path, destination: &Path) -> Result<(), Stri
 pub fn install_ai_plugin_package(
     package_path: String,
 ) -> Result<AiPluginPackageInstallResult, String> {
+    let _mutation_guard = PluginPackageMutationGuard::acquire()?;
     let zip_path = PathBuf::from(&package_path);
     if !zip_path.exists() {
         return Err(format!("Plugin package does not exist: {}", package_path));
@@ -6798,10 +7173,12 @@ pub fn install_ai_plugin_package(
         return Err("Plugin package must be a .zip file".to_string());
     }
 
-    let file = fs::File::open(&zip_path).map_err(|e| {
+    let plugin_root = plugin_home_dir()?;
+    let snapshot = create_plugin_package_snapshot(&zip_path, &plugin_root)?;
+    let file = fs::File::open(&snapshot.path).map_err(|e| {
         format!(
-            "Failed to open plugin package '{}': {}",
-            zip_path.display(),
+            "Failed to open plugin package snapshot '{}': {}",
+            snapshot.path.display(),
             e
         )
     })?;
@@ -6816,8 +7193,6 @@ pub fn install_ai_plugin_package(
             top_levels.insert(top_level);
         }
     }
-    drop(archive);
-
     if top_levels.len() != 1 {
         return Err("Plugin package must contain exactly one top-level directory".to_string());
     }
@@ -6829,8 +7204,8 @@ pub fn install_ai_plugin_package(
 
     let manifest_entry = format!("{}/{}", top_level, MANIFEST_FILE_NAME);
     let package_entry = format!("{}/picaipic.package.json", top_level);
-    let manifest_content = read_plugin_package_file(&zip_path, &manifest_entry)?;
-    let package_content = read_plugin_package_file(&zip_path, &package_entry)?;
+    let manifest_content = read_plugin_package_file(&mut archive, &manifest_entry)?;
+    let package_content = read_plugin_package_file(&mut archive, &package_entry)?;
     let manifest =
         serde_json::from_str::<AiPluginManifest>(manifest_content.trim_start_matches('\u{feff}'))
             .map_err(|e| format!("Failed to parse package plugin manifest: {}", e))?;
@@ -6870,7 +7245,8 @@ pub fn install_ai_plugin_package(
         ));
     }
 
-    validate_package_manifest_file_list(&zip_path, &top_level, &package_manifest)?;
+    validate_package_unpacked_size_budget(&package_manifest)?;
+    validate_package_manifest_file_list(&mut archive, &top_level, &package_manifest)?;
 
     // Verify package signature and check the publisher trust store.
     let registry_for_sig = load_registry()?;
@@ -6891,16 +7267,13 @@ pub fn install_ai_plugin_package(
         ));
     }
 
-    let plugin_root = plugin_home_dir()?;
     let destination = plugin_root.join(&manifest.id);
     let staging_root = plugin_root.join(format!(".installing-{}-{}", manifest.id, Uuid::new_v4()));
-    fs::create_dir_all(&plugin_root)
-        .map_err(|e| format!("Failed to create plugin directory: {}", e))?;
     fs::create_dir_all(&staging_root)
         .map_err(|e| format!("Failed to create plugin staging directory: {}", e))?;
 
     let install_result = (|| -> Result<(AiPluginManifest, PluginValidationReport), String> {
-        unpack_plugin_package(&zip_path, &staging_root)?;
+        unpack_plugin_package(&mut archive, &staging_root)?;
         let staged_destination = staging_root.join(&manifest.id);
         let staged_manifest_path = staged_destination.join(MANIFEST_FILE_NAME);
         let staged_manifest = read_manifest(&staged_manifest_path)?;
@@ -6930,39 +7303,116 @@ pub fn install_ai_plugin_package(
         }
     };
 
-    if destination.exists() {
-        if !is_path_inside(&destination, &plugin_root) {
-            let _ = fs::remove_dir_all(&staging_root);
-            return Err(format!(
-                "Refusing to replace plugin outside user plugin directory: {}",
-                destination.display()
-            ));
-        }
-        if let Err(error) = fs::remove_dir_all(&destination) {
-            let _ = fs::remove_dir_all(&staging_root);
-            return Err(format!(
-                "Failed to replace existing plugin '{}': {}",
-                destination.display(),
-                error
-            ));
-        }
-    }
-    let staged_destination = staging_root.join(&manifest.id);
-    if let Err(error) = fs::rename(&staged_destination, &destination) {
+    if destination.exists() && !is_path_inside(&destination, &plugin_root) {
         let _ = fs::remove_dir_all(&staging_root);
         return Err(format!(
-            "Failed to move plugin into install directory '{}': {}",
-            destination.display(),
-            error
+            "Refusing to replace plugin outside user plugin directory: {}",
+            destination.display()
         ));
     }
+    let staged_destination = staging_root.join(&manifest.id);
+    let backup = plugin_root.join(format!(".replacing-{}-{}", manifest.id, Uuid::new_v4()));
+    let previous = match replace_plugin_directory(&staged_destination, &destination, &backup) {
+        Ok(previous) => previous,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+    };
     let _ = fs::remove_dir_all(&staging_root);
 
-    prepare_installed_plugin_storage(&installed_manifest)?;
-    let storage = plugin_storage_summary(&installed_manifest.id, &destination);
-    let model_files = plugin_model_file_summaries(&installed_manifest)?;
+    let storage_roots = match plugin_private_storage_roots(&installed_manifest.id) {
+        Ok(roots) => roots
+            .into_iter()
+            .map(|path| {
+                let existed = path.exists();
+                (path, existed)
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            let rollback_error =
+                restore_directory_from_backup(&destination, previous.as_deref()).err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "Failed to resolve plugin storage after install: {}; rollback also failed: {}",
+                    error, rollback_error
+                ),
+                None => error,
+            });
+        }
+    };
 
-    let registry = register_ai_plugin_path(normalize_path(&destination))?;
+    if let Err(error) = prepare_installed_plugin_storage(&installed_manifest) {
+        let storage_errors = cleanup_new_plugin_storage(&storage_roots);
+        let rollback_error = restore_directory_from_backup(&destination, previous.as_deref()).err();
+        return Err(match (rollback_error, storage_errors.is_empty()) {
+            (Some(rollback_error), _) => format!(
+                "Failed to prepare installed plugin storage: {}; rollback also failed: {}",
+                error, rollback_error
+            ),
+            (None, false) => format!(
+                "Failed to prepare installed plugin storage: {}; cleanup also failed: {}",
+                error,
+                storage_errors.join("; ")
+            ),
+            (None, true) => error,
+        });
+    }
+
+    let storage = plugin_storage_summary(&installed_manifest.id, &destination);
+    let model_files = match plugin_model_file_summaries(&installed_manifest) {
+        Ok(model_files) => model_files,
+        Err(error) => {
+            let storage_errors = cleanup_new_plugin_storage(&storage_roots);
+            let rollback_error =
+                restore_directory_from_backup(&destination, previous.as_deref()).err();
+            return Err(match (rollback_error, storage_errors.is_empty()) {
+                (Some(rollback_error), _) => format!(
+                    "Failed to inspect installed plugin models: {}; rollback also failed: {}",
+                    error, rollback_error
+                ),
+                (None, false) => format!(
+                    "Failed to inspect installed plugin models: {}; cleanup also failed: {}",
+                    error,
+                    storage_errors.join("; ")
+                ),
+                (None, true) => error,
+            });
+        }
+    };
+
+    let registry = match register_ai_plugin_path(normalize_path(&destination)) {
+        Ok(registry) => registry,
+        Err(error) => {
+            let storage_errors = cleanup_new_plugin_storage(&storage_roots);
+            let rollback_error =
+                restore_directory_from_backup(&destination, previous.as_deref()).err();
+            return Err(match (rollback_error, storage_errors.is_empty()) {
+                (Some(rollback_error), _) => format!(
+                    "Failed to register installed plugin: {}; rollback also failed: {}",
+                    error, rollback_error
+                ),
+                (None, false) => format!(
+                    "Failed to register installed plugin: {}; cleanup also failed: {}",
+                    error,
+                    storage_errors.join("; ")
+                ),
+                (None, true) => error,
+            });
+        }
+    };
+
+    if let Some(backup) = previous {
+        if let Err(error) = remove_dir_all_with_retries(&backup) {
+            eprintln!(
+                "Installed plugin '{}' but could not remove replacement backup '{}': {}",
+                installed_manifest.id,
+                backup.display(),
+                error
+            );
+        }
+    }
+
     Ok(AiPluginPackageInstallResult {
         plugin_id: installed_manifest.id,
         version: installed_manifest.version,
@@ -7010,6 +7460,7 @@ pub async fn uninstall_ai_plugin(
     mode: Option<String>,
     state: tauri::State<'_, AiPluginRuntimeState>,
 ) -> Result<AiPluginUninstallResult, String> {
+    let _mutation_guard = PluginPackageMutationGuard::acquire()?;
     let plugin_id = plugin_id.trim().to_string();
     if plugin_id.is_empty() {
         return Err("Plugin id is required".to_string());
@@ -7051,39 +7502,70 @@ pub async fn uninstall_ai_plugin(
 
     let _ = stop_ai_plugin_runtime(plugin_id.clone(), &state).await;
 
-    if let Err(error) = fs::remove_dir_all(&target) {
-        return Err(format!(
-            "Failed to remove installed plugin '{}': {}",
-            target.display(),
-            error
-        ));
+    let normalized = normalize_path(&target);
+    let mut registry = load_registry()?;
+    let store = plugin_store_dir()?;
+    let mut staged_paths = Vec::new();
+
+    match stage_plugin_directory_for_uninstall(&target, &plugin_root, &plugin_id) {
+        Ok(Some(staged)) => staged_paths.push(staged),
+        Ok(None) => return Err(format!("Installed plugin was not found: {}", plugin_id)),
+        Err(error) => return Err(error),
     }
 
-    let normalized = normalize_path(&target);
-
-    // In "code_and_data" mode, additionally remove per-plugin data, cache,
-    // outputs, and plugin-private runtimes. Shared runtimes are intentionally
-    // never deleted because other plugins may depend on them.
-    let mut removed_extra_paths: Vec<String> = Vec::new();
+    // Keep data paths recoverable until registry persistence succeeds. Shared
+    // runtimes remain outside this list and are never touched by uninstall.
     if purge_data {
-        let store = plugin_store_dir()?;
-        for sub in [
-            "plugin-data",
-            "plugin-cache",
-            "plugin-outputs",
-            "plugin-runtimes",
-        ] {
-            let dir = store.join(sub).join(&plugin_id);
-            if let Some(removed) = remove_existing_dir(&dir, &store) {
-                removed_extra_paths.push(removed);
+        for path in plugin_private_storage_roots_in(&store, &plugin_id) {
+            match stage_plugin_directory_for_uninstall(&path, &store, &plugin_id) {
+                Ok(Some(staged)) => staged_paths.push(staged),
+                Ok(None) => {}
+                Err(error) => {
+                    let restore_errors = restore_staged_plugin_directories(&staged_paths);
+                    return Err(if restore_errors.is_empty() {
+                        error
+                    } else {
+                        format!(
+                            "{}; rollback also failed: {}",
+                            error,
+                            restore_errors.join("; ")
+                        )
+                    });
+                }
             }
         }
     }
 
-    let mut registry = load_registry()?;
     registry.registered_paths.retain(|path| path != &normalized);
     clear_plugin_registry_state(&mut registry, &plugin_id);
-    save_registry(&registry)?;
+    if let Err(error) = save_registry(&registry) {
+        let restore_errors = restore_staged_plugin_directories(&staged_paths);
+        return Err(if restore_errors.is_empty() {
+            format!(
+                "Failed to update plugin registry; installed files were restored: {}",
+                error
+            )
+        } else {
+            format!(
+                "Failed to update plugin registry: {}; rollback also failed: {}",
+                error,
+                restore_errors.join("; ")
+            )
+        });
+    }
+
+    let mut removed_extra_paths = Vec::new();
+    for entry in &staged_paths[1..] {
+        removed_extra_paths.push(normalize_path(&entry.original));
+    }
+    let cleanup_errors = remove_staged_plugin_directories(staged_paths);
+    if !cleanup_errors.is_empty() {
+        eprintln!(
+            "Plugin '{}' was unregistered, but uninstall cleanup could not remove staged paths: {}",
+            plugin_id,
+            cleanup_errors.join("; ")
+        );
+    }
 
     Ok(AiPluginUninstallResult {
         plugin_id,
@@ -8611,11 +9093,12 @@ pub async fn start_ai_plugin(
         let _ = writeln!(start_log, "sandbox: {}", sandbox.summary());
     }
 
-    // Phase 3–5: network decision/apply + landlock/env log lines.
-    // Default true so plugins without a stored grant are not over-blocked when
-    // the experimental flag is on without explicit user deny.
-    let runtime_network_granted =
-        plugin_runtime_network_granted(&plugin_id, &manifest).unwrap_or(true);
+    // Phase 3–5: network decision/apply + landlock/env log lines. Registry
+    // failures deny network so enforcement never becomes fail-open.
+    let runtime_network_granted = resolve_runtime_network_grant(
+        plugin_runtime_network_granted(&plugin_id, &manifest),
+        &plugin_id,
+    );
     let network_sandbox =
         t_sandbox::apply_network_sandbox(&plugin_id, &command_path, runtime_network_granted);
     let _ = writeln!(start_log, "{}", network_sandbox.summary());
@@ -8957,13 +9440,19 @@ async fn stop_ai_plugin_runtime(
 
     let runtime_port = runtime.as_ref().map(|runtime| runtime.port);
     let runtime_base_url = runtime.as_ref().map(|runtime| runtime.base_url.clone());
+    let had_managed_runtime = runtime.is_some();
     if let Some(mut runtime) = runtime {
         terminate_child_process_tree(&mut runtime.child).await;
     }
 
     if let Some(entry) = &entry {
-        if let Some(port) = runtime_port.or_else(|| plugin_port(entry)) {
-            kill_processes_listening_on_port(port).await;
+        // Only reap a port the host actually spawned. Falling back to the manifest
+        // port for an unmanaged plugin would kill unrelated processes that happen to
+        // listen there, e.g. when uninstalling a plugin that was never started.
+        if had_managed_runtime {
+            if let Some(port) = runtime_port.or_else(|| plugin_port(entry)) {
+                kill_processes_listening_on_port(port).await;
+            }
         }
         return wait_for_plugin_stopped(plugin_id, entry, runtime_base_url).await;
     }
@@ -9138,9 +9627,7 @@ async fn invoke_ai_plugin_capability_inner(
     let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(state)).await else {
         return Err("Plugin has no baseUrl".to_string());
     };
-    let token = runtime_auth_token(state, &plugin_id)
-        .await
-        .unwrap_or_default();
+    let token = resolve_plugin_auth_token(state, &plugin_id, entry).await?;
 
     let capability = find_plugin_capability(&manifest, &capability_id)?;
     ensure_runtime_probe_gate(
@@ -9176,8 +9663,22 @@ async fn invoke_ai_plugin_capability_inner(
         Some(&manifest),
         [PathBuf::from(&output_dir), task_dir.clone()],
     )?;
-    let (inputs, staging_report) =
-        stage_input_files_for_sandbox(&plugin_id, &task_id, &request.inputs, &writable_dirs)?;
+    // Hardlink staging shares the source inode, so a plugin writing back to its
+    // input would rewrite the user's photo. Only allow it when the manifest
+    // declares `writeSourceFiles`, i.e. the user granted in-place source edits.
+    let allow_hardlink = manifest
+        .permissions
+        .as_ref()
+        .and_then(|value| value.get("writeSourceFiles"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (inputs, staging_report) = stage_input_files_for_sandbox(
+        &plugin_id,
+        &task_id,
+        &request.inputs,
+        &writable_dirs,
+        allow_hardlink,
+    )?;
     let now = Utc::now().to_rfc3339();
     let result_policy = request
         .result_policy
@@ -9477,9 +9978,7 @@ pub async fn cancel_ai_plugin_task(
         Ok((_manifest_path, manifest)) => {
             if let Some(entry) = manifest.entry.as_ref() {
                 if let Some(base_url) = plugin_base_url(&plugin_id, entry, Some(&state)).await {
-                    let token = runtime_auth_token(&state, &plugin_id)
-                        .await
-                        .unwrap_or_default();
+                    let token = resolve_plugin_auth_token(&state, &plugin_id, entry).await?;
                     Ok((base_url, token))
                 } else {
                     Err("Plugin has no baseUrl".to_string())
@@ -9559,20 +10058,25 @@ pub async fn get_ai_plugin_task(
                         if let Some(base_url) =
                             plugin_base_url(&plugin_id, entry, Some(&state)).await
                         {
-                            let token = runtime_auth_token(&state, &plugin_id)
-                                .await
-                                .unwrap_or_default();
-                            let output_dir = PathBuf::from(&task.output_dir);
-                            match query_plugin_task_once(
-                                &base_url,
-                                &task_id,
-                                &token,
-                                &mut task,
-                                &output_dir,
-                            )
-                            .await
-                            {
-                                Ok(value) => plugin_status = Some(value),
+                            // Fail closed the same way as capability invocation: a
+                            // lost runtime token must not turn the task query into an
+                            // anonymous request to whatever now owns the port.
+                            match resolve_plugin_auth_token(&state, &plugin_id, entry).await {
+                                Ok(token) => {
+                                    let output_dir = PathBuf::from(&task.output_dir);
+                                    match query_plugin_task_once(
+                                        &base_url,
+                                        &task_id,
+                                        &token,
+                                        &mut task,
+                                        &output_dir,
+                                    )
+                                    .await
+                                    {
+                                        Ok(value) => plugin_status = Some(value),
+                                        Err(error) => plugin_status_error = Some(error),
+                                    }
+                                }
                                 Err(error) => plugin_status_error = Some(error),
                             }
                         } else {
@@ -9599,6 +10103,149 @@ pub async fn get_ai_plugin_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_package_mutations_are_process_serialized() {
+        let first = PluginPackageMutationGuard::acquire().unwrap();
+        let second = PluginPackageMutationGuard::acquire().unwrap_err();
+        assert!(second.contains("already in progress"), "{second}");
+        drop(first);
+        PluginPackageMutationGuard::acquire().unwrap();
+    }
+
+    #[test]
+    fn new_plugin_store_defaults_to_app_data_independent_of_install_path() {
+        let root = rollback_fixture_root("default-store-app-data");
+        let app_data_store = root.join("app-data").join("picaipic-local");
+        let install_store = root
+            .join("Program Files")
+            .join("PicAiPic")
+            .join("picaipic-local");
+
+        assert_eq!(
+            default_plugin_store_dir_for_paths(&app_data_store, &install_store),
+            app_data_store
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_legacy_plugin_store_remains_visible_until_migrated() {
+        let root = rollback_fixture_root("default-store-legacy");
+        let app_data_store = root.join("app-data").join("picaipic-local");
+        let install_store = root.join("installed").join("picaipic-local");
+        fs::create_dir_all(&install_store).unwrap();
+
+        assert_eq!(
+            default_plugin_store_dir_for_paths(&app_data_store, &install_store),
+            install_store
+        );
+
+        fs::create_dir_all(&app_data_store).unwrap();
+        assert_eq!(
+            default_plugin_store_dir_for_paths(&app_data_store, &install_store),
+            app_data_store
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn rollback_fixture_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-plugin-{}-{}", name, Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn replace_plugin_directory_restores_previous_plugin_when_move_fails() {
+        let root = rollback_fixture_root("replace-rollback");
+        let destination = root.join("plugin");
+        let staged = root.join("staged-plugin");
+        let backup = root.join("backup-plugin");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("version.txt"), "old").unwrap();
+        // This missing staged path forces the final move to fail after the
+        // old directory was already staged as a backup.
+
+        let error = replace_plugin_directory(&staged, &destination, &backup).unwrap_err();
+        assert!(error.contains("previous plugin was restored"), "{error}");
+        assert_eq!(
+            fs::read_to_string(destination.join("version.txt")).unwrap(),
+            "old"
+        );
+        assert!(!backup.exists(), "backup should be restored to destination");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_uninstall_directories_restore_without_registry_commit() {
+        let root = rollback_fixture_root("uninstall-rollback");
+        let store = root.join("store");
+        let plugin_root = store.join("plugins");
+        let target = plugin_root.join("plugin");
+        let data = store.join("plugin-data").join("plugin");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        fs::write(target.join("code.txt"), "code").unwrap();
+        fs::write(data.join("state.txt"), "state").unwrap();
+
+        let mut staged = vec![
+            stage_plugin_directory_for_uninstall(&target, &plugin_root, "plugin")
+                .unwrap()
+                .unwrap(),
+        ];
+        staged.push(
+            stage_plugin_directory_for_uninstall(&data, &store, "plugin")
+                .unwrap()
+                .unwrap(),
+        );
+
+        assert!(!target.exists());
+        assert!(!data.exists());
+        assert!(restore_staged_plugin_directories(&staged).is_empty());
+        assert_eq!(fs::read_to_string(target.join("code.txt")).unwrap(), "code");
+        assert_eq!(fs::read_to_string(data.join("state.txt")).unwrap(), "state");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_storage_roots_are_scoped_to_the_selected_store() {
+        let root = rollback_fixture_root("private-roots");
+        let roots = plugin_private_storage_roots_in(&root, "plugin");
+        assert_eq!(roots.len(), 4);
+        assert!(roots.iter().all(|path| is_path_inside(path, &root)));
+        assert!(roots.contains(&root.join("plugin-data").join("plugin")));
+        assert!(roots.contains(&root.join("plugin-runtimes").join("plugin")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_ignores_interrupted_plugin_transaction_directories() {
+        let root = rollback_fixture_root("transaction-discovery");
+        let live = root.join("plugin");
+        let backup = root.join(".replacing-plugin-id");
+        let uninstalling = root.join(".uninstalling-plugin-id");
+        for path in [&live, &backup, &uninstalling] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(
+                path.join(MANIFEST_FILE_NAME),
+                r#"{"id":"plugin","name":"Plugin","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        }
+
+        let mut manifests = Vec::new();
+        let mut seen = HashSet::new();
+        collect_child_manifests(&root, &mut manifests, &mut seen);
+        assert_eq!(manifests, vec![live.join(MANIFEST_FILE_NAME)]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn is_path_inside_rejects_parent_dir_escape_when_missing() {
@@ -9705,8 +10352,15 @@ mod tests {
             staging_dir: Some(normalize_path(&staging)),
             ..InputStagingReport::default()
         };
-        stage_paths_in_value(&mut inputs, &staging, &[writable.clone()], &mut report)
-            .expect("staging should succeed");
+        // `allow_hardlink = true` mirrors a manifest declaring `writeSourceFiles`.
+        stage_paths_in_value(
+            &mut inputs,
+            &staging,
+            &[writable.clone()],
+            &mut report,
+            true,
+        )
+        .expect("staging should succeed");
 
         assert_eq!(report.staged_files, 1);
         assert_eq!(report.staged_bytes, 11);
@@ -9743,7 +10397,7 @@ mod tests {
         fs::write(&external_file, b"0123456789abcdef").unwrap();
 
         let (staged, bytes, method) =
-            stage_one_file(&external_file, &staging).expect("stage_one_file");
+            stage_one_file(&external_file, &staging, true).expect("stage_one_file");
         assert_eq!(method, StageMaterializeMethod::Hardlink);
         assert_eq!(bytes, 16);
         assert!(staged.exists());
@@ -9756,6 +10410,35 @@ mod tests {
             let b = fs::metadata(&staged).unwrap().ino();
             assert_eq!(a, b, "hardlink should share inode");
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_staging_copies_unless_source_writes_are_allowed() {
+        let root = std::env::temp_dir().join(format!("picaipic-stage-copy-{}", Uuid::new_v4()));
+        let external = root.join("library");
+        let staging = root.join("staging");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        let external_file = external.join("photo.jpg");
+        fs::write(&external_file, b"original-bytes").unwrap();
+
+        let (staged, bytes, method) =
+            stage_one_file(&external_file, &staging, false).expect("stage_one_file");
+        assert_eq!(method, StageMaterializeMethod::Copy);
+        assert_eq!(bytes, 14);
+        assert_eq!(fs::read(&staged).unwrap(), b"original-bytes");
+
+        // Simulate a plugin writing back to its input path: the library file must be
+        // untouched because the staged copy has its own inode. Under the old
+        // unconditional hardlink this silently rewrote the user's photo.
+        fs::write(&staged, b"plugin-overwrote-its-input").unwrap();
+        assert_eq!(
+            fs::read(&external_file).unwrap(),
+            b"original-bytes",
+            "a staged copy must not alias the user's original media"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -9776,7 +10459,7 @@ mod tests {
             enabled: true,
             ..InputStagingReport::default()
         };
-        let err = stage_paths_in_value(&mut inputs, &staging_as_file, &[], &mut report)
+        let err = stage_paths_in_value(&mut inputs, &staging_as_file, &[], &mut report, false)
             .expect_err("staging into a non-directory must fail closed");
         assert!(
             err.contains("Failed to stage input"),
@@ -9829,7 +10512,7 @@ mod tests {
             staging_dir: Some(normalize_path(&staging)),
             ..InputStagingReport::default()
         };
-        stage_paths_in_value(&mut inputs, &staging, &[], &mut report).expect("staging");
+        stage_paths_in_value(&mut inputs, &staging, &[], &mut report, true).expect("staging");
         write_input_staging_report(&staging, &report);
 
         assert_eq!(report.staged_files, 1);
@@ -9953,6 +10636,97 @@ mod tests {
                     .to_string_lossy()
                     .contains("shared-runtimes\\python312-cpu")
         );
+    }
+
+    fn test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn package_manifest_rejects_declared_missing_file() {
+        let present = b"print('ok')";
+        let zip_bytes = test_zip(&[("test-plugin/a.py", present)]);
+        let mut archive = ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(present);
+        let manifest = AiPluginPackageManifest {
+            files: vec![
+                AiPluginPackageFile {
+                    path: "a.py".to_string(),
+                    size: present.len() as u64,
+                    sha256: format!("{:X}", hasher.finalize()),
+                },
+                AiPluginPackageFile {
+                    path: "missing.py".to_string(),
+                    size: 1,
+                    sha256: "00".repeat(32),
+                },
+            ],
+            ..AiPluginPackageManifest::default()
+        };
+
+        let error = validate_package_manifest_file_list(&mut archive, "test-plugin", &manifest)
+            .unwrap_err();
+        assert!(error.contains("missing.py"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn package_manifest_rejects_excessive_unpacked_size() {
+        let manifest = AiPluginPackageManifest {
+            files: vec![AiPluginPackageFile {
+                path: "model.bin".to_string(),
+                size: PLUGIN_PACKAGE_MAX_FILE_BYTES + 1,
+                sha256: "00".repeat(32),
+            }],
+            ..AiPluginPackageManifest::default()
+        };
+        let error = validate_package_unpacked_size_budget(&manifest).unwrap_err();
+        assert!(
+            error.contains("unpacked-file limit"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn package_snapshot_is_stable_when_source_is_replaced() {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-package-snapshot-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("plugin.zip");
+        fs::write(&source, test_zip(&[("test-plugin/value.txt", b"signed-a")])).unwrap();
+
+        let snapshot = create_plugin_package_snapshot(&source, &root).unwrap();
+        let mut archive = ZipArchive::new(fs::File::open(&snapshot.path).unwrap()).unwrap();
+        fs::write(
+            &source,
+            test_zip(&[("test-plugin/value.txt", b"tampered-b")]),
+        )
+        .unwrap();
+
+        let content = read_plugin_package_file(&mut archive, "test-plugin/value.txt").unwrap();
+        assert_eq!(content, "signed-a");
+
+        drop(archive);
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_network_registry_error_fails_closed() {
+        assert!(!resolve_runtime_network_grant(
+            Err("registry unreadable".to_string()),
+            "test-plugin"
+        ));
+        assert!(resolve_runtime_network_grant(Ok(true), "test-plugin"));
+        assert!(!resolve_runtime_network_grant(Ok(false), "test-plugin"));
     }
 
     /// Build a minimal manifest matching the one signed by `sign_plugin.py`

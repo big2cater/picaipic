@@ -33,7 +33,8 @@ if "%EXIT_CODE%"=="0" (
   echo Main EXE: %ROOT_DIR%src-tauri\target\release\PicAiPic.exe
   echo Installers: %ROOT_DIR%src-tauri\target\release\bundle
   echo.
-  echo If Explorer still shows an old icon: close the app, restart Explorer, or reinstall from the new MSI/NSIS.
+  echo Before testing an installer, fully exit every running PicAiPic process.
+  echo For same-version MSI retests, uninstall the existing app first or bump the version.
 ) else (
   echo Build failed with exit code %EXIT_CODE%.
 )

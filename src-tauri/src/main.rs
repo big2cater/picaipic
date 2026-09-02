@@ -18,6 +18,7 @@ mod t_ai_prompt;
 mod t_cluster;
 mod t_cmds;
 mod t_color_match;
+mod t_comfy;
 mod t_common;
 mod t_config;
 mod t_dedup;
@@ -33,12 +34,14 @@ mod t_libraw;
 mod t_live_photo;
 mod t_lut;
 mod t_migration;
+mod t_output_temp;
 mod t_pasteboard;
 mod t_plugin;
 mod t_protocol;
 mod t_sandbox;
 mod t_sqlite;
 mod t_storage;
+mod t_transfer_recovery;
 mod t_utils;
 mod t_video;
 mod t_xmp;
@@ -114,6 +117,12 @@ async fn main() {
             // Create the database on startup
             if let Err(e) = t_sqlite::create_db() {
                 eprintln!("Failed to initialize database: {}", e);
+            }
+            if let Err(e) = t_transfer_recovery::recover_pending_outside_moves() {
+                eprintln!("Failed to recover pending outside-library moves: {}", e);
+            }
+            if let Err(e) = t_output_temp::recover_tracked_output_temps() {
+                eprintln!("Failed to recover tracked output temp files: {}", e);
             }
 
             // Initialize video HTTP server for Linux
@@ -427,6 +436,15 @@ async fn main() {
             t_cmds::dedup_get_overview,
             t_cmds::dedup_set_keep,
             t_cmds::dedup_delete_selected,
+            t_cmds::get_all_album_folders,
+            // ComfyUI server integration
+            t_comfy::comfy_test_connection,
+            t_comfy::comfy_object_info,
+            t_comfy::comfy_upload_image,
+            t_comfy::comfy_run_workflow,
+            t_comfy::comfy_cancel_run,
+            t_comfy::comfy_free_memory,
+            t_comfy::comfy_download_output,
             // video
             t_video::prepare_video,
             t_video::cancel_video_prepare,

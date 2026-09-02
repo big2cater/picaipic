@@ -14,7 +14,7 @@ edges:
     condition: when native/version constraints cause failures
   - target: context/plugin-runtime.md
     condition: when producing plugin packages
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 ---
 
 # Build Release Artifacts
@@ -31,17 +31,19 @@ App installers and plugin zips are separate products. App packaging bundles mode
 2. Align versions across `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-vite/package.json`, and docs package when cutting a release line.
 3. Install frontend dependencies with the lockfile and download required models/FFmpeg sidecars.
 4. Run frontend build, Rust format/check/tests, and plugin-host checks before packaging.
-5. Windows app local: use `scripts/package_windows.ps1 -CheckOnly`, then the packaging script/wrapper with the intended bundle target.
+5. Windows app local (PowerShell 7): use `pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\package_windows.ps1 -CheckOnly`, then `build-exe.bat` or `package_windows.ps1 -Clean`; the script closes build-tree and installed PicAiPic processes before packaging. Uninstall/bump the version before a same-version MSI retest.
 6. **Tagged Linux CI:** push annotated `v*` tag → `.github/workflows/release.yml` builds Linux targets and uploads deb/AppImage (and sigs) to a **draft** GitHub Release; finalize job writes/updates `latest.json` from release assets.
 7. **Windows CI onto that tag:** workflow_dispatch `.github/workflows/release-windows.yml` with `release_tag=vX.Y.Z` → MSI + sigs to the same draft release; merge Windows platforms into `latest.json`.
 8. Plugins: run `scripts/package_plugin.ps1 -All -FailOnWarnings`; for release, sign with the approved Ed25519 key and verify the real zip in the Rust path.
 9. Inspect artifact names, architectures, sizes, signatures/updater JSON, and bundled resource paths on the **Release** page (not only Actions).
 10. Smoke the installed/packaged application, including plugin trust/setup/start/smoke where the release contains plugin-host changes.
-11. **Publish** the draft release only when the owner is ready (private repos may keep drafts indefinitely).
+11. For dynamic-theme changes, test Black hole and Cyberpunk on a normal-DPI desktop plus a high-DPI/integrated-GPU laptop: background, primary photo effect or CSS fallback, activity clear, intensity 0, and Windows reduced-motion behavior.
+12. **Publish** the draft release only when the owner is ready (private repos may keep drafts indefinitely).
 
 For v1.1.0, treat the existing private draft as a verification target, not a published release. Update public website links and updater metadata only when the owner promotes the release.
 
 ## Gotchas
+- Installed host resources are relocatable: models, FFmpeg/FFprobe, and branding are resolved through Tauri's resource directory. Writable state must stay in Local AppData (or an explicit user-selected directory), never under the executable directory.
 - `cargo check` does not exercise final native linking or installer resource layout.
 - `src-tauri/resources` is ignored because models and FFmpeg sidecars are downloaded/generated. Keep the required packaged fallback `resources/branding/default-frame-logo.png` explicitly unignored and tracked; otherwise a clean CI checkout fails with `glob pattern resources/branding/* path not found` after native compilation.
 - Tauri updater signing and plugin Ed25519 signing are different key systems.
@@ -50,6 +52,9 @@ For v1.1.0, treat the existing private draft as a verification target, not a pub
 - Developer plugin directories or `.local.env` can make a packaged test pass for the wrong reason.
 - **Actions artifact quota:** a red job with `Failed to CreateArtifact` often means the binary already built; fix quota or ignore best-effort upload steps. Prefer Release assets for durable installers.
 - PR workflow `pr-build.yml` uses continue-on-error on artifact upload; do not treat missing PR artifacts as a failed product build.
+- **Same-version MSI cache:** rebuilding `1.1.0` does not create a new MSI upgrade identity. Double-clicking another same-version MSI can enter maintenance against cached state, so uninstall/bump the version before validating MSI; also close every old app process before judging the installed UI.
+- The generated local Tauri override is passed to the CLI from the repository layout and its commands execute from the repository root; use `pnpm --dir src-vite ...`. The base `tauri.conf.json` retains `../src-vite`, but copying that path into the generated override resolves incorrectly to `D:\ailab\src-vite` during this packaging flow.
+- Frontend theme assets are embedded in the Tauri executable; changing the install directory does not select another frontend bundle. If the ambient FX works but photo FX differs, diagnose native maximize, persisted intensity, reduced motion, WebGL limits/capture, and fallback behavior rather than resource paths.
 
 ## Verify
 - [ ] Frontend build, Rust fmt/check/tests, and plugin-host regression pass.
@@ -57,6 +62,8 @@ For v1.1.0, treat the existing private draft as a verification target, not a pub
 - [ ] Installer/updater/plugin signatures are produced and verified by their corresponding runtime.
 - [ ] Draft/published GitHub Release lists expected MSI/deb/AppImage (+ sigs) and coherent `latest.json`.
 - [ ] Packaged host opens, initializes DB/models, accesses a test library, and cleanly exits.
+- [ ] MSI administrative extraction contains the same current frontend chunk ids as the release executable when installer freshness is under investigation.
+- [ ] Dynamic themes pass desktop + high-DPI/integrated-GPU activation/fallback QA when affected.
 - [ ] Release plugin lifecycle is validated when affected.
 
 ## Debug

@@ -107,8 +107,18 @@ fn checkpoint_db(path: &Path) -> Result<(), String> {
 
     let run_checkpoint = |mode: &str| -> Result<(), String> {
         let pragma = format!("PRAGMA wal_checkpoint({})", mode);
-        conn.query_row(&pragma, [], |_| Ok(()))
-            .map_err(|e| format!("Failed to checkpoint database with mode {}: {}", mode, e))
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
+            .query_row(&pragma, [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("Failed to checkpoint database with mode {}: {}", mode, e))?;
+        if busy != 0 || log_frames != checkpointed_frames {
+            return Err(format!(
+                "Database checkpoint with mode {} did not complete (busy={}, log_frames={}, checkpointed_frames={})",
+                mode, busy, log_frames, checkpointed_frames
+            ));
+        }
+        Ok(())
     };
 
     if let Err(truncate_err) = run_checkpoint("TRUNCATE") {
@@ -119,113 +129,325 @@ fn checkpoint_db(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|e| format!("Failed to open '{}' for hashing: {}", path.display(), e))?;
+    let mut hasher = sha2::Sha256::default();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read '{}' for hashing: {}", path.display(), e))?;
+        if read == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buffer[..read]);
+    }
+    Ok(format!("{:x}", sha2::Digest::finalize(hasher)))
+}
+
+fn quick_check_db(path: &Path) -> Result<(), String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| {
+                format!(
+                    "Failed to open migrated database '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("Failed to set SQLite busy timeout: {}", e))?;
+    let result: String = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| format!("Failed to quick_check '{}': {}", path.display(), e))?;
+    if result.eq_ignore_ascii_case("ok") {
+        Ok(())
+    } else {
+        Err(format!(
+            "SQLite quick_check failed for '{}': {}",
+            path.display(),
+            result
+        ))
+    }
+}
+
+fn verify_database_copy(source: &Path, target: &Path) -> Result<(), String> {
+    let source_hash = hash_file(source)?;
+    let target_hash = hash_file(target)?;
+    if source_hash != target_hash {
+        return Err(format!(
+            "Database copy hash mismatch for '{}' -> '{}'",
+            source.display(),
+            target.display()
+        ));
+    }
+    quick_check_db(target)
+}
+
+fn migration_transfer_path(path: &Path, label: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("database");
+    parent.join(format!(
+        ".{file_name}.picaipic-{label}-{}.tmp",
+        Uuid::new_v4()
+    ))
+}
+
+#[derive(Debug)]
+struct StagedMigrationFile {
+    original: PathBuf,
+    staged: PathBuf,
+}
+
+fn stage_existing_file(path: &Path, label: &str) -> Result<Option<StagedMigrationFile>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let staged = migration_transfer_path(path, label);
+    fs::rename(path, &staged).map_err(|e| {
+        format!(
+            "Failed to stage '{}' for migration cleanup: {}",
+            path.display(),
+            e
+        )
+    })?;
+    Ok(Some(StagedMigrationFile {
+        original: path.to_path_buf(),
+        staged,
+    }))
+}
+
+fn restore_staged_files(staged_files: &[StagedMigrationFile]) {
+    for file in staged_files.iter().rev() {
+        if file.original.exists() {
+            continue;
+        }
+        if let Err(error) = fs::rename(&file.staged, &file.original) {
+            eprintln!(
+                "Failed to restore staged migration file '{}' from '{}': {}",
+                file.original.display(),
+                file.staged.display(),
+                error
+            );
+        }
+    }
+}
+
+fn cleanup_staged_files(staged_files: &[StagedMigrationFile]) {
+    for file in staged_files {
+        if let Err(error) = fs::remove_file(&file.staged) {
+            eprintln!(
+                "Failed to remove staged migration source '{}': {}",
+                file.staged.display(),
+                error
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MigratedTarget {
+    target: PathBuf,
+    previous_target: Option<PathBuf>,
+}
+
+fn copy_database_to_verified_target(
+    source: &Path,
+    target: &Path,
+) -> Result<MigratedTarget, String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create target database directory '{}': {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let tmp = migration_transfer_path(target, "migrate-copy");
+    if let Err(error) = fs::copy(source, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to copy database '{}' to '{}': {}",
+            source.display(),
+            target.display(),
+            error
+        ));
+    }
+    if let Err(error) = verify_database_copy(source, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+
+    // Clean up the verified copy if staging fails, otherwise a several-hundred-MB
+    // temp file stays behind in the user's chosen storage directory.
+    let previous_target = match stage_existing_file(target, "migrate-replace") {
+        Ok(previous_target) => previous_target,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&tmp, target) {
+        if let Some(previous) = previous_target.as_ref() {
+            let _ = fs::rename(&previous.staged, &previous.original);
+        }
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to finalize migrated database '{}': {}",
+            target.display(),
+            error
+        ));
+    }
+
+    Ok(MigratedTarget {
+        target: target.to_path_buf(),
+        previous_target: previous_target.map(|file| file.staged),
+    })
+}
+
+fn rollback_migrated_targets(targets: &[MigratedTarget]) {
+    for target in targets.iter().rev() {
+        if let Err(error) = fs::remove_file(&target.target) {
+            if target.target.exists() {
+                eprintln!(
+                    "Failed to remove migrated target '{}': {}",
+                    target.target.display(),
+                    error
+                );
+            }
+        }
+        if let Some(previous) = target.previous_target.as_ref() {
+            if let Err(error) = fs::rename(previous, &target.target) {
+                eprintln!(
+                    "Failed to restore previous target '{}' from '{}': {}",
+                    target.target.display(),
+                    previous.display(),
+                    error
+                );
+            }
+        }
+    }
+}
+
+fn cleanup_target_backups(targets: &[MigratedTarget]) {
+    for target in targets {
+        if let Some(previous) = target.previous_target.as_ref() {
+            if let Err(error) = fs::remove_file(previous) {
+                eprintln!(
+                    "Failed to remove previous migrated target '{}': {}",
+                    previous.display(),
+                    error
+                );
+            }
+        }
+    }
+}
+
+fn stage_library_source_files(
+    current_dir: &Path,
+    library_id: &str,
+) -> Result<Vec<StagedMigrationFile>, String> {
+    let mut staged = Vec::new();
+    for suffix in [".db", ".db-wal", ".db-shm"] {
+        let path = current_dir.join(format!("{library_id}{suffix}"));
+        match stage_existing_file(&path, "migrate-source") {
+            Ok(Some(file)) => staged.push(file),
+            Ok(None) => {}
+            Err(error) => {
+                restore_staged_files(&staged);
+                return Err(error);
+            }
+        }
+    }
+    Ok(staged)
+}
+
+fn migrate_db_storage_dir(
+    config: &mut AppConfig,
+    target_dir: PathBuf,
+    new_db_storage_dir: Option<String>,
+) -> Result<String, String> {
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Failed to create target database directory: {}", e))?;
+
+    let original_config = config.clone();
+    let current_dir = get_db_storage_dir_from_config(&original_config)?;
+    let current_dir_canon = fs::canonicalize(&current_dir).unwrap_or(current_dir.clone());
+    let target_dir_canon = fs::canonicalize(&target_dir).unwrap_or(target_dir.clone());
+    let target_dir_string = target_dir_canon.to_string_lossy().into_owned();
+
+    if current_dir_canon == target_dir_canon {
+        config.db_storage_dir = new_db_storage_dir.map(|_| target_dir_string.clone());
+        t_config::save_app_config(config)?;
+        return Ok(target_dir_string);
+    }
+
+    let mut migrated_targets = Vec::new();
+    let prepare_result = (|| -> Result<(), String> {
+        for library in &original_config.libraries {
+            let source_path = PathBuf::from(get_library_db_path_from_config(
+                &original_config,
+                &library.id,
+            )?);
+            let target_path = target_dir_canon.join(format!("{}.db", library.id));
+
+            if !source_path.exists() {
+                continue;
+            }
+
+            checkpoint_db(&source_path)?;
+            let migrated = copy_database_to_verified_target(&source_path, &target_path)
+                .map_err(|e| format!("Failed to migrate database '{}': {}", library.name, e))?;
+            migrated_targets.push(migrated);
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = prepare_result {
+        rollback_migrated_targets(&migrated_targets);
+        return Err(error);
+    }
+
+    config.db_storage_dir = new_db_storage_dir.map(|_| target_dir_string.clone());
+    if let Err(error) = t_config::save_app_config(config) {
+        rollback_migrated_targets(&migrated_targets);
+        return Err(error);
+    }
+
+    // Configuration now points only at verified targets. Source cleanup is
+    // staged afterward so a crash before config save never hides the old DB.
+    for library in &original_config.libraries {
+        match stage_library_source_files(&current_dir, &library.id) {
+            Ok(staged_sources) => cleanup_staged_files(&staged_sources),
+            Err(error) => eprintln!(
+                "Database migration completed, but old source cleanup for '{}' was skipped: {}",
+                library.name, error
+            ),
+        }
+    }
+    cleanup_target_backups(&migrated_targets);
+    Ok(target_dir_string)
+}
+
 pub fn change_db_storage_dir(new_dir: &str) -> Result<String, String> {
     let _migration_guard = DbMigrationGuard::acquire()?;
     let mut config = t_config::load_app_config()?;
     let target_dir = PathBuf::from(new_dir);
-
-    fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("Failed to create target database directory: {}", e))?;
-
-    let current_dir = get_db_storage_dir_from_config(&config)?;
-    let current_dir_canon = fs::canonicalize(&current_dir).unwrap_or(current_dir.clone());
-    let target_dir_canon = fs::canonicalize(&target_dir).unwrap_or(target_dir.clone());
-    if current_dir_canon == target_dir_canon {
-        return Ok(target_dir_canon.to_string_lossy().into_owned());
-    }
-
-    for library in &config.libraries {
-        let source_path = PathBuf::from(get_library_db_path_from_config(&config, &library.id)?);
-        let target_path = target_dir.join(format!("{}.db", library.id));
-
-        if !source_path.exists() {
-            continue;
-        }
-
-        checkpoint_db(&source_path)?;
-
-        if target_path.exists() {
-            fs::remove_file(&target_path)
-                .map_err(|e| format!("Failed to replace existing target database: {}", e))?;
-        }
-
-        fs::copy(&source_path, &target_path)
-            .map_err(|e| format!("Failed to migrate database '{}': {}", library.name, e))?;
-    }
-
-    config.db_storage_dir = Some(target_dir_canon.to_string_lossy().into_owned());
-    t_config::save_app_config(&config)?;
-
-    for library in &config.libraries {
-        let source_path = PathBuf::from(current_dir.join(format!("{}.db", library.id)));
-        if source_path.exists() {
-            let _ = fs::remove_file(&source_path);
-        }
-        let wal_path = current_dir.join(format!("{}.db-wal", library.id));
-        if wal_path.exists() {
-            let _ = fs::remove_file(&wal_path);
-        }
-        let shm_path = current_dir.join(format!("{}.db-shm", library.id));
-        if shm_path.exists() {
-            let _ = fs::remove_file(&shm_path);
-        }
-    }
-
-    Ok(target_dir_canon.to_string_lossy().into_owned())
+    migrate_db_storage_dir(&mut config, target_dir, Some(String::new()))
 }
 
 pub fn reset_db_storage_dir() -> Result<String, String> {
     let _migration_guard = DbMigrationGuard::acquire()?;
     let mut config = t_config::load_app_config()?;
     let target_dir = t_config::get_libraries_dir()?;
-    let current_dir = get_db_storage_dir_from_config(&config)?;
-    let current_dir_canon = fs::canonicalize(&current_dir).unwrap_or(current_dir.clone());
-    let target_dir_canon = fs::canonicalize(&target_dir).unwrap_or(target_dir.clone());
-
-    if current_dir_canon == target_dir_canon {
-        config.db_storage_dir = None;
-        t_config::save_app_config(&config)?;
-        return Ok(target_dir_canon.to_string_lossy().into_owned());
-    }
-
-    for library in &config.libraries {
-        let source_path = PathBuf::from(get_library_db_path_from_config(&config, &library.id)?);
-        let target_path = target_dir.join(format!("{}.db", library.id));
-
-        if !source_path.exists() {
-            continue;
-        }
-
-        checkpoint_db(&source_path)?;
-
-        if target_path.exists() {
-            fs::remove_file(&target_path)
-                .map_err(|e| format!("Failed to replace existing target database: {}", e))?;
-        }
-
-        fs::copy(&source_path, &target_path)
-            .map_err(|e| format!("Failed to migrate database '{}': {}", library.name, e))?;
-    }
-
-    config.db_storage_dir = None;
-    t_config::save_app_config(&config)?;
-
-    for library in &config.libraries {
-        let source_path = PathBuf::from(current_dir.join(format!("{}.db", library.id)));
-        if source_path.exists() {
-            let _ = fs::remove_file(&source_path);
-        }
-        let wal_path = current_dir.join(format!("{}.db-wal", library.id));
-        if wal_path.exists() {
-            let _ = fs::remove_file(&wal_path);
-        }
-        let shm_path = current_dir.join(format!("{}.db-shm", library.id));
-        if shm_path.exists() {
-            let _ = fs::remove_file(&shm_path);
-        }
-    }
-
-    Ok(target_dir_canon.to_string_lossy().into_owned())
+    migrate_db_storage_dir(&mut config, target_dir, None)
 }
 
 // ============================================================================
@@ -252,8 +474,12 @@ pub struct BackupResult {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupMetaLibrary {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub db_size: i64,
+    #[serde(default)]
+    pub backup_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -302,6 +528,83 @@ pub fn get_db_storage_info() -> Result<Vec<DbStorageInfo>, String> {
     Ok(results)
 }
 
+/// Writes a backup archive to `dest` and returns the names of the libraries it
+/// contains.
+///
+/// `dest` must be a scratch path: the archive is only published once
+/// `zip.finish()` succeeded, so a failed backup never leaves a half-written and
+/// unreadable zip at the destination the user picked.
+fn write_backup_archive(
+    selected: &[&Library],
+    config: &AppConfig,
+    dest: &Path,
+) -> Result<Vec<String>, String> {
+    let file =
+        fs::File::create(dest).map_err(|e| format!("Failed to create backup file: {}", e))?;
+    let mut zip = ZipWriter::new(file);
+
+    let backup_info = BackupMetaData {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        libraries: selected
+            .iter()
+            .map(|lib| {
+                let db_path = get_library_db_path_from_config(&config, &lib.id).ok();
+                let size = db_path
+                    .as_ref()
+                    .and_then(|p| fs::metadata(p).ok())
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(0);
+                BackupMetaLibrary {
+                    id: Some(lib.id.clone()),
+                    name: lib.name.clone(),
+                    db_size: size,
+                    backup_file: Some(format!("databases/{}.db", lib.id)),
+                }
+            })
+            .collect(),
+    };
+
+    let info_json = serde_json::to_string_pretty(&backup_info)
+        .map_err(|e| format!("Failed to serialize backup info: {}", e))?;
+
+    let options =
+        FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("backup-info.json", options)
+        .map_err(|e| format!("Failed to write backup-info.json to zip: {}", e))?;
+    zip.write_all(info_json.as_bytes())
+        .map_err(|e| format!("Failed to write backup-info.json content: {}", e))?;
+
+    let mut library_names = Vec::new();
+    for lib in selected {
+        let db_path = get_library_db_path_from_config(&config, &lib.id)?;
+        let path = Path::new(&db_path);
+        if !path.exists() {
+            continue;
+        }
+
+        let mut db_file = fs::File::open(path)
+            .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?;
+        let zip_path = format!("databases/{}.db", lib.id);
+
+        let options =
+            FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file(&zip_path, options)
+            .map_err(|e| format!("Failed to write {} to zip: {}", zip_path, e))?;
+        std::io::copy(&mut db_file, &mut zip)
+            .map_err(|e| format!("Failed to write {} content: {}", zip_path, e))?;
+
+        library_names.push(lib.name.clone());
+    }
+
+    zip.finish()
+        .map_err(|e| format!("Failed to finalize backup zip: {}", e))?;
+
+    Ok(library_names)
+}
+
 pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<BackupResult, String> {
     let _migration_guard = DbMigrationGuard::acquire()?;
     let config = t_config::load_app_config()?;
@@ -320,82 +623,27 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
         checkpoint_db(Path::new(&db_path))?;
     }
 
-    let file =
-        fs::File::create(dest_path).map_err(|e| format!("Failed to create backup file: {}", e))?;
-    let mut zip = ZipWriter::new(file);
-
-    let backup_info = serde_json::json!({
-        "createdAt": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-        "libraries": selected.iter().map(|lib| {
-            let db_path = get_library_db_path_from_config(&config, &lib.id).ok();
-            let size = db_path.as_ref()
-                .and_then(|p| fs::metadata(p).ok())
-                .map(|m| m.len() as i64)
-                .unwrap_or(0);
-            serde_json::json!({ "name": lib.name, "dbSize": size })
-        }).collect::<Vec<_>>()
-    });
-
-    let info_json = serde_json::to_string_pretty(&backup_info)
-        .map_err(|e| format!("Failed to serialize backup info: {}", e))?;
-
-    let options =
-        FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
-    zip.start_file("backup-info.json", options)
-        .map_err(|e| format!("Failed to write backup-info.json to zip: {}", e))?;
-    zip.write_all(info_json.as_bytes())
-        .map_err(|e| format!("Failed to write backup-info.json content: {}", e))?;
-
-    let app_config_path = t_config::get_config_file_path()?;
-    if app_config_path.exists() {
-        let mut config_content = String::new();
-        fs::File::open(&app_config_path)
-            .map_err(|e| format!("Failed to read config file: {}", e))?
-            .read_to_string(&mut config_content)
-            .map_err(|e| format!("Failed to read config file: {}", e))?;
-
-        let options =
-            FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
-        zip.start_file("app-config.json", options)
-            .map_err(|e| format!("Failed to write app-config.json to zip: {}", e))?;
-        zip.write_all(config_content.as_bytes())
-            .map_err(|e| format!("Failed to write app-config.json content: {}", e))?;
-    }
-
-    let mut library_names = Vec::new();
-    for lib in &selected {
-        let db_path = get_library_db_path_from_config(&config, &lib.id)?;
-        let path = Path::new(&db_path);
-        if !path.exists() {
-            continue;
+    // Build the archive beside the destination so a failure leaves the user's path
+    // untouched instead of holding an unreadable partial zip.
+    let dest = Path::new(dest_path);
+    let tmp_path = migration_transfer_path(dest, "backup");
+    let library_names = match write_backup_archive(&selected, &config, &tmp_path) {
+        Ok(library_names) => library_names,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
         }
-
-        let mut db_content = Vec::new();
-        fs::File::open(path)
-            .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?
-            .read_to_end(&mut db_content)
-            .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?;
-
-        let safe_name = sanitize_filename(&lib.name);
-        let zip_path = format!("{}.db", safe_name);
-
-        let options =
-            FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
-        zip.start_file(&zip_path, options)
-            .map_err(|e| format!("Failed to write {} to zip: {}", zip_path, e))?;
-        zip.write_all(&db_content)
-            .map_err(|e| format!("Failed to write {} content: {}", zip_path, e))?;
-
-        library_names.push(lib.name.clone());
+    };
+    if let Err(error) = fs::rename(&tmp_path, dest) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to finalize backup '{}': {}",
+            dest.display(),
+            error
+        ));
     }
 
-    let file = zip
-        .finish()
-        .map_err(|e| format!("Failed to finalize backup zip: {}", e))?;
-    let final_size = file.metadata().map(|m| m.len() as i64).unwrap_or(0);
+    let final_size = fs::metadata(dest).map(|m| m.len() as i64).unwrap_or(0);
 
     Ok(BackupResult {
         file_path: dest_path.to_string(),
@@ -438,24 +686,7 @@ pub fn restore_databases(
         fs::File::open(backup_path).map_err(|e| format!("Failed to open backup file: {}", e))?;
     let mut archive =
         ZipArchive::new(file).map_err(|e| format!("Failed to read backup zip: {}", e))?;
-
-    let mut db_entries: std::collections::HashMap<String, Vec<u8>> =
-        std::collections::HashMap::new();
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
-        let entry_name = entry.name().to_string();
-        if !entry_name.ends_with(".db") {
-            continue;
-        }
-        let lib_name = entry_name.trim_end_matches(".db").to_string();
-        let mut content = Vec::new();
-        entry
-            .read_to_end(&mut content)
-            .map_err(|e| format!("Failed to read zip entry '{}': {}", entry_name, e))?;
-        db_entries.insert(lib_name, content);
-    }
+    let backup_info = read_backup_metadata(&mut archive)?;
 
     let mut restored_names = Vec::new();
     let mut written_db_paths: Vec<PathBuf> = Vec::new();
@@ -463,10 +694,17 @@ pub fn restore_databases(
         config.libraries.iter().map(|l| l.name.clone()).collect();
 
     for selection in selections {
-        let zip_lib_name = sanitize_filename(&selection.library_name);
-        let Some(db_content) = db_entries.remove(&zip_lib_name) else {
-            continue;
-        };
+        let backup_library = backup_info
+            .libraries
+            .iter()
+            .find(|library| library.name == selection.library_name)
+            .ok_or_else(|| {
+                format!(
+                    "Selected library '{}' is not present in backup metadata",
+                    selection.library_name
+                )
+            })?;
+        let backup_file = backup_file_for_library(backup_library);
 
         let final_lib_name = if selection.should_rename {
             resolve_unique_name(&selection.library_name, &existing_names)
@@ -490,12 +728,36 @@ pub fn restore_databases(
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory for library: {}", e))?;
         }
+        let mut entry = archive.by_name(&backup_file).map_err(|e| {
+            format!(
+                "Failed to read database entry '{}' for '{}': {}",
+                backup_file, selection.library_name, e
+            )
+        })?;
+        if backup_library.db_size >= 0 && entry.size() != backup_library.db_size as u64 {
+            cleanup_restored_db_files(&written_db_paths);
+            return Err(format!(
+                "Backup database size mismatch for '{}': metadata {}, zip {}",
+                selection.library_name,
+                backup_library.db_size,
+                entry.size()
+            ));
+        }
         // New library id → new path. Still write via temp+rename so a crash
         // cannot leave a half-written .db that later looks openable.
-        if let Err(e) = write_file_atomic(db_path_obj, &db_content) {
+        if let Err(e) = write_file_atomic_from_reader(db_path_obj, &mut entry) {
             cleanup_restored_db_files(&written_db_paths);
             return Err(format!(
                 "Failed to write database file for '{}': {}",
+                final_lib_name, e
+            ));
+        }
+        drop(entry);
+        if let Err(e) = quick_check_db(db_path_obj) {
+            let _ = fs::remove_file(db_path_obj);
+            cleanup_restored_db_files(&written_db_paths);
+            return Err(format!(
+                "Restored database for '{}' failed integrity validation: {}",
                 final_lib_name, e
             ));
         }
@@ -519,19 +781,28 @@ pub fn restore_databases(
 
 /// Write `bytes` to `path` via a sibling temp file + rename (crash-safe create).
 /// Refuses to replace an existing destination — restore always targets a new library id.
-fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_file_atomic_from_reader<R: Read>(path: &Path, reader: &mut R) -> Result<(), String> {
     if path.exists() {
         return Err(format!(
             "Refusing to overwrite existing database path: {}",
             path.display()
         ));
     }
-    let tmp = path.with_extension("picaipic-restore.tmp");
-    if tmp.exists() {
+    let tmp = migration_transfer_path(path, "restore");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("Failed to create temp database '{}': {}", tmp.display(), e))?;
+    if let Err(error) = std::io::copy(reader, &mut output).and_then(|_| output.sync_all()) {
         let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to write temp database '{}': {}",
+            tmp.display(),
+            error
+        ));
     }
-    fs::write(&tmp, bytes)
-        .map_err(|e| format!("Failed to write temp database '{}': {}", tmp.display(), e))?;
+    drop(output);
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -545,11 +816,33 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+fn read_backup_metadata<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<BackupMetaData, String> {
+    let info_index = archive
+        .index_for_name("backup-info.json")
+        .ok_or_else(|| "Invalid backup file: missing backup-info.json".to_string())?;
+    let mut info_file = archive
+        .by_index(info_index)
+        .map_err(|e| format!("Failed to read backup-info.json: {}", e))?;
+    let mut info_content = String::new();
+    info_file
+        .read_to_string(&mut info_content)
+        .map_err(|e| format!("Failed to read backup-info.json: {}", e))?;
+    serde_json::from_str(&info_content)
+        .map_err(|e| format!("Failed to parse backup-info.json: {}", e))
+}
+
+fn backup_file_for_library(library: &BackupMetaLibrary) -> String {
+    library
+        .backup_file
+        .clone()
+        .unwrap_or_else(|| format!("{}.db", sanitize_filename(&library.name)))
+}
+
 fn cleanup_restored_db_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
-        let tmp = path.with_extension("picaipic-restore.tmp");
-        let _ = fs::remove_file(tmp);
     }
 }
 
@@ -584,26 +877,83 @@ fn resolve_unique_name(name: &str, existing: &std::collections::HashSet<String>)
 mod restore_write_tests {
     use super::*;
 
+    fn test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("picaipic-storage-{label}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn write_file_atomic_creates_target_without_tmp_left_behind() {
-        let dir = std::env::temp_dir().join(format!("picaipic-restore-atom-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("restore-atom");
         let target = dir.join("lib.db");
-        write_file_atomic(&target, b"sqlite-bytes").unwrap();
+        let mut input = std::io::Cursor::new(b"sqlite-bytes");
+        write_file_atomic_from_reader(&target, &mut input).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"sqlite-bytes");
-        assert!(!target.with_extension("picaipic-restore.tmp").exists());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "temporary restore files must be cleaned up"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn write_file_atomic_refuses_existing_destination() {
-        let dir = std::env::temp_dir().join(format!("picaipic-restore-exist-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("restore-exist");
         let target = dir.join("lib.db");
         fs::write(&target, b"old").unwrap();
-        let err = write_file_atomic(&target, b"new").unwrap_err();
+        let mut input = std::io::Cursor::new(b"new");
+        let err = write_file_atomic_from_reader(&target, &mut input).unwrap_err();
         assert!(err.contains("Refusing to overwrite"), "{err}");
         assert_eq!(fs::read(&target).unwrap(), b"old");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backup_file_uses_library_id_and_supports_legacy_name_entries() {
+        let current = BackupMetaLibrary {
+            id: Some("library-uuid".to_string()),
+            name: "a/b".to_string(),
+            db_size: 1,
+            backup_file: Some("databases/library-uuid.db".to_string()),
+        };
+        let legacy = BackupMetaLibrary {
+            id: None,
+            name: "a/b".to_string(),
+            db_size: 1,
+            backup_file: None,
+        };
+
+        assert_eq!(
+            backup_file_for_library(&current),
+            "databases/library-uuid.db"
+        );
+        assert_eq!(backup_file_for_library(&legacy), "a_b.db");
+    }
+
+    #[test]
+    fn verified_copy_requires_identical_valid_sqlite_database() {
+        let dir = test_dir("verified-copy");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY); INSERT INTO files VALUES (1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        fs::copy(&source, &target).unwrap();
+        verify_database_copy(&source, &target).unwrap();
+
+        fs::write(&target, b"corrupt").unwrap();
+        assert!(verify_database_copy(&source, &target).is_err());
+        assert!(quick_check_db(&target).is_err());
+        assert!(
+            source.exists(),
+            "source must remain available after a failed check"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

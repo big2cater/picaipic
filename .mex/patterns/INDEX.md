@@ -2,13 +2,16 @@
 
 Lookup table for PicAiPic task-specific runbooks. Read the matching pattern before implementation or diagnosis.
 
-_Last reviewed: 2026-07-27 (S1/S6 SQLite metadata helpers, CRUD/EXIF/RAW fixtures, full Rust validation)._
+_Last reviewed: 2026-08-29 (export-overwrite staged backup, move/rename consistency guards, Replace→trash, staged-delete crash journal, fail-closed plugin auth, copy-first input staging, and storage/backup temp cleanup documented; audit fixes retained)._
 
 | Pattern | Use when |
 |---------|----------|
 | [add-tauri-command.md](add-tauri-command.md) | Adding or changing frontend-to-Rust IPC, events, or cancellation |
-| [change-black-hole-theme.md](change-black-hole-theme.md) | Black-hole theme, cosmos WebGL, idle PhotoVortex, chrome glass, intensity |
-| [change-cyberpunk-theme.md](change-cyberpunk-theme.md) | Cyberpunk theme, night-city ambient, idle PhotoGlitchLayer, intensity gate |
+| [change-comfy-integration.md](change-comfy-integration.md) | ComfyUI workflow import/UI→API conversion, run/batch/cancel pipeline, result import, or format misdetection |
+| [change-destructive-file-ops.md](change-destructive-file-ops.md) | Move/replace rollback, trash, permanent delete, or batch delete consistency |
+| [change-dedup-scan.md](change-dedup-scan.md) | Exact/similar dedup hashing, group rebuilds, cancellation, or SQLite lock contention |
+| [change-black-hole-theme.md](change-black-hole-theme.md) | Black-hole theme, native maximize gate, GPU-limited PhotoVortex, CSS spiral fallback, intensity |
+| [change-cyberpunk-theme.md](change-cyberpunk-theme.md) | Cyberpunk theme, native maximize gate, GPU-limited PhotoGlitchLayer, CSS glitch fallback, intensity |
 | [fix-library-scan-selection.md](fix-library-scan-selection.md) | Scan/import: dup afiles, selection, Live move counts, **preview stuck N-2**, RAW thumb speed |
 | [profile-library-scan.md](profile-library-scan.md) | Establishing real scan/metadata/thumbnail/embedding performance baselines |
 | [change-ai-plugin.md](change-ai-plugin.md) | Adding/changing a plugin, manifest, capability, runtime, permission, task, or package contract |
@@ -16,6 +19,20 @@ _Last reviewed: 2026-07-27 (S1/S6 SQLite metadata helpers, CRUD/EXIF/RAW fixture
 | [test-sqlite-crud-fixture.md](test-sqlite-crud-fixture.md) | Testing SQLite model CRUD against a temporary per-test fixture |
 | [change-live-photo.md](change-live-photo.md) | Apple Live Photo / Google Motion Photo detection, pairing, or long-press preview |
 | [debug-plugin-runtime.md](debug-plugin-runtime.md) | Diagnosing plugin discovery, trust, setup, process, health, task, or output failures |
+| [audit-plugin-trust-boundary.md](audit-plugin-trust-boundary.md) | Plugin trust boundary: P-1 missing declared file fixed/tested; P-2 network lookup fail-closed; P-3 host-managed package snapshot + single archive through extraction |
+| [audit-storage-migration.md](audit-storage-migration.md) | Storage migration/backup/restore audit: verified copy before config switch, streaming restore, UUID backup entries, and residual snapshot trade-off |
+| [audit-face-cluster-tx.md](audit-face-cluster-tx.md) | Face batch-write and cluster assignment transaction audit; full embedding RSS remains a 100k-face measurement follow-up |
+| [audit-file-move-import.md](audit-file-move-import.md) | File move/copy/import/rename audit in t_cmds.rs / t_utils.rs (post-move maintenance diagnostics, library-copy add-or-cleanup, partial clipboard-import reporting, outside-library crash-window follow-up) |
+| [audit-xmp-motion-cache.md](audit-xmp-motion-cache.md) | t_xmp.rs scope correction: no XMP write-back; cache validation, concurrent atomic writes, one-time legacy purge, and active-entry cleanup safety (X-1..X-5 resolved/verified) |
+| [audit-dedup-delete.md](audit-dedup-delete.md) | Dedup staged trash, immediate keep/selection revalidation, permanent-delete routing, linked-row cascades, and person-cover repair (D-1..D-4 resolved/verified) |
+| [audit-image-edit-save.md](audit-image-edit-save.md) | t_image.rs edit/batch/collage/photo-frame save: IMG-1..IMG-4 + IMG-6 export-overwrite staged backup + IMG-7 `Result`-returning `edit_image` resolved, with metadata/cache refresh and exact-path crash-temp recovery; IMG-5 overwrite by design |
+| [audit-scan-mark-sweep.md](audit-scan-mark-sweep.md) | Scan mark-and-sweep: fail-closed traversal guards, explicit derived-row cleanup, recovery full re-mark before sweep, and skipped-file sweep suppression |
+| [audit-library-switch-remove.md](audit-library-switch-remove.md) | Library switch/remove: exclusive rebind guard across scans/dedup/faces/imports, pooled-connection and embedding-cache reset, config mutation serialization |
+| [audit-plugin-install-rollback.md](audit-plugin-install-rollback.md) | t_plugin.rs install/uninstall rollback: PLUG-1..5 fixed with staged same-parent directories, registry commit/restore, extraction budget, bounded deletion retry, and hidden transaction discovery exclusion |
+| [audit-summary.md](audit-summary.md) | Current closure matrix for destructive/consistency audits, intentional contract reclassifications, and bounded remaining follow-ups |
+| [audit-frontend-destructive.md](audit-frontend-destructive.md) | Frontend destructive/consistency re-verification: plugin install concurrency and drag-drop partial failure fixed; library/edit risks closed by backend guards; explicit copy+index contract retained |
+| [audit-cyberpunk-theme.md](audit-cyberpunk-theme.md) | Cyberpunk theme: CP-1 global neon chrome and CP-2 guarded glitch rAF resolved; CP-3 force-dark and CP-4 Home-only backdrop confirmed by design; FX lifecycle verified safe |
+| [audit-frontend-perf.md](audit-frontend-perf.md) | Frontend perf re-verification: PE-1 bounded off-screen thumbnail retention and PE-2 shared plugin contributions fixed; PE-3 retained as low-impact; PE-4 stale because the current cache is a 96 MiB in-memory LRU |
 | [release-build.md](release-build.md) | Building/validating application installers, updater artifacts, or plugin packages |
 | [change-crop-presets.md](change-crop-presets.md) | Changing ImageEditor crop ratios, photo-size catalog, or custom favorite ratios |
 | [change-collage.md](change-collage.md) | Changing template/magazine collage UI, strips, free canvas, or `export_collage` (incl. cells + cell-sized decode) |

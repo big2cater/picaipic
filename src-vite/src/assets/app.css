@@ -50,22 +50,55 @@
   transition: opacity 120ms ease-out;
 }
 
-/* cyberpunk neon chrome accents (backdrop paints the city; shell is glass) */
-.cp-shell {
+/* Cyberpunk chrome is global; the animated city remains scoped to Home. */
+html.is-cyberpunk {
   --cp-magenta: #ff2bd6;
   --cp-cyan: #00e5ff;
   --cp-violet: #6b21ff;
+  --color-primary: #ff2bd6;
+  --color-primary-content: #180013;
   color-scheme: dark;
 }
 
-/* Selected sidebar / primary chips read neon under cyberpunk */
-.cp-shell .btn-primary,
-.cp-shell .bg-primary {
-  --fallback-p: #ff2bd6;
+html.is-cyberpunk .text-primary {
+  color: color-mix(in srgb, var(--cp-cyan) 75%, white);
 }
 
-.cp-shell .text-primary {
-  color: color-mix(in srgb, var(--cp-cyan) 75%, white);
+/* WebGL photo-glitch fallback for constrained GPUs/WebView2 environments. */
+.cp-glitch-fallback .bh-card {
+  animation: cp-card-glitch 780ms steps(2, jump-none) infinite;
+  will-change: transform, filter;
+}
+
+.cp-glitch-fallback .bh-card:nth-child(3n + 1) {
+  animation-delay: -170ms;
+}
+
+.cp-glitch-fallback .bh-card:nth-child(3n + 2) {
+  animation-delay: -410ms;
+}
+
+@keyframes cp-card-glitch {
+  0%, 68%, 100% {
+    transform: translateX(0);
+    filter: contrast(1) saturate(1);
+    box-shadow: none;
+  }
+  70% {
+    transform: translateX(calc(-3px * var(--cp-glitch-strength, 1)));
+    filter: contrast(1.16) saturate(1.28) hue-rotate(-8deg);
+    box-shadow: 3px 0 #ff2bd6, -3px 0 #00e5ff;
+  }
+  74% {
+    transform: translateX(calc(5px * var(--cp-glitch-strength, 1)));
+    filter: contrast(1.28) saturate(1.45) hue-rotate(10deg);
+    box-shadow: -4px 0 #ff2bd6, 4px 0 #00e5ff;
+  }
+  80% {
+    transform: translateX(calc(-2px * var(--cp-glitch-strength, 1)));
+    filter: contrast(1.1) saturate(1.18);
+    box-shadow: 2px 0 #ff2bd6, -2px 0 #00e5ff;
+  }
 }
 
 html, body {

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::{t_color_match, t_jxl, t_libraw, t_lut, t_utils};
+use crate::{t_color_match, t_jxl, t_libraw, t_lut, t_output_temp, t_utils};
 
 #[derive(Default)]
 pub struct CaptureSettings {
@@ -1041,6 +1041,9 @@ pub struct ResizeData {
 /// edit params
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EditParams {
+    #[serde(default)]
+    #[serde(rename = "fileId")]
+    file_id: Option<i64>,
     #[serde(rename = "sourceFilePath")]
     source_file_path: String,
     #[serde(rename = "destFilePath")]
@@ -1156,100 +1159,226 @@ pub struct ColorMatchPreviewParams {
 }
 
 /// edit an image and save to dest file
-pub async fn edit_image(params: EditParams) -> bool {
-    if let Ok(img) = get_edited_image(&params).await {
-        let path = Path::new(&params.dest_file_path);
-        let format = match params.output_format.as_str() {
-            "png" => image::ImageFormat::Png,
-            "webp" => image::ImageFormat::WebP,
-            _ => image::ImageFormat::Jpeg,
-        };
+pub async fn edit_image(params: EditParams) -> Result<(), String> {
+    let img = get_edited_image(&params).await?;
+    let path = Path::new(&params.dest_file_path);
+    let overwrites_source =
+        t_utils::paths_refer_to_same_item(Path::new(&params.source_file_path), path);
+    let format = match params.output_format.as_str() {
+        "png" => image::ImageFormat::Png,
+        "webp" => image::ImageFormat::WebP,
+        _ => image::ImageFormat::Jpeg,
+    };
 
-        // Snapshot original metadata before overwriting the file.
-        // For overwrite (source == dest) we must copy the original to a
-        // temp location first — once we File::create the destination the
-        // original EXIF is gone. For save-as-new the source is untouched.
-        let metadata_backup_path = if format == image::ImageFormat::Jpeg
-            || format == image::ImageFormat::WebP
-        {
-            match prepare_metadata_backup_path(&params.source_file_path, &params.dest_file_path) {
-                Ok(path) => path,
-                Err(_) => return false,
-            }
-        } else {
-            None
-        };
-
-        let metadata_source = metadata_backup_path
-            .as_ref()
-            .map(|p| p.as_path())
-            .unwrap_or_else(|| Path::new(&params.source_file_path));
-
-        let quality = params.quality.unwrap_or(80);
-        let save_ok = if format == image::ImageFormat::Jpeg {
-            if let Ok(file) = std::fs::File::create(path) {
-                let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
-                encoder.encode_image(&img).is_ok()
-            } else {
-                false
-            }
-        } else {
-            img.save_with_format(path, format).is_ok()
-        };
-
-        if !save_ok {
-            cleanup_metadata_backup(&metadata_backup_path);
-            return false;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create output directory '{}': {e}",
+                    parent.display()
+                )
+            })?;
         }
-
-        if format == image::ImageFormat::Jpeg || format == image::ImageFormat::WebP {
-            if let Err(_) = copy_metadata_to_output(metadata_source, path) {
-                if metadata_backup_path.is_some() {
-                    let _ = fs::copy(metadata_source, path);
-                } else {
-                    let _ = fs::remove_file(path);
-                }
-                cleanup_metadata_backup(&metadata_backup_path);
-                return false;
-            }
-
-            cleanup_metadata_backup(&metadata_backup_path);
-        }
-
-        return true;
     }
-    false
+
+    // The source stays untouched until pixels and metadata are complete.
+    let temp_path = edit_temp_path(path, format);
+
+    let quality = params.quality.unwrap_or(80);
+    let save_result = if format == image::ImageFormat::Jpeg {
+        std::fs::File::create(&temp_path)
+            .map_err(|e| format!("Failed to create edit temp '{}': {e}", temp_path.display()))
+            .and_then(|file| {
+                let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
+                encoder
+                    .encode_image(&img)
+                    .map_err(|e| format!("Failed to encode JPEG output: {e}"))
+            })
+    } else {
+        img.save_with_format(&temp_path, format)
+            .map_err(|e| format!("Failed to encode output: {e}"))
+    };
+    if let Err(error) = save_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    if format == image::ImageFormat::Jpeg || format == image::ImageFormat::WebP {
+        if let Err(error) = copy_metadata_to_output(Path::new(&params.source_file_path), &temp_path)
+        {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!("Failed to preserve metadata: {error}"));
+        }
+    }
+
+    // Flush through a read-write handle: on Windows `FlushFileBuffers` requires write
+    // access, so a plain read-only `File::open` here fails with "access denied" even
+    // though the bytes were written fine (fsync on Linux tolerates read-only fds).
+    if let Err(error) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temp_path)
+        .and_then(|file| file.sync_all())
+    {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Failed to flush edit temp '{}': {error}",
+            temp_path.display()
+        ));
+    }
+
+    let backup_path = finalize_edit_output(&temp_path, path)?;
+
+    if overwrites_source {
+        if let Some(file_id) = params.file_id {
+            if let Err(error) =
+                crate::t_sqlite::AFile::refresh_after_image_edit(file_id, &params.dest_file_path)
+            {
+                let _ = rollback_edit_output(path, backup_path.as_deref());
+                return Err(format!("Failed to refresh indexed metadata: {error}"));
+            }
+        }
+    }
+
+    cleanup_edit_backup(&backup_path);
+    Ok(())
 }
 
-fn prepare_metadata_backup_path(
-    source_file_path: &str,
-    dest_file_path: &str,
-) -> Result<Option<PathBuf>, String> {
-    if source_file_path != dest_file_path {
+fn edit_temp_path(dest: &Path, format: image::ImageFormat) -> PathBuf {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let stem = dest
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("image");
+    let extension = match format {
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::WebP => "webp",
+        _ => "jpg",
+    };
+    parent.join(format!(
+        ".{stem}.picaipic-edit-{}.{}",
+        Uuid::new_v4(),
+        extension
+    ))
+}
+
+fn edit_backup_path(dest: &Path) -> PathBuf {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = dest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("image");
+    parent.join(format!(
+        ".{file_name}.picaipic-edit-backup-{}.tmp",
+        Uuid::new_v4()
+    ))
+}
+
+fn finalize_edit_output(temp: &Path, dest: &Path) -> Result<Option<PathBuf>, String> {
+    if !dest.exists() {
+        fs::rename(temp, dest).map_err(|error| {
+            let _ = fs::remove_file(temp);
+            format!("Failed to finalize edited image: {error}")
+        })?;
         return Ok(None);
     }
 
-    let source_path = Path::new(source_file_path);
-    let extension = source_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("tmp");
-    let backup_path = std::env::temp_dir().join(format!(
-        "lap-edit-metadata-{}.{}",
-        Uuid::new_v4(),
-        extension
-    ));
-
-    fs::copy(source_path, &backup_path)
-        .map_err(|e| format!("Failed to create metadata backup: {}", e))?;
-
-    Ok(Some(backup_path))
+    let backup = edit_backup_path(dest);
+    fs::rename(dest, &backup)
+        .map_err(|error| format!("Failed to stage original image: {error}"))?;
+    if let Err(error) = fs::rename(temp, dest) {
+        let restore_error = fs::rename(&backup, dest).err();
+        let _ = fs::remove_file(temp);
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "Failed to finalize edited image: {error}; failed to restore original: {restore_error}"
+            ),
+            None => format!("Failed to finalize edited image; original restored: {error}"),
+        });
+    }
+    Ok(Some(backup))
 }
 
-fn cleanup_metadata_backup(path: &Option<PathBuf>) {
+fn rollback_edit_output(dest: &Path, backup: Option<&Path>) -> Result<(), String> {
+    let Some(backup) = backup else {
+        fs::remove_file(dest)
+            .map_err(|error| format!("Failed to remove unindexed edited image: {error}"))?;
+        return Ok(());
+    };
+
+    fs::remove_file(dest).map_err(|error| {
+        format!("Failed to remove edited image while restoring original: {error}")
+    })?;
+    fs::rename(backup, dest).map_err(|error| format!("Failed to restore original image: {error}"))
+}
+
+fn cleanup_edit_backup(path: &Option<PathBuf>) {
     if let Some(path) = path {
-        let _ = fs::remove_file(path);
+        if let Err(error) = fs::remove_file(path) {
+            eprintln!(
+                "Failed to remove edit backup '{}': {}",
+                path.display(),
+                error
+            );
+        }
     }
+}
+
+/// Publish `temp` at `dest`, staging any pre-existing `dest` to a same-directory
+/// backup first and restoring it when the replacement fails.
+///
+/// Returns the backup path when one was created. `dest` is never removed before
+/// the replacement is in place, so a failed rename/copy cannot leave the user
+/// with neither the previous file nor the new output.
+fn replace_output_file(temp: &Path, dest: &Path) -> Result<Option<PathBuf>, String> {
+    let stage_error = |error: std::io::Error| {
+        format!(
+            "Failed to stage existing output '{}': {error}",
+            dest.display()
+        )
+    };
+
+    if !dest.exists() {
+        if let Err(error) = fs::rename(temp, dest) {
+            // Cross-device rename can fail; fall back to a copy and let the
+            // tracked-output guard remove the temp file.
+            fs::copy(temp, dest).map_err(|copy_error| {
+                format!(
+                    "Failed to finalize output '{}': {error}; copy fallback: {copy_error}",
+                    dest.display()
+                )
+            })?;
+        }
+        return Ok(None);
+    }
+
+    let backup = edit_backup_path(dest);
+    fs::rename(dest, &backup).map_err(stage_error)?;
+    if let Err(error) = fs::rename(temp, dest) {
+        let copy_failed = fs::copy(temp, dest).is_err();
+        if copy_failed {
+            let restore_error = fs::rename(&backup, dest).err();
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "Failed to finalize output '{}': {error}; failed to restore original: {restore_error}",
+                    dest.display()
+                ),
+                None => format!(
+                    "Failed to finalize output '{}'; original restored: {error}",
+                    dest.display()
+                ),
+            });
+        }
+    }
+    Ok(Some(backup))
+}
+
+/// `replace_output_file` for tracked export outputs, dropping the now-redundant
+/// backup once the replacement is committed.
+fn finalize_tracked_output(temp: &Path, dest: &Path) -> Result<(), String> {
+    let backup = replace_output_file(temp, dest)?;
+    cleanup_edit_backup(&backup);
+    Ok(())
 }
 
 /// Copies metadata from source to destination.
@@ -2048,9 +2177,10 @@ fn save_collage_image(params: &CollageExportParams, img: DynamicImage) -> Result
         _ => image::ImageFormat::Jpeg,
     };
     let quality = params.quality.unwrap_or(90).clamp(1, 100);
-    // Same atomic pattern as batch/photo-frame: write temp then rename.
-    let temp = format!("{dest}.picaipic-collage.tmp");
-    let temp_path = Path::new(&temp);
+    // Register the exact sidecar before writing so startup can clean it after a crash.
+    let temp_guard =
+        t_output_temp::TrackedOutputTemp::create(path, t_output_temp::OutputTempKind::Collage)?;
+    let temp_path = temp_guard.path();
 
     let write_temp = || -> Result<(), String> {
         if format == image::ImageFormat::Jpeg {
@@ -2069,19 +2199,9 @@ fn save_collage_image(params: &CollageExportParams, img: DynamicImage) -> Result
     };
 
     if let Err(e) = write_temp() {
-        let _ = fs::remove_file(&temp);
         return Err(e);
     }
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    if let Err(e) = fs::rename(&temp, path) {
-        if let Err(copy_err) = fs::copy(&temp, path) {
-            let _ = fs::remove_file(&temp);
-            return Err(format!("finalize collage: {e}; copy fallback: {copy_err}"));
-        }
-        let _ = fs::remove_file(&temp);
-    }
+    finalize_tracked_output(temp_path, path)?;
     Ok(true)
 }
 
@@ -3696,7 +3816,7 @@ pub async fn batch_process_images(
         }
 
         match join_set.join_next().await {
-            Some(Ok((_index, src, dest, outcome))) => {
+            Some(Ok((_index, src, _dest, outcome))) => {
                 completed += 1;
                 match outcome {
                     Ok(BatchFileOutcome::Ok(path)) => {
@@ -3705,10 +3825,6 @@ pub async fn batch_process_images(
                     }
                     Ok(BatchFileOutcome::Skipped) => skipped += 1,
                     Err(err) => {
-                        // Temp write may remain after cancel/error; never touch final dest here.
-                        if let Some(ref d) = dest {
-                            remove_batch_temp(d);
-                        }
                         if err == "cancelled" {
                             cancelled = true;
                             join_set.abort_all();
@@ -3757,7 +3873,7 @@ pub async fn batch_process_images(
     // Drain stragglers after cancel; drop incomplete temps only.
     while let Some(joined) = join_set.join_next().await {
         match joined {
-            Ok((_index, src, dest, outcome)) => {
+            Ok((_index, src, _dest, outcome)) => {
                 completed += 1;
                 match outcome {
                     Ok(BatchFileOutcome::Ok(path)) => {
@@ -3766,15 +3882,8 @@ pub async fn batch_process_images(
                         output_paths.push(path);
                     }
                     Ok(BatchFileOutcome::Skipped) => skipped += 1,
-                    Err(err) if err == "cancelled" => {
-                        if let Some(ref d) = dest {
-                            remove_batch_temp(d);
-                        }
-                    }
+                    Err(err) if err == "cancelled" => {}
                     Err(err) => {
-                        if let Some(ref d) = dest {
-                            remove_batch_temp(d);
-                        }
                         failed += 1;
                         errors.push(format!("{}: {}", src, err));
                     }
@@ -3785,15 +3894,6 @@ pub async fn batch_process_images(
                 completed += 1;
                 failed += 1;
                 errors.push(format!("worker failed: {}", join_err));
-            }
-        }
-    }
-
-    // Aborted workers may leave sidecars without a join result — scrub known temps.
-    if cancelled {
-        for item in &work {
-            if let Some(ref dest) = item.dest {
-                remove_batch_temp(dest);
             }
         }
     }
@@ -3825,17 +3925,6 @@ enum BatchFileOutcome {
     /// Dest path that was written.
     Ok(String),
     Skipped,
-}
-
-/// Sidecar temp for batch writes: `{dest}.picaipic-batch.tmp`.
-/// Cancel/abort only deletes this path — never a pre-existing final dest.
-fn batch_temp_path(dest: &str) -> String {
-    format!("{dest}.picaipic-batch.tmp")
-}
-
-fn remove_batch_temp(dest: &str) {
-    let tmp = batch_temp_path(dest);
-    let _ = fs::remove_file(&tmp);
 }
 
 async fn process_one_batch_file(
@@ -3886,7 +3975,6 @@ async fn process_one_batch_file(
         return Ok(BatchFileOutcome::Skipped);
     }
     let dest = dest.unwrap();
-    let temp = batch_temp_path(&dest);
 
     let mut img = load_image_for_edit(src).await?;
     // Prefer EXIF from host when provided; load_image_for_edit already orients for normal open path.
@@ -3894,7 +3982,6 @@ async fn process_one_batch_file(
 
     for action in actions {
         if batch_is_cancelled() {
-            remove_batch_temp(&dest);
             return Err("cancelled".to_string());
         }
         img = apply_batch_action(
@@ -3908,7 +3995,6 @@ async fn process_one_batch_file(
     }
 
     if batch_is_cancelled() {
-        remove_batch_temp(&dest);
         return Err("cancelled".to_string());
     }
 
@@ -3919,27 +4005,18 @@ async fn process_one_batch_file(
     }
 
     // Write temp then rename so cancel never leaves a half-written final dest,
-    // and overwrite mode never corrupts an existing file mid-encode.
-    if let Err(e) = save_dynamic_image(&img, &temp, ext, quality) {
-        let _ = fs::remove_file(&temp);
-        return Err(e);
-    }
+    // and persist its exact path so startup can recover after a process crash.
+    let temp_guard = t_output_temp::TrackedOutputTemp::create(
+        Path::new(&dest),
+        t_output_temp::OutputTempKind::Batch,
+    )?;
+    let temp = temp_guard.path();
+    save_dynamic_image(&img, temp.to_string_lossy().as_ref(), ext, quality)?;
     if batch_is_cancelled() {
-        let _ = fs::remove_file(&temp);
         return Err("cancelled".to_string());
     }
-    // Prefer atomic replace; fall back to copy+remove on platforms without rename-over.
-    if Path::new(&dest).exists() {
-        let _ = fs::remove_file(&dest);
-    }
-    if let Err(e) = fs::rename(&temp, &dest) {
-        // Cross-device rename can fail; copy then delete temp.
-        if let Err(copy_err) = fs::copy(&temp, &dest) {
-            let _ = fs::remove_file(&temp);
-            return Err(format!("finalize dest: {e}; copy fallback: {copy_err}"));
-        }
-        let _ = fs::remove_file(&temp);
-    }
+    // Stage any pre-existing destination first so a failed finalize restores it.
+    finalize_tracked_output(temp, Path::new(&dest))?;
     Ok(BatchFileOutcome::Ok(dest))
 }
 
@@ -6437,32 +6514,20 @@ pub async fn export_photo_frame(
                                 .map_err(|e| format!("create dest dir: {}", e))?;
                         }
                     }
-                    // Temp then rename so cancel never leaves a half-written final file.
-                    let temp = batch_temp_path(&dest_for_task);
-                    if let Err(e) = save_dynamic_image(&framed, &temp, &ext, quality) {
-                        let _ = fs::remove_file(&temp);
-                        return Err(e);
-                    }
+                    // Register the exact sidecar before writing so startup can recover it.
+                    let temp_guard = t_output_temp::TrackedOutputTemp::create(
+                        Path::new(&dest_for_task),
+                        t_output_temp::OutputTempKind::PhotoFrame,
+                    )?;
+                    let temp = temp_guard.path();
+                    save_dynamic_image(&framed, temp.to_string_lossy().as_ref(), &ext, quality)?;
                     if photo_frame_is_cancelled() {
-                        let _ = fs::remove_file(&temp);
                         return Err("cancelled".to_string());
                     }
-                    if Path::new(&dest_for_task).exists() {
-                        let _ = fs::remove_file(&dest_for_task);
-                    }
-                    if let Err(e) = fs::rename(&temp, &dest_for_task) {
-                        if let Err(copy_err) = fs::copy(&temp, &dest_for_task) {
-                            let _ = fs::remove_file(&temp);
-                            return Err(format!("finalize dest: {e}; copy fallback: {copy_err}"));
-                        }
-                        let _ = fs::remove_file(&temp);
-                    }
+                    finalize_tracked_output(temp, Path::new(&dest_for_task))?;
                     Ok::<String, String>(dest_for_task.clone())
                 }
                 .await;
-                if result.is_err() {
-                    remove_batch_temp(&dest_for_task);
-                }
                 (index, src, Some(dest_for_task), result)
             });
         }
@@ -6493,10 +6558,7 @@ pub async fn export_photo_frame(
                         }),
                     );
                 }
-                Ok((_index, src, dest, Err(err))) => {
-                    if let Some(ref d) = dest {
-                        remove_batch_temp(d);
-                    }
+                Ok((_index, src, _dest, Err(err))) => {
                     if err == "cancelled" {
                         cancelled = true;
                         set.abort_all();
@@ -6534,11 +6596,8 @@ pub async fn export_photo_frame(
                 succeeded += 1;
                 output_paths.push(path);
             }
-            Ok((_index, src, dest, Err(err))) => {
+            Ok((_index, src, _dest, Err(err))) => {
                 completed += 1;
-                if let Some(ref d) = dest {
-                    remove_batch_temp(d);
-                }
                 if err != "cancelled" {
                     failed += 1;
                     errors.push(format!("{}: {}", src, err));
@@ -6552,14 +6611,6 @@ pub async fn export_photo_frame(
             }
         }
     }
-    if cancelled {
-        for (_index, _src, dest) in &work {
-            if let Some(d) = dest {
-                remove_batch_temp(d);
-            }
-        }
-    }
-
     let result = PhotoFrameExportResult {
         total,
         succeeded,
@@ -6581,6 +6632,106 @@ pub async fn export_photo_frame(
         }),
     );
     Ok(result)
+}
+
+#[cfg(test)]
+mod edit_save_tests {
+    use super::{
+        cleanup_edit_backup, finalize_edit_output, finalize_tracked_output, replace_output_file,
+        rollback_edit_output,
+    };
+    use std::fs;
+
+    fn fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "picaipic-edit-save-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let dest = root.join("photo.jpg");
+        let temp = root.join(".photo.picaipic-edit-test.jpg");
+        fs::write(&dest, b"original").unwrap();
+        fs::write(&temp, b"edited").unwrap();
+        (dest, temp)
+    }
+
+    #[test]
+    fn finalized_edit_can_restore_original() {
+        let (dest, temp) = fixture("rollback");
+        let backup = finalize_edit_output(&temp, &dest).unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"edited");
+        assert_eq!(fs::read(backup.as_ref().unwrap()).unwrap(), b"original");
+
+        rollback_edit_output(&dest, backup.as_deref()).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"original");
+        fs::remove_dir_all(dest.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn committed_edit_removes_original_backup() {
+        let (dest, temp) = fixture("commit");
+        let backup = finalize_edit_output(&temp, &dest).unwrap();
+        let backup_path = backup.clone().unwrap();
+
+        cleanup_edit_backup(&backup);
+
+        assert_eq!(fs::read(&dest).unwrap(), b"edited");
+        assert!(!backup_path.exists());
+        fs::remove_dir_all(dest.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn tracked_output_replaces_existing_dest_and_clears_backup() {
+        let (dest, temp) = fixture("tracked-replace");
+
+        finalize_tracked_output(&temp, &dest).unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"edited");
+        assert!(!temp.exists());
+        let remaining: Vec<_> = fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(remaining.len(), 1, "unexpected leftovers: {remaining:?}");
+        fs::remove_dir_all(dest.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn tracked_output_writes_new_dest_without_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "picaipic-tracked-output-new-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let dest = root.join("collage.jpg");
+        let temp = root.join(".collage.picaipic-collage-test.tmp");
+        fs::write(&temp, b"collage").unwrap();
+
+        assert_eq!(replace_output_file(&temp, &dest).unwrap(), None);
+
+        assert_eq!(fs::read(&dest).unwrap(), b"collage");
+        assert!(!temp.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_tracked_output_restores_existing_dest() {
+        let (dest, temp) = fixture("tracked-failure");
+        // A missing temp makes both the rename and the copy fallback fail, which is
+        // exactly the window where the previous "remove dest first" flow lost data.
+        fs::remove_file(&temp).unwrap();
+
+        let error = finalize_tracked_output(&temp, &dest).unwrap_err();
+
+        assert!(error.contains("Failed to finalize output"), "{error}");
+        assert_eq!(
+            fs::read(&dest).unwrap(),
+            b"original",
+            "existing destination must survive a failed finalize"
+        );
+        fs::remove_dir_all(dest.parent().unwrap()).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -6647,5 +6798,218 @@ mod exif_profile_tests {
         assert!(profile.signature_scan_elapsed > std::time::Duration::ZERO);
         assert_eq!(profile.raw_attempts, 1);
         assert!(profile.raw_elapsed > std::time::Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod edit_save_pipeline_tests {
+    use super::{CropData, EditParams, ResizeData, edit_image};
+    use image::RgbImage;
+    use std::fs;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+
+    fn write_jpeg_fixture(path: &std::path::Path) {
+        let img = RgbImage::from_fn(320, 240, |x, y| {
+            let value = ((x + y) % 255) as u8;
+            image::Rgb([value, value, 0])
+        });
+        img.save_with_format(path, image::ImageFormat::Jpeg)
+            .unwrap();
+    }
+
+    fn base_params(source: &str, dest: &str) -> EditParams {
+        EditParams {
+            file_id: None, // keep the test hermetic: no DB refresh when overwriting
+            source_file_path: source.to_string(),
+            dest_file_path: dest.to_string(),
+            output_format: "jpg".to_string(),
+            orientation: 1,
+            flip_horizontal: false,
+            flip_vertical: false,
+            rotate: 0,
+            crop: CropData {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            resize: ResizeData {
+                width: None,
+                height: None,
+            },
+            quality: Some(80),
+            filter: None,
+            brightness: None,
+            contrast: None,
+            blur: None,
+            hue_rotate: None,
+            saturation: None,
+            color_match: None,
+            photo_style: None,
+        }
+    }
+
+    #[test]
+    fn save_as_new_writes_a_new_file() {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-edit-saveas-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.jpg");
+        let dest = root.join("photo_1.jpg");
+        write_jpeg_fixture(&source);
+        let source_bytes = fs::read(&source).unwrap();
+
+        let params = base_params(&source.to_string_lossy(), &dest.to_string_lossy());
+        block_on(edit_image(params)).expect("save-as-new must succeed");
+
+        assert!(
+            dest.exists(),
+            "save-as-new must create the destination file"
+        );
+        // The source must stay untouched when writing a new file.
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        let decoded = image::open(&dest).unwrap();
+        assert_eq!(decoded.width(), 320);
+        assert_eq!(decoded.height(), 240);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn overwrite_save_replaces_the_source() {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-edit-overwrite-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.jpg");
+        write_jpeg_fixture(&source);
+
+        let params = base_params(&source.to_string_lossy(), &source.to_string_lossy());
+        block_on(edit_image(params)).expect("overwrite save must succeed");
+
+        let decoded = image::open(&source).unwrap();
+        assert_eq!(decoded.width(), 320);
+        assert_eq!(decoded.height(), 240);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod edit_metadata_source_tests {
+    use super::{CropData, EditParams, ResizeData, edit_image};
+    use image::{RgbImage, RgbaImage};
+    use std::fs;
+    use std::path::Path;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+
+    fn write_fixture(path: &Path, format: image::ImageFormat) {
+        let img = RgbImage::from_fn(64, 48, |x, y| image::Rgb([x as u8, y as u8, 0]));
+        img.save_with_format(path, format).unwrap();
+    }
+
+    fn params(source: &str, dest: &str, output_format: &str) -> EditParams {
+        EditParams {
+            file_id: None,
+            source_file_path: source.to_string(),
+            dest_file_path: dest.to_string(),
+            output_format: output_format.to_string(),
+            orientation: 1,
+            flip_horizontal: false,
+            flip_vertical: false,
+            rotate: 0,
+            crop: CropData {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            resize: ResizeData {
+                width: None,
+                height: None,
+            },
+            quality: Some(80),
+            filter: None,
+            brightness: None,
+            contrast: None,
+            blur: None,
+            hue_rotate: None,
+            saturation: None,
+            color_match: None,
+            photo_style: None,
+        }
+    }
+
+    #[test]
+    fn png_source_to_jpeg_output_succeeds() {
+        let root = std::env::temp_dir().join(format!("picaipic-edit-png-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.png");
+        let dest = root.join("photo_1.jpg");
+        write_fixture(&source, image::ImageFormat::Png);
+
+        let result = block_on(edit_image(params(
+            &source.to_string_lossy(),
+            &dest.to_string_lossy(),
+            "jpg",
+        )));
+        assert!(
+            result.is_ok(),
+            "PNG -> JPEG save must succeed: {:?}",
+            result.err()
+        );
+        assert!(dest.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn webp_source_to_jpeg_output_succeeds() {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-edit-webp-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.webp");
+        let dest = root.join("photo_1.jpg");
+        write_fixture(&source, image::ImageFormat::WebP);
+
+        let result = block_on(edit_image(params(
+            &source.to_string_lossy(),
+            &dest.to_string_lossy(),
+            "jpg",
+        )));
+        assert!(
+            result.is_ok(),
+            "WebP -> JPEG save must succeed: {:?}",
+            result.err()
+        );
+        assert!(dest.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn transparent_png_to_png_output_succeeds() {
+        let root =
+            std::env::temp_dir().join(format!("picaipic-edit-png2png-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.png");
+        let dest = root.join("photo_1.png");
+        let img = RgbaImage::from_fn(64, 48, |x, y| image::Rgba([x as u8, y as u8, 0, 128]));
+        img.save_with_format(&source, image::ImageFormat::Png)
+            .unwrap();
+
+        let result = block_on(edit_image(params(
+            &source.to_string_lossy(),
+            &dest.to_string_lossy(),
+            "png",
+        )));
+        assert!(
+            result.is_ok(),
+            "PNG -> PNG save must succeed: {:?}",
+            result.err()
+        );
+        assert!(dest.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

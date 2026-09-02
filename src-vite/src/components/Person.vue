@@ -55,8 +55,14 @@
       <ContextMenu :menuItems="personPanelMenuItems" :iconMenu="IconMore" :smallIcon="true" />
     </div>
 
+    <SidebarSearch
+      v-if="allPersons.length > 0"
+      v-model="personSearch"
+      :placeholder="$t('menu.person.search_persons')"
+    />
+
     <!-- Person List -->
-    <div v-if="allPersons.length > 0" class="grow overflow-x-hidden overflow-y-auto">
+    <div v-if="sortedPersons.length > 0" class="grow overflow-x-hidden overflow-y-auto">
       <ul>
         <li v-for="person in sortedPersons" :key="person.id" :id="'person-' + person.id">
           <div
@@ -112,6 +118,11 @@
           </div>
         </li>
       </ul>
+    </div>
+
+    <!-- Search miss only: an empty library still needs the indexing guidance below. -->
+    <div v-else-if="personSearch.trim()" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
+      <span class="text-sm text-center">{{ $t('menu.person.no_matches') }}</span>
     </div>
 
     <!-- No Persons Found Message -->
@@ -179,6 +190,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
 import { getPersons, renamePerson, deletePerson, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
+import { useToast } from '@/common/toast';
 import { 
   IconPerson, 
   IconMore, 
@@ -190,6 +202,7 @@ import {
 
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import SidebarSearch from '@/components/SidebarSearch.vue';
 
 const props = defineProps({
   titlebar: {
@@ -243,10 +256,21 @@ let unlistenProgress: (() => void) | null = null;
 let unlistenFinished: (() => void) | null = null;
 let unlistenCluster: (() => void) | null = null;
 
-const sortedPersons = computed(() => allPersons.value);
+const personSearch = ref('');
+
+// Sidebar search stays local: it filters the already-loaded person list instead of
+// re-querying the face index. Unnamed people match their "Person <id>" fallback.
+const sortedPersons = computed(() => {
+  const query = personSearch.value.trim().toLowerCase();
+  if (!query) return allPersons.value;
+  return allPersons.value.filter((person: any) =>
+    String(person?.name || `Person ${person?.id}`).toLowerCase().includes(query)
+  );
+});
 
 // Computed property to format cluster progress text using i18n
 const { t } = useI18n();
+const toast = useToast();
 const clusterProgressText = computed(() => {
   const { phase, current, total } = clusterProgress.value;
   switch (phase) {
@@ -329,9 +353,13 @@ onMounted(async () => {
   });
   
   unlistenFinished = await listenFaceIndexFinished((event: any) => {
+    const error = event.payload?.error;
     isIndexing.value = false;
     indexProgress.value = { current: 0, total: 0, faces_found: 0, phase: 'indexing' };
     clusterProgress.value = { phase: '', current: 0, total: 0 };
+    if (error) {
+      toast.error(t('face_index.failed', { error }));
+    }
     loadPersons(); // Reload persons after indexing completes
     checkFaceStats();
   });
@@ -451,6 +479,7 @@ async function clickIndexFaces() {
     await checkFaceStats();
   } catch (e) {
     console.error('indexFaces error:', e);
+    toast.error(t('face_index.failed', { error: String(e) }));
     isIndexing.value = false;
   }
 }

@@ -3,6 +3,13 @@
     <div class="sidebar-panel-header">
       <span class="sidebar-panel-header-title flex-1">{{ $t('album.smart_album_list') }}</span>
       <TButton
+        v-if="albums.length > 0"
+        :icon="IconSearch"
+        :buttonSize="'small'"
+        :tooltip="$t('album.search_smart_albums')"
+        @click="toggleSearch"
+      />
+      <TButton
         :icon="IconAdd"
         :buttonSize="'small'"
         :tooltip="$t('album.add_smart_album')"
@@ -10,11 +17,18 @@
       />
     </div>
 
+    <SidebarSearch
+      v-if="showSearch"
+      v-model="searchQuery"
+      :placeholder="$t('album.search_smart_albums')"
+      autofocus
+    />
+
     <ul
-      v-if="albums.length > 0"
+      v-if="visibleAlbums.length > 0"
       class="flex-1 overflow-x-hidden overflow-y-auto rounded-box select-none"
     >
-      <li v-for="album in albums" :key="album.id">
+      <li v-for="album in visibleAlbums" :key="album.id">
         <div
           :class="[
             'sidebar-item group',
@@ -41,7 +55,9 @@
       </li>
     </ul>
     <div v-else class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
-      <span class="text-sm text-center">{{ $t('album.no_smart_albums') }}</span>
+      <span class="text-sm text-center">{{
+        searchQuery ? $t('album.no_smart_album_matches') : $t('album.no_smart_albums')
+      }}</span>
     </div>
 
     <SmartAlbumEdit
@@ -67,10 +83,11 @@
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { libConfig } from '@/common/config';
-import { IconAdd, IconEdit, IconMore, IconTag, IconTrash } from '@/common/icons';
+import { IconAdd, IconEdit, IconMore, IconSearch, IconTag, IconTrash } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import SidebarSearch from '@/components/SidebarSearch.vue';
 import SmartAlbumEdit from '@/components/SmartAlbumEdit.vue';
 
 const { t } = useI18n();
@@ -78,6 +95,22 @@ const albums = computed(() => libConfig.smartAlbums || []);
 const showEdit = ref(false);
 const editing = ref<any | null>(null);
 const deleting = ref<any | null>(null);
+const showSearch = ref(false);
+const searchQuery = ref('');
+
+// Sidebar search: keep it local to the panel so it never touches the library query.
+const visibleAlbums = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return albums.value;
+  return albums.value.filter((album: any) =>
+    String(album?.name || '').toLowerCase().includes(query)
+  );
+});
+
+function toggleSearch() {
+  showSearch.value = !showSearch.value;
+  if (!showSearch.value) searchQuery.value = '';
+}
 
 function isSelected(album: any) {
   return libConfig.smartAlbum?.type === 'custom' && libConfig.smartAlbum?.id === album.id;

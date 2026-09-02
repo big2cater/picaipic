@@ -24,6 +24,11 @@ const MOTION_CACHE_MIN_BYTES: u64 = 1024;
 const MOTION_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Target size after pruning (~70% of max).
 const MOTION_CACHE_TARGET_BYTES: u64 = (MOTION_CACHE_MAX_BYTES * 7) / 10;
+/// Recently written/accessed entries are kept so preview/export can open them.
+const MOTION_CACHE_ACTIVE_GRACE: Duration = Duration::from_secs(15 * 60);
+/// Abandoned extraction temp files older than this are safe to remove.
+const MOTION_CACHE_TMP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+const LEGACY_TEMP_PURGE_MARKER: &str = ".legacy-temp-purge-v1";
 
 /// Parsed Motion Photo metadata from XMP.
 #[derive(Debug, Clone)]
@@ -400,27 +405,61 @@ fn parse_container_directory(xmp: &str) -> Option<MotionPhotoInfo> {
     None
 }
 
-/// Extract a text value from XMP by tag name (simple regex-free approach).
-fn extract_xmp_value(xmp: &str, tag: &str) -> Option<String> {
-    // Try <Namespace:Tag>value</Namespace:Tag>
-    let patterns = [format!(">{}", tag), format!(":{}>", tag)];
+fn parse_unsigned_xmp_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()))
+        .then(|| trimmed.to_string())
+}
 
-    // Find the tag and extract its content
-    for line in xmp.lines() {
-        for pattern in &patterns {
-            if line.contains(pattern) || line.contains(tag) {
-                // Look for >value</ ...>
-                if let Some(start) = line.find('>') {
-                    if let Some(end_rel) = line[start + 1..].find('<') {
-                        let value = &line[start + 1..start + 1 + end_rel];
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-                            return Some(trimmed.to_string());
-                        }
+fn extract_xmp_attribute_value(
+    element: &quick_xml::events::BytesStart<'_>,
+    tag: &[u8],
+) -> Option<String> {
+    for attribute in element.attributes().with_checks(true).flatten() {
+        if attribute.key.local_name().as_ref() == tag {
+            let value = attribute.unescape_value().ok()?;
+            if let Some(value) = parse_unsigned_xmp_value(value.as_ref()) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Extract an unsigned value from either an XMP element or attribute.
+fn extract_xmp_value(xmp: &str, tag: &str) -> Option<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(xmp);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let tag = tag.as_bytes();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) => {
+                if let Some(value) = extract_xmp_attribute_value(&element, tag) {
+                    return Some(value);
+                }
+
+                if element.local_name().as_ref() == tag {
+                    let value = reader.read_text(element.name()).ok()?;
+                    if let Some(value) = parse_unsigned_xmp_value(value.as_ref()) {
+                        return Some(value);
                     }
                 }
             }
+            Ok(Event::Empty(element)) => {
+                if let Some(value) = extract_xmp_attribute_value(&element, tag) {
+                    return Some(value);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
         }
+        buf.clear();
     }
     None
 }
@@ -441,18 +480,29 @@ pub fn motion_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// Create the motion cache directory on startup and purge legacy OS-temp extracts.
 pub fn init_motion_cache(app: &AppHandle) {
-    if let Err(e) = motion_cache_dir(app) {
-        eprintln!("Failed to init motion cache: {}", e);
+    let cache_dir = match motion_cache_dir(app) {
+        Ok(cache_dir) => cache_dir,
+        Err(e) => {
+            eprintln!("Failed to init motion cache: {}", e);
+            return;
+        }
+    };
+    let purge_marker = cache_dir.join(LEGACY_TEMP_PURGE_MARKER);
+    if !purge_marker.exists() {
+        match purge_legacy_motion_temp_files_in(&std::env::temp_dir()) {
+            Ok(()) => {
+                if let Err(e) = fs::write(&purge_marker, []) {
+                    eprintln!("Failed to record legacy motion-temp purge: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Failed to purge legacy motion temp files: {}", e),
+        }
     }
-    purge_legacy_motion_temp_files();
 }
 
-/// Remove historical `picaipic_motion_*.mp4` files left in the system temp dir.
-pub fn purge_legacy_motion_temp_files() {
-    let temp_dir = std::env::temp_dir();
-    let Ok(entries) = fs::read_dir(&temp_dir) else {
-        return;
-    };
+fn purge_legacy_motion_temp_files_in(temp_dir: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(temp_dir)
+        .map_err(|e| format!("Failed to read system temp directory: {}", e))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -460,6 +510,7 @@ pub fn purge_legacy_motion_temp_files() {
             let _ = fs::remove_file(entry.path());
         }
     }
+    Ok(())
 }
 
 /// Clear the motion cache directory (recreate empty).
@@ -493,10 +544,20 @@ pub fn extract_motion_video_to_cache(
 
     let cache_name = motion_cache_filename(file_path, info)?;
     let cache_path = cache_dir.join(&cache_name);
-    if let Ok(meta) = fs::metadata(&cache_path) {
-        if meta.is_file() && meta.len() >= MOTION_CACHE_MIN_BYTES {
-            return Ok(cache_path.to_string_lossy().to_string());
-        }
+    let expected_video_len = match info.video_length {
+        Some(length) => length,
+        None => fs::metadata(file_path)
+            .map_err(|e| format!("Failed to stat source: {}", e))?
+            .len()
+            .checked_sub(info.video_offset)
+            .ok_or_else(|| "Motion Photo video offset exceeds source size".to_string())?,
+    };
+    if validate_motion_cache_file(&cache_path, expected_video_len) {
+        touch_motion_cache_file(&cache_path);
+        return Ok(cache_path.to_string_lossy().to_string());
+    }
+    if cache_path.exists() {
+        let _ = fs::remove_file(&cache_path);
     }
 
     let mut file = fs::File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
@@ -521,19 +582,37 @@ pub fn extract_motion_video_to_cache(
             video_data.len()
         ));
     }
+    if !is_plausible_mp4(&video_data, video_data.len() as u64) {
+        return Err("Motion Photo video segment is not a valid ISO-BMFF/MP4 payload".to_string());
+    }
 
-    let tmp_path = cache_dir.join(format!("{}.tmp", cache_name));
-    fs::write(&tmp_path, &video_data)
-        .map_err(|e| format!("Failed to write motion cache temp: {}", e))?;
+    let tmp_path = cache_dir.join(format!("{}.{}.tmp", cache_name, uuid::Uuid::new_v4()));
+    if let Err(e) = fs::write(&tmp_path, &video_data) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to write motion cache temp: {}", e));
+    }
 
-    // Windows: destination must not exist for rename to succeed.
+    // A concurrent extraction of the same source may have won while we wrote.
+    if validate_motion_cache_file(&cache_path, expected_video_len) {
+        let _ = fs::remove_file(&tmp_path);
+        touch_motion_cache_file(&cache_path);
+        auto_cleanup_motion_cache(cache_dir);
+        return Ok(cache_path.to_string_lossy().to_string());
+    }
     if cache_path.exists() {
         let _ = fs::remove_file(&cache_path);
     }
-    fs::rename(&tmp_path, &cache_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize motion cache file: {}", e)
-    })?;
+    if let Err(rename_error) = fs::rename(&tmp_path, &cache_path) {
+        if validate_motion_cache_file(&cache_path, expected_video_len) {
+            let _ = fs::remove_file(&tmp_path);
+        } else {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!(
+                "Failed to finalize motion cache file: {}",
+                rename_error
+            ));
+        }
+    }
 
     auto_cleanup_motion_cache(cache_dir);
 
@@ -762,6 +841,36 @@ fn fnv1a64(value: &str) -> u64 {
     h
 }
 
+fn is_plausible_mp4(bytes: &[u8], total_len: u64) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let box_size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as u64;
+    box_size >= 16 && box_size <= total_len
+}
+
+fn validate_motion_cache_file(path: &Path, expected_len: u64) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() < MOTION_CACHE_MIN_BYTES || meta.len() != expected_len {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).is_ok() && is_plausible_mp4(&header, meta.len())
+}
+
+fn touch_motion_cache_file(path: &Path) {
+    let Ok(file) = fs::OpenOptions::new().write(true).open(path) else {
+        return;
+    };
+    let times = fs::FileTimes::new().set_modified(SystemTime::now());
+    let _ = file.set_times(times);
+}
+
 /// Drop oldest motion cache files until total size is at or below target.
 fn auto_cleanup_motion_cache(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -769,6 +878,7 @@ fn auto_cleanup_motion_cache(dir: &Path) {
     };
     let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
     let mut total: u64 = 0;
+    let now = SystemTime::now();
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -779,6 +889,12 @@ fn auto_cleanup_motion_cache(dir: &Path) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.ends_with(".tmp") {
+            if file_age(meta.modified().ok(), now) > MOTION_CACHE_TMP_MAX_AGE {
+                let _ = fs::remove_file(entry.path());
+            }
+            continue;
+        }
+        if !name.starts_with("picaipic_motion_") || !name.ends_with(".mp4") {
             continue;
         }
         total = total.saturating_add(meta.len());
@@ -792,14 +908,23 @@ fn auto_cleanup_motion_cache(dir: &Path) {
         return;
     }
     files.sort_by_key(|f| f.2);
-    for (path, size, _) in files {
+    for (path, size, modified) in files {
         if total <= MOTION_CACHE_TARGET_BYTES {
             break;
+        }
+        if file_age(Some(modified), now) <= MOTION_CACHE_ACTIVE_GRACE {
+            continue;
         }
         if fs::remove_file(&path).is_ok() {
             total = total.saturating_sub(size);
         }
     }
+}
+
+fn file_age(modified: Option<SystemTime>, now: SystemTime) -> Duration {
+    modified
+        .and_then(|modified| now.duration_since(modified).ok())
+        .unwrap_or_default()
 }
 
 /// Find a subslice in a byte buffer.
@@ -813,6 +938,22 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("picaipic-xmp-{}-{}", label, uuid::Uuid::new_v4()))
+    }
+
+    fn fake_mp4(len: usize) -> Vec<u8> {
+        assert!(len >= MOTION_CACHE_MIN_BYTES as usize);
+        let mut bytes = vec![0u8; len];
+        bytes[0..4].copy_from_slice(&24u32.to_be_bytes());
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[8..12].copy_from_slice(b"isom");
+        bytes[12..16].copy_from_slice(&0u32.to_be_bytes());
+        bytes[16..20].copy_from_slice(b"isom");
+        bytes[20..24].copy_from_slice(b"mp42");
+        bytes
+    }
 
     #[test]
     fn complete_jpeg_header_reaches_metadata_boundary() {
@@ -863,6 +1004,33 @@ mod tests {
     }
 
     #[test]
+    fn xmp_unsigned_value_supports_elements_and_attributes() {
+        assert_eq!(
+            extract_xmp_value(
+                "<GCamera:MotionPhotoOffset>42</GCamera:MotionPhotoOffset>",
+                "MotionPhotoOffset",
+            )
+            .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            extract_xmp_value(
+                "<rdf:Description GCamera:MotionPhotoOffset=\"84\" />",
+                "MotionPhotoOffset",
+            )
+            .as_deref(),
+            Some("84")
+        );
+        assert_eq!(
+            extract_xmp_value(
+                "<GCamera:OtherMotionPhotoOffset>126</GCamera:OtherMotionPhotoOffset>",
+                "MotionPhotoOffset",
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn profiled_motion_detection_skips_file_fallback_for_complete_header() {
         let header = [
             0xff, 0xd8, // SOI
@@ -883,5 +1051,152 @@ mod tests {
         assert_eq!(profile.header_complete_check_attempts, 1);
         assert_eq!(profile.file_fallback_attempts, 0);
         assert_eq!(profile.parse_attempts, 0);
+    }
+
+    #[test]
+    fn corrupt_sized_cache_entry_is_rebuilt_from_source() {
+        let root = test_dir("corrupt-cache");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let source = root.join("motion.jpg");
+        let video = fake_mp4(MOTION_CACHE_MIN_BYTES as usize);
+        let offset = 64usize;
+        let mut source_bytes = vec![0u8; offset];
+        source_bytes.extend_from_slice(&video);
+        fs::write(&source, source_bytes).unwrap();
+        let info = MotionPhotoInfo {
+            video_offset: offset as u64,
+            video_length: Some(video.len() as u64),
+        };
+        let cache_path =
+            cache_dir.join(motion_cache_filename(source.to_str().unwrap(), &info).unwrap());
+        fs::write(&cache_path, vec![0x7f; MOTION_CACHE_MIN_BYTES as usize]).unwrap();
+
+        let extracted =
+            extract_motion_video_to_cache(source.to_str().unwrap(), &info, &cache_dir).unwrap();
+
+        assert_eq!(Path::new(&extracted), cache_path);
+        assert_eq!(fs::read(&cache_path).unwrap(), video);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncated_cache_with_valid_mp4_header_is_rebuilt() {
+        let root = test_dir("truncated-cache");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let source = root.join("motion.jpg");
+        let video = fake_mp4((MOTION_CACHE_MIN_BYTES * 2) as usize);
+        let offset = 64usize;
+        let mut source_bytes = vec![0u8; offset];
+        source_bytes.extend_from_slice(&video);
+        fs::write(&source, source_bytes).unwrap();
+        let info = MotionPhotoInfo {
+            video_offset: offset as u64,
+            video_length: Some(video.len() as u64),
+        };
+        let cache_path =
+            cache_dir.join(motion_cache_filename(source.to_str().unwrap(), &info).unwrap());
+        fs::write(&cache_path, fake_mp4(MOTION_CACHE_MIN_BYTES as usize)).unwrap();
+
+        extract_motion_video_to_cache(source.to_str().unwrap(), &info, &cache_dir).unwrap();
+
+        assert_eq!(fs::read(&cache_path).unwrap(), video);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_extractions_share_one_complete_cache_entry() {
+        let root = test_dir("concurrent-cache");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let source = root.join("motion.jpg");
+        let video = fake_mp4((MOTION_CACHE_MIN_BYTES * 64) as usize);
+        let offset = 64usize;
+        let mut source_bytes = vec![0u8; offset];
+        source_bytes.extend_from_slice(&video);
+        fs::write(&source, source_bytes).unwrap();
+        let info = MotionPhotoInfo {
+            video_offset: offset as u64,
+            video_length: Some(video.len() as u64),
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let barrier = barrier.clone();
+            let source = source.clone();
+            let cache_dir = cache_dir.clone();
+            let info = info.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                extract_motion_video_to_cache(source.to_str().unwrap(), &info, &cache_dir)
+            }));
+        }
+        let paths = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(paths.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(fs::read(&paths[0]).unwrap(), video);
+        assert!(fs::read_dir(&cache_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_video_segment_is_not_cached() {
+        let root = test_dir("invalid-video");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let source = root.join("motion.jpg");
+        let offset = 64usize;
+        let mut source_bytes = vec![0u8; offset];
+        source_bytes.extend(vec![0x7f; MOTION_CACHE_MIN_BYTES as usize]);
+        fs::write(&source, source_bytes).unwrap();
+        let info = MotionPhotoInfo {
+            video_offset: offset as u64,
+            video_length: Some(MOTION_CACHE_MIN_BYTES),
+        };
+
+        let error =
+            extract_motion_video_to_cache(source.to_str().unwrap(), &info, &cache_dir).unwrap_err();
+
+        assert!(error.contains("not a valid ISO-BMFF/MP4"));
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_temp_purge_only_removes_matching_files() {
+        let root = test_dir("legacy-purge");
+        fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("picaipic_motion_old.mp4");
+        let unrelated = root.join("other_motion.mp4");
+        fs::write(&legacy, b"legacy").unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+
+        purge_legacy_motion_temp_files_in(&root).unwrap();
+
+        assert!(!legacy.exists());
+        assert!(unrelated.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_age_protects_recently_used_entries() {
+        let now = SystemTime::now();
+        assert!(file_age(Some(now), now) <= MOTION_CACHE_ACTIVE_GRACE);
+        assert!(
+            file_age(
+                now.checked_sub(MOTION_CACHE_ACTIVE_GRACE + Duration::from_secs(1)),
+                now,
+            ) > MOTION_CACHE_ACTIVE_GRACE
+        );
     }
 }

@@ -20,7 +20,8 @@ use instant_distance::{Builder as HnswBuilder, HnswMap, Search as HnswSearch};
 use ndarray::Array4;
 use rayon::{ThreadPoolBuilder, prelude::*};
 use rusqlite::{
-    Connection, OptionalExtension, Result, ToSql, params, params_from_iter, types::ValueRef,
+    Connection, OptionalExtension, Result, ToSql, Transaction, TransactionBehavior, params,
+    params_from_iter, types::ValueRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -434,6 +435,21 @@ pub struct AFolder {
     pub file_count: Option<i64>,               // file count (populated by get_favorite_folders)
 }
 
+/// One folder handed to the sidebar folder search.
+///
+/// The album tree loads children lazily on expand, so the sidebar cannot filter it
+/// directly; it builds a filtered tree from this flat list instead.
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderSearchHit {
+    pub id: i64,
+    pub album_id: i64,
+    pub name: String,
+    pub path: String,
+    pub is_favorite: bool,
+    pub created_at: Option<i64>,
+    pub modified_at: Option<i64>,
+}
+
 impl AFolder {
     /// create a new folder struct
     fn new(album_id: i64, folder_path: &str) -> Result<Self, String> {
@@ -753,6 +769,43 @@ impl AFolder {
             .optional()
             .map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    /// Every folder of every album, for the sidebar folder search.
+    ///
+    /// Matching happens in the frontend over this flat list: the album tree only
+    /// holds the folders the user already expanded, so filtering it server-side per
+    /// keystroke would miss collapsed branches, and filtering it client-side would
+    /// need every ancestor loaded first. Folder counts are orders of magnitude
+    /// smaller than file counts, so one pass stays cheap.
+    pub fn get_all_for_search() -> Result<Vec<FolderSearchHit>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, album_id, name, path, is_favorite, created_at, modified_at
+                 FROM afolders
+                 ORDER BY album_id ASC, path ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![], |row| {
+                Ok(FolderSearchHit {
+                    id: row.get(0)?,
+                    album_id: row.get(1)?,
+                    name: row.get(2)?,
+                    path: row.get(3)?,
+                    is_favorite: row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                    created_at: row.get(5)?,
+                    modified_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut folders = Vec::new();
+        for row in rows {
+            folders.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(folders)
     }
 
     // get all favorite folders
@@ -1391,9 +1444,22 @@ impl AFile {
                     }
                 }
                 3 => {
-                    let (w, h) = t_image::get_raw_dimensions(file_path)?;
-                    width = w;
-                    height = h;
+                    // LibRaw cannot decode every RAW variant (for example sampled X3F).
+                    // Keep the file indexed with unresolved dimensions instead of
+                    // aborting here: the old `?` dropped the row entirely, which is why
+                    // undecodable formats had to be removed from `RAW_IMGS` at all.
+                    match t_image::get_raw_dimensions(file_path) {
+                        Ok((w, h)) => {
+                            width = w;
+                            height = h;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "Unable to resolve RAW dimensions for '{}'; indexing with unknown dimensions: {}",
+                                file_path, error
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2401,8 +2467,29 @@ impl AFile {
         Self::delete_with_conn(&mut conn, id)
     }
 
-    fn delete_with_conn(conn: &mut Connection, id: i64) -> Result<usize, String> {
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+    pub(crate) fn delete_for_library(id: i64, library_id: &str) -> Result<usize, String> {
+        let mut conn = open_conn_for_library(library_id)?;
+        let deleted = Self::delete_with_conn(&mut conn, id)?;
+        if deleted > 0 {
+            clear_embed_matrix_cache();
+        }
+        Ok(deleted)
+    }
+
+    fn delete_in_transaction(tx: &Transaction<'_>, id: i64) -> Result<usize, String> {
+        tx.execute(
+            "UPDATE persons
+             SET cover_face_id = (
+                     SELECT MIN(replacement.id)
+                     FROM faces replacement
+                     WHERE replacement.person_id = persons.id
+                       AND replacement.file_id != ?1
+                 ),
+                 thumbnail = NULL
+             WHERE cover_face_id IN (SELECT id FROM faces WHERE file_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM athumbs WHERE file_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         // Best-effort hash hygiene (tables may not exist on ancient DBs).
@@ -2411,6 +2498,29 @@ impl AFile {
         let result = tx
             .execute("DELETE FROM afiles WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    fn delete_with_conn(conn: &mut Connection, id: i64) -> Result<usize, String> {
+        Self::delete_with_conn_if(conn, id, |_| Ok(true))
+    }
+
+    pub(crate) fn delete_with_conn_if<F>(
+        conn: &mut Connection,
+        id: i64,
+        guard: F,
+    ) -> Result<usize, String>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<bool, String>,
+    {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        if !guard(&tx)? {
+            tx.rollback().map_err(|e| e.to_string())?;
+            return Ok(0);
+        }
+        let result = Self::delete_in_transaction(&tx, id)?;
         tx.commit().map_err(|e| e.to_string())?;
         if result > 0 {
             invalidate_embed_matrix_for_current_db();
@@ -3174,6 +3284,67 @@ impl AFile {
         Self::get_file_info(file_id)
     }
 
+    /// Refresh metadata and invalidate derived caches after an in-place image edit.
+    pub fn refresh_after_image_edit(file_id: i64, file_path: &str) -> Result<Option<Self>, String> {
+        let old_file = Self::get_file_info(file_id)?
+            .ok_or_else(|| format!("File not found after image edit: {file_id}"))?;
+        let stored_path = old_file
+            .file_path
+            .as_deref()
+            .ok_or_else(|| format!("Stored file path is missing for image edit: {file_id}"))?;
+        if !t_utils::paths_refer_to_same_item(Path::new(stored_path), Path::new(file_path)) {
+            return Err(format!(
+                "Edited path does not match file {file_id}: '{file_path}'"
+            ));
+        }
+
+        let mut refreshed = Self::new(
+            old_file.folder_id,
+            file_path,
+            old_file.file_type.unwrap_or(0),
+        )?;
+        refreshed.id = Some(file_id);
+        refreshed.rating = old_file.rating;
+        refreshed.last_scan_time = Some(chrono::Utc::now().timestamp_millis());
+
+        let thumb_key = AThumb::fetch_thumb_key(file_id)?;
+        let thumb_album_id = AThumb::get_file_album_id(file_id)?;
+        let library_id = AThumb::get_current_library_id();
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let updated = Self::update_with_conn(&tx, file_id, &refreshed)?;
+        if updated != 1 {
+            return Err(format!(
+                "Expected to refresh one edited file row, updated {updated}"
+            ));
+        }
+        tx.execute("DELETE FROM athumbs WHERE file_id = ?1", params![file_id])
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "UPDATE afiles SET embeds = NULL WHERE id = ?1",
+            params![file_id],
+        )
+        .map_err(|error| error.to_string())?;
+        // These tables may be absent only in very old databases; a later dedup
+        // scan will recreate the derived values after invalidation.
+        let _ = tx.execute(
+            "DELETE FROM file_hashes WHERE file_id = ?1",
+            params![file_id],
+        );
+        let _ = tx.execute(
+            "DELETE FROM file_phashes WHERE file_id = ?1",
+            params![file_id],
+        );
+        tx.commit().map_err(|error| error.to_string())?;
+
+        if let (Some(thumb_key), Some(album_id)) = (thumb_key, thumb_album_id) {
+            AThumb::delete_thumb_cache_for_key(&library_id, album_id, &thumb_key);
+        }
+        invalidate_embed_matrix_for_current_db();
+        Self::get_file_info(file_id)
+    }
+
     /// update a file column value
     pub fn update_column(
         file_id: i64,
@@ -3281,14 +3452,33 @@ impl AFile {
     /// delete unseen files in an album (database only)
     pub fn delete_unseen_in_album(album_id: i64, current_scan_time: i64) -> Result<usize, String> {
         let mut conn = open_conn()?;
+        Self::delete_unseen_in_album_with_conn(&mut conn, album_id, current_scan_time)
+    }
+
+    fn delete_unseen_in_album_with_conn(
+        conn: &mut Connection,
+        album_id: i64,
+        current_scan_time: i64,
+    ) -> Result<usize, String> {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let query = "DELETE FROM afiles 
+        let stale_files = "SELECT id FROM afiles
             WHERE last_scan_time < ?1 
             AND folder_id IN (SELECT id FROM afolders WHERE album_id = ?2)";
+        // Old library databases may predate the ON DELETE CASCADE constraints. Remove
+        // derived rows explicitly before deleting afiles so a normal rescan repairs them too.
+        for table in ["athumbs", "file_hashes", "file_phashes"] {
+            let query = format!("DELETE FROM {table} WHERE file_id IN ({stale_files})");
+            tx.execute(&query, params![current_scan_time, album_id])
+                .map_err(|e| e.to_string())?;
+        }
+        let query = format!("DELETE FROM afiles WHERE id IN ({stale_files})");
         let result = tx
-            .execute(query, params![current_scan_time, album_id])
+            .execute(&query, params![current_scan_time, album_id])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        if result > 0 {
+            invalidate_embed_matrix_for_current_db();
+        }
         Ok(result)
     }
 
@@ -6303,6 +6493,42 @@ mod crud_tests {
                  error_code INTEGER NOT NULL,
                  FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
              );
+             CREATE TABLE atags (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE afile_tags (
+                 file_id INTEGER NOT NULL,
+                 tag_id INTEGER NOT NULL,
+                 PRIMARY KEY(file_id, tag_id),
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE,
+                 FOREIGN KEY(tag_id) REFERENCES atags(id) ON DELETE CASCADE
+             );
+             CREATE TABLE persons (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT,
+                 cover_face_id INTEGER,
+                 thumbnail BLOB
+             );
+             CREATE TABLE faces (
+                 id INTEGER PRIMARY KEY,
+                 file_id INTEGER NOT NULL,
+                 person_id INTEGER,
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
+             );
+             CREATE TABLE acollections (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE acollections_files (
+                 collection_id INTEGER NOT NULL,
+                 file_id INTEGER NOT NULL,
+                 PRIMARY KEY(collection_id, file_id),
+                 FOREIGN KEY(collection_id) REFERENCES acollections(id) ON DELETE CASCADE,
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
+             );
+             CREATE TABLE duplicate_groups (id INTEGER PRIMARY KEY);
+             CREATE TABLE duplicate_group_items (
+                 group_id INTEGER NOT NULL,
+                 file_id INTEGER NOT NULL,
+                 PRIMARY KEY(group_id, file_id),
+                 FOREIGN KEY(group_id) REFERENCES duplicate_groups(id) ON DELETE CASCADE,
+                 FOREIGN KEY(file_id) REFERENCES afiles(id) ON DELETE CASCADE
+             );
              INSERT INTO afolders (id, album_id, name, path) VALUES (1, 1, 'fixture', '/fixture');",
         )
         .unwrap();
@@ -6744,6 +6970,47 @@ mod crud_tests {
             [file_id],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO afiles (folder_id, name, size, rating) VALUES (1, 'other.txt', 1, 0)",
+            [],
+        )
+        .unwrap();
+        let other_file_id = conn.last_insert_rowid();
+        conn.execute_batch(
+            "INSERT INTO atags (id, name) VALUES (1, 'tag');
+             INSERT INTO acollections (id, name) VALUES (1, 'collection');
+             INSERT INTO duplicate_groups (id) VALUES (1);
+             INSERT INTO persons (id, name, cover_face_id, thumbnail)
+                 VALUES (1, 'person', NULL, X'01');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO afile_tags (file_id, tag_id) VALUES (?1, 1)",
+            [file_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO acollections_files (collection_id, file_id) VALUES (1, ?1)",
+            [file_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO duplicate_group_items (group_id, file_id) VALUES (1, ?1)",
+            [file_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO faces (id, file_id, person_id) VALUES (1, ?1, 1)",
+            [file_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO faces (id, file_id, person_id) VALUES (2, ?1, 1)",
+            [other_file_id],
+        )
+        .unwrap();
+        conn.execute("UPDATE persons SET cover_face_id = 1 WHERE id = 1", [])
+            .unwrap();
 
         file.name = "renamed.txt".into();
         file.rating = Some(4);
@@ -6780,6 +7047,30 @@ mod crud_tests {
             .unwrap()
                 == 0
         );
+        for table in [
+            "afile_tags",
+            "acollections_files",
+            "duplicate_group_items",
+            "faces",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE file_id = ?1"),
+                    [file_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table} should cascade file deletion");
+        }
+        let (cover_face_id, thumbnail): (Option<i64>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT cover_face_id, thumbnail FROM persons WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cover_face_id, Some(2));
+        assert!(thumbnail.is_none());
 
         drop(conn);
         let _ = fs::remove_file(db_path);
@@ -6813,6 +7104,79 @@ mod crud_tests {
                 .unwrap()
         };
         assert_eq!(times, vec![123, 123]);
+
+        drop(conn);
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(media_path);
+    }
+
+    #[test]
+    fn sweep_removes_derived_rows_even_without_foreign_key_enforcement() {
+        let (mut conn, db_path, media_path) = fixture();
+        conn.execute_batch(
+            "CREATE TABLE file_hashes (file_id INTEGER PRIMARY KEY, hash TEXT NOT NULL);
+             CREATE TABLE file_phashes (file_id INTEGER PRIMARY KEY, hash INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let path = media_path.to_string_lossy();
+        let stale = AFile::new(1, &path, 0).expect("build stale fixture AFile");
+        assert_eq!(stale.insert_with_conn(&conn).unwrap(), 1);
+        let stale_id = conn.last_insert_rowid();
+        let mut seen = AFile::new(1, &path, 0).expect("build seen fixture AFile");
+        seen.name = "seen.txt".into();
+        assert_eq!(seen.insert_with_conn(&conn).unwrap(), 1);
+        let seen_id = conn.last_insert_rowid();
+        AFile::mark_seen_batch_with_conn(&mut conn, &[seen_id], 200).unwrap();
+
+        for file_id in [stale_id, seen_id] {
+            conn.execute(
+                "INSERT INTO athumbs (file_id, error_code) VALUES (?1, 0)",
+                [file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_hashes (file_id, hash) VALUES (?1, 'hash')",
+                [file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_phashes (file_id, hash) VALUES (?1, 1)",
+                [file_id],
+            )
+            .unwrap();
+        }
+
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        assert_eq!(
+            AFile::delete_unseen_in_album_with_conn(&mut conn, 1, 200).unwrap(),
+            1
+        );
+        for table in ["afiles", "athumbs", "file_hashes", "file_phashes"] {
+            let stale_count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE file_id = ?1"),
+                    [stale_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| {
+                    conn.query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"),
+                        [stale_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                });
+            assert_eq!(stale_count, 0, "{table} should not retain stale rows");
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM afiles WHERE id = ?1",
+                [seen_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
 
         drop(conn);
         let _ = fs::remove_file(db_path);
@@ -8595,23 +8959,14 @@ impl Person {
             .map_err(|e| e.to_string())?;
         Ok(result)
     }
+}
 
-    /// Create a new person (usually from face clustering)
-    pub fn create(name: Option<&str>) -> Result<i64, String> {
-        let conn = open_conn()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        conn.execute(
-            "INSERT INTO persons (name, created_at) VALUES (?1, ?2)",
-            params![name, now],
-        )
-        .map_err(|e| e.to_string())?;
-
-        Ok(conn.last_insert_rowid())
-    }
+/// One planned cluster assignment. Exactly one of `person_id` or `person_name`
+/// is set: existing people keep their ID, new clusters create one in the commit.
+pub struct FaceClusterAssignment {
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+    pub face_ids: Vec<i64>,
 }
 
 /// Face struct for storing detected faces
@@ -8799,16 +9154,81 @@ impl Face {
         Ok(())
     }
 
-    /// Assign a face to a person
-    pub fn assign_to_person(face_id: i64, person_id: i64) -> Result<usize, String> {
-        let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "UPDATE faces SET person_id = ?1 WHERE id = ?2",
-                params![person_id, face_id],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(result)
+    /// Commit all new-person creation and previously-unassigned face links together.
+    /// A face that gained an assignment after clustering was planned aborts the entire
+    /// transaction so a concurrent manual edit is never partially overwritten.
+    pub fn apply_cluster_assignments(
+        assignments: &[FaceClusterAssignment],
+    ) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        Self::apply_cluster_assignments_with_conn(&mut conn, assignments)
+    }
+
+    fn apply_cluster_assignments_with_conn(
+        conn: &mut Connection,
+        assignments: &[FaceClusterAssignment],
+    ) -> Result<usize, String> {
+        if assignments.is_empty() {
+            return Ok(0);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to start cluster assignment transaction: {}", e))?;
+        let result = (|| -> Result<usize, String> {
+            let mut create_person = tx
+                .prepare("INSERT INTO persons (name, created_at) VALUES (?1, ?2)")
+                .map_err(|e| e.to_string())?;
+            let mut assign_face = tx
+                .prepare("UPDATE faces SET person_id = ?1 WHERE id = ?2 AND person_id IS NULL")
+                .map_err(|e| e.to_string())?;
+            let mut assigned = 0usize;
+
+            for assignment in assignments {
+                let person_id = match (assignment.person_id, assignment.person_name.as_deref()) {
+                    (Some(id), None) => id,
+                    (None, Some(name)) => {
+                        create_person
+                            .execute(params![name, now])
+                            .map_err(|e| e.to_string())?;
+                        tx.last_insert_rowid()
+                    }
+                    _ => {
+                        return Err(
+                            "Cluster assignment must reference an existing person or create one"
+                                .to_string(),
+                        );
+                    }
+                };
+
+                for &face_id in &assignment.face_ids {
+                    let changed = assign_face
+                        .execute(params![person_id, face_id])
+                        .map_err(|e| e.to_string())?;
+                    if changed != 1 {
+                        return Err(format!(
+                            "Face {} changed while clustering; assignment was rolled back",
+                            face_id
+                        ));
+                    }
+                    assigned += 1;
+                }
+            }
+            Ok(assigned)
+        })();
+
+        match result {
+            Ok(assigned) => {
+                tx.commit()
+                    .map_err(|e| format!("Failed to commit cluster assignments: {}", e))?;
+                Ok(assigned)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Get all image file IDs that haven't been processed for faces yet
@@ -8968,6 +9388,87 @@ impl Face {
             unprocessed as usize,
             faces as usize,
         ))
+    }
+}
+
+#[cfg(test)]
+mod face_write_transaction_tests {
+    use super::{Face, FaceClusterAssignment};
+    use rusqlite::Connection;
+
+    fn fixture_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE afiles (id INTEGER PRIMARY KEY, has_faces INTEGER);
+             CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created_at INTEGER);
+             CREATE TABLE faces (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL,
+                bbox TEXT,
+                embedding BLOB,
+                person_id INTEGER,
+                created_at INTEGER,
+                FOREIGN KEY(file_id) REFERENCES afiles(id),
+                FOREIGN KEY(person_id) REFERENCES persons(id)
+             );
+             INSERT INTO afiles (id, has_faces) VALUES (1, 0);
+             INSERT INTO faces (id, file_id, person_id) VALUES (1, 1, NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn scan_batch_failure_rolls_back_all_marks_and_faces() {
+        let conn = fixture_conn();
+        let batch = vec![
+            (1, 1, vec![("{}".to_string(), vec![1.0])]),
+            (2, 1, vec![("{}".to_string(), vec![2.0])]),
+        ];
+
+        assert!(Face::apply_scan_batch_with_conn(&conn, &batch).is_err());
+        assert_eq!(
+            conn.query_row("SELECT has_faces FROM afiles WHERE id = 1", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM faces", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn cluster_assignment_failure_rolls_back_person_and_face_links() {
+        let mut conn = fixture_conn();
+        let assignments = vec![FaceClusterAssignment {
+            person_id: None,
+            person_name: Some("Person 1".to_string()),
+            face_ids: vec![1, 404],
+        }];
+
+        assert!(Face::apply_cluster_assignments_with_conn(&mut conn, &assignments).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            conn.query_row("SELECT person_id FROM faces WHERE id = 1", [], |row| row
+                .get::<_, Option<
+                i64,
+            >>(
+                0
+            ))
+            .unwrap()
+            .is_none()
+        );
     }
 }
 

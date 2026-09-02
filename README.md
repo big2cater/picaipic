@@ -75,7 +75,7 @@ Open the [latest release page](https://github.com/big2cater/picaipic/releases/la
 
 - **Live Photo / Motion Photo** support for Apple pairs (HEIC/JPEG + MOV), Google Motion Photos (embedded MP4), and HEIC-internal video; long-press preview, export/convert, confirmed JPEG keyframe replacement, and album metadata repair. See the [Live Photo guide](docs/guide/live-photo.md).
 - **Broad media support** for 60+ image, RAW, and video formats through LibRaw, libheif, libjpeg-turbo, jxl-oxide, FFmpeg, and Rust image codecs.
-- **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects.
+- **Five visual themes**: Default, Retro, CMYK, Black hole, and Cyberpunk. The two dynamic themes include guarded maximized-window idle effects, GPU-limit-aware WebGL rendering, and visible CSS photo fallbacks on constrained Windows/WebView2 devices. See the [runtime compatibility guide](docs/guide/fx-theme-runtime-compatibility.md).
 - **Windows and Linux releases only**, with x64/ARM64 Windows packages and x86_64/ARM64 Linux packages.
 
 ## Uninstall PicAiPic
@@ -124,6 +124,7 @@ PicAiPic is now on the `v1.1.0` development line. A private draft multi-architec
 - plugin-contributed actions such as SA-LUT appear only while the managed plugin runtime is reachable; start/stop/restart state is synchronized across windows
 - built-in crop, collage, batch processing, print layouts, color match, LUT/photo styles, photo frames, smart albums, collections, and Live Photo / Motion Photo workflows
 - a refreshed application icon across Windows packaging, Linux/shared PNG assets, title bars, About/Welcome views, and documentation
+- cross-machine dynamic-theme hardening: native maximize synchronization, legacy intensity migration, GPU texture/viewport clamping, and photo-effect fallbacks for integrated-GPU laptops
 - a Windows/Linux-only release scope; Android/iOS assets and macOS bundle/native bridge files have been removed
 
 The highest-priority remaining work is release-executable regression, representative cold-import/embedding profiling, signing-key rotation/revocation design, and stronger network/Linux plugin isolation beyond default input staging. See [v1.1.0 release notes](docs/guide/release-notes/v1.1.0.md) and the [development progress board](docs/guide/picaipic-progress.md).

@@ -22,10 +22,62 @@
         />
       </div>
 
+      <!-- folder search: matches plus their ancestors stay in place, dimmed ancestors
+           act as context, and album reordering is disabled while filtering -->
+      <div v-if="isMainPane" class="mx-1 mb-2 px-1 shrink-0">
+        <div
+          :class="[
+            'h-8 flex items-center rounded-box transition-colors bg-base-100/40',
+            isFolderSearchFocused ? 'border-2 border-primary' : 'border border-base-content/10 hover:border-base-content/30',
+            albums.length === 0 ? 'opacity-50' : '',
+          ]"
+        >
+          <IconSearch
+            class="ml-2 w-4 h-4 shrink-0"
+            :class="isFolderSearchFocused ? 'text-primary/70' : 'text-base-content/30'"
+          />
+          <input
+            v-model="folderSearch"
+            type="text"
+            :disabled="albums.length === 0"
+            :placeholder="$t('album.search_folders')"
+            class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/30 focus:outline-none disabled:opacity-50"
+            @focus="isFolderSearchFocused = true"
+            @blur="isFolderSearchFocused = false"
+            @keydown.esc.stop="folderSearch = ''"
+          />
+          <span
+            v-if="isFolderSearchLoading"
+            class="loading loading-spinner loading-xs mr-2 text-base-content/30"
+          ></span>
+          <button
+            type="button"
+            :title="$t('album.favorite_folders_only')"
+            :aria-pressed="favoriteFoldersOnly"
+            :class="[
+              'p-1 rounded-box disabled:opacity-30',
+              favoriteFoldersOnly ? 'text-primary!' : 'text-base-content/30 hover:text-base-content/70',
+            ]"
+            :disabled="albums.length === 0"
+            @click="favoriteFoldersOnly = !favoriteFoldersOnly"
+          >
+            <component :is="favoriteFoldersOnly ? IconHeartFilled : IconHeart" class="w-4 h-4 cursor-pointer" />
+          </button>
+          <button
+            v-if="folderSearch"
+            type="button"
+            class="mr-1 p-1 rounded-box text-base-content/30 hover:text-base-content/70"
+            @click="folderSearch = ''"
+          >
+            <IconClose class="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
       <!-- drag to change albums' display order -->
       <VueDraggable
         v-model="albums"
-        :disabled="!isMainPane"
+        :disabled="!isMainPane || isFolderFiltering"
         group="album-folder"
         :handle="'.album-drag-handle'"
         :animation="200"
@@ -33,7 +85,7 @@
         @end="onDragEnd"
       >
         <li
-          v-for="album in albums"
+          v-for="album in visibleAlbums"
           :key="album.id"
           :data-album-id="album.id"
           :data-selected-album-folder="
@@ -160,16 +212,22 @@
               </div>
               <AlbumFolder
                 v-else
-                :children="album.children" 
+                :children="isFolderFiltering ? getFilteredFolderTree(album.id) : album.children"
                 :albumId="album.id"
                 :rootPath="album.path"
                 :allowContextMenu="isMainPane"
+                :filterVisiblePaths="isFolderFiltering ? getVisibleFolderPaths(album.id) : undefined"
+                :filterMatchedPaths="isFolderFiltering ? getMatchedFolderPaths(album.id) : undefined"
                 @root-renamed="handleRootRenamed"
               />
             </div>
           </transition>
         </li>
       </VueDraggable>
+
+      <li v-if="isFolderFiltering && !isFolderSearchLoading && visibleAlbums.length === 0" class="sidebar-empty text-sm">
+        <span class="text-center">{{ $t('album.no_folder_matches') }}</span>
+      </li>
 
     </ul>
 
@@ -225,7 +283,7 @@ import { getAlbumQueueIndex, getAlbumScanState, getAlbumScanIcon, shouldAnimateA
 import { getAllAlbums, setDisplayOrder, addAlbum, editAlbum, removeAlbum, 
          fetchFolder, expandFinalFolder, getFileThumbById,
          getAlbum, hasImportableClipboard, isDirectoryAccessible, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished,
-         rescanLivePhotoMetadata } from '@/common/api';
+         rescanLivePhotoMetadata, getAllAlbumFolders } from '@/common/api';
 import { useToast } from '@/common/toast';
 import { DEFAULT_PLATFORM, getShortcutLabel } from '@/common/shortcuts';
 import { Album, Folder } from '@/common/types';
@@ -249,6 +307,10 @@ import {
   IconFolders,
   IconClipboard,
   IconFolderError,
+  IconSearch,
+  IconClose,
+  IconHeart,
+  IconHeartFilled,
 } from '@/common/icons';
 
 const props = withDefaults(defineProps<{
@@ -296,6 +358,206 @@ const isLoading = ref(true);    // loading albums
 const isDragging = ref(false);  // dragging albums
 const albumCoverErrors = ref<Record<number, boolean>>({});
 const albumContextMenus = ref<Record<number, any>>({});
+
+// --- Folder search ---------------------------------------------------------
+// The album tree only holds the folders the user already expanded, so the search
+// cannot filter `album.children`. It runs over a flat list of every album folder
+// and builds a separate filtered tree from it instead.
+const folderSearch = ref('');
+const favoriteFoldersOnly = ref(false);
+const isFolderSearchFocused = ref(false);
+const isFolderSearchLoading = ref(false);
+const folderSearchFolders = ref<FolderSearchRecord[]>([]);
+let folderSearchRequest = 0;
+
+interface FilteredAlbumResult {
+  album: Album;
+  hasMatches: boolean;
+  visibleFolderPaths: string[];
+  matchedFolderPaths: string[];
+  folderTree: Folder[];
+}
+
+interface FolderSearchRecord extends Folder {
+  album_id: number;
+}
+
+const normalizedFolderSearch = computed(() => folderSearch.value.trim().toLocaleLowerCase());
+const isFolderFiltering = computed(() =>
+  isMainPane.value && (normalizedFolderSearch.value.length > 0 || favoriteFoldersOnly.value)
+);
+const folderSearchFoldersByAlbum = computed(() => {
+  const foldersByAlbum = new Map<number, FolderSearchRecord[]>();
+  for (const folder of folderSearchFolders.value) {
+    const albumId = Number(folder.album_id);
+    const folders = foldersByAlbum.get(albumId) || [];
+    folders.push(folder);
+    foldersByAlbum.set(albumId, folders);
+  }
+  return foldersByAlbum;
+});
+const folderSearchCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function getRelativeFolderPath(folderPath: string, rootPath: string) {
+  if (!folderPath.startsWith(rootPath)) return folderPath;
+  return folderPath.slice(rootPath.length).replace(/^[\\/]+/, '');
+}
+
+function getAlbumsFolderName(folderPath: string) {
+  return folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() || folderPath;
+}
+
+/// Collect every matched path plus the ancestor chain that leads to it, so a hit
+/// deep in the tree is still reachable through its parents.
+function getFolderSearchPaths(folders: FolderSearchRecord[], rootPath: string, query: string) {
+  const visiblePaths = new Set<string>();
+  const matchedPaths = new Set<string>();
+  const hasQuery = query.length > 0;
+
+  for (const folder of folders) {
+    const relativePath = getRelativeFolderPath(folder.path, rootPath);
+    // A query containing a separator matches the path rather than just the name, so
+    // "2024/paris" can jump straight to a nested folder.
+    const isMatch = !hasQuery
+      || folder.name.toLocaleLowerCase().includes(query)
+      || (/[\\/]/.test(query) && relativePath.toLocaleLowerCase().includes(query));
+    if (!isMatch) continue;
+
+    matchedPaths.add(folder.path);
+    let ancestorPath = folder.path;
+    while (ancestorPath.startsWith(rootPath) && ancestorPath !== rootPath) {
+      visiblePaths.add(ancestorPath);
+      const separatorIndex = Math.max(ancestorPath.lastIndexOf('/'), ancestorPath.lastIndexOf('\\'));
+      ancestorPath = separatorIndex >= 0 ? ancestorPath.slice(0, separatorIndex) : rootPath;
+    }
+  }
+
+  return {
+    visibleFolderPaths: Array.from(visiblePaths),
+    matchedFolderPaths: Array.from(matchedPaths),
+    hasMatches: visiblePaths.size > 0,
+  };
+}
+
+/// Rebuild a tree from the flat folder list, keeping only visible paths and linking
+/// nodes by path prefix (the source list is already ordered by album and path).
+function buildFilteredFolderTree(folders: FolderSearchRecord[], visiblePaths: string[]) {
+  const visible = new Set(visiblePaths);
+  const nodes = new Map<string, Folder>();
+  const roots: Folder[] = [];
+
+  for (const folder of folders) {
+    if (visible.has(folder.path)) {
+      nodes.set(folder.path, { ...folder, is_expanded: false, children: [] });
+    }
+  }
+  for (const folder of nodes.values()) {
+    const separatorIndex = Math.max(folder.path.lastIndexOf('/'), folder.path.lastIndexOf('\\'));
+    const parentPath = separatorIndex >= 0 ? folder.path.slice(0, separatorIndex) : '';
+    const parent = nodes.get(parentPath);
+    if (parent) parent.children?.push(folder);
+    else roots.push(folder);
+  }
+
+  const compareFolders = (a: Folder, b: Folder) => {
+    const aTime = a.modified_at || a.created_at || 0;
+    const bTime = b.modified_at || b.created_at || 0;
+    switch (Number(config.settings.folderSort)) {
+      case 1: return folderSearchCollator.compare(b.name, a.name);
+      case 2: return aTime - bTime;
+      case 3: return bTime - aTime;
+      default: return folderSearchCollator.compare(a.name, b.name);
+    }
+  };
+  const sortTree = (children: Folder[]) => {
+    children.sort(compareFolders);
+    for (const child of children) sortTree(child.children || []);
+  };
+  sortTree(roots);
+  return roots;
+}
+
+const filteredAlbumResults = computed<FilteredAlbumResult[]>(() => {
+  if (!isFolderFiltering.value) {
+    return albums.value.map(album => ({
+      album,
+      hasMatches: false,
+      visibleFolderPaths: [],
+      matchedFolderPaths: [],
+      folderTree: [],
+    }));
+  }
+  const query = normalizedFolderSearch.value;
+
+  return albums.value.flatMap((album) => {
+    const albumFolders = folderSearchFoldersByAlbum.value.get(Number(album.id)) || [];
+    const rootFolder = albumFolders.find(folder => folder.path === album.path) || {
+      id: -Number(album.id),
+      album_id: Number(album.id),
+      name: getAlbumsFolderName(album.path),
+      path: album.path,
+    };
+    const rootFolderMatches = query.length > 0
+      && (!favoriteFoldersOnly.value || rootFolder.is_favorite)
+      && getAlbumsFolderName(album.path).toLocaleLowerCase().includes(query);
+    const rootFolderVisible = rootFolderMatches
+      || (!query && favoriteFoldersOnly.value && rootFolder.is_favorite);
+    const folders = albumFolders.filter(folder => folder.path !== album.path);
+    const matchingFolders = favoriteFoldersOnly.value
+      ? folders.filter(folder => folder.is_favorite)
+      : folders;
+    const folderPaths = getFolderSearchPaths(matchingFolders, album.path, query);
+    if (!rootFolderVisible && !folderPaths.hasMatches) return [];
+
+    const visibleFolderPaths = [rootFolder.path, ...folderPaths.visibleFolderPaths];
+    const matchedFolderPaths = rootFolderMatches
+      ? [rootFolder.path, ...folderPaths.matchedFolderPaths]
+      : folderPaths.matchedFolderPaths;
+    return [{
+      album,
+      hasMatches: true,
+      visibleFolderPaths,
+      matchedFolderPaths,
+      folderTree: buildFilteredFolderTree([rootFolder, ...folders], visibleFolderPaths),
+    }];
+  });
+});
+
+const visibleAlbums = computed(() => (isFolderFiltering.value
+  ? filteredAlbumResults.value.map(result => result.album)
+  : albums.value));
+
+const getFilteredAlbumResult = (albumId: number) =>
+  filteredAlbumResults.value.find(result => Number(result.album.id) === Number(albumId));
+const getVisibleFolderPaths = (albumId: number) => getFilteredAlbumResult(albumId)?.visibleFolderPaths;
+const getMatchedFolderPaths = (albumId: number) => getFilteredAlbumResult(albumId)?.matchedFolderPaths;
+const getFilteredFolderTree = (albumId: number) => getFilteredAlbumResult(albumId)?.folderTree;
+
+async function loadFolderSearchFolders() {
+  const request = ++folderSearchRequest;
+  isFolderSearchLoading.value = true;
+  try {
+    const folders = await getAllAlbumFolders();
+    if (request === folderSearchRequest && isFolderFiltering.value) {
+      folderSearchFolders.value = (folders || []) as FolderSearchRecord[];
+    }
+  } catch (error) {
+    console.error('loadFolderSearchFolders error:', error);
+  } finally {
+    if (request === folderSearchRequest) isFolderSearchLoading.value = false;
+  }
+}
+
+// The folder list is fetched once per filtering session, not per keystroke.
+watch(isFolderFiltering, (active) => {
+  if (active && folderSearchFolders.value.length === 0) {
+    void loadFolderSearchFolders();
+  }
+  if (!active) {
+    folderSearchRequest += 1;
+    isFolderSearchLoading.value = false;
+  }
+});
 
 function handleAlbumContextMenu(album: Album, event: MouseEvent) {
   void (async () => {

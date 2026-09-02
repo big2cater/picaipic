@@ -1,7 +1,7 @@
 ---
 name: change-library-perf
 description: Large-library viewport loading and similar/semantic search performance.
-last_updated: 2026-07-29
+last_updated: 2026-07-30
 ---
 
 
@@ -36,14 +36,16 @@ last_updated: 2026-07-29
 - Semantic/similar results: warm thumbs for first screen only; use `fetchMissingVisibleThumbnails` on scroll — do not `getFileListThumb` the entire hit list.
 - Deduplicate in-flight thumbnail work by content-request + file id. Passive scroll updates can overlap before the first IPC returns; checking only `file.thumbnail` is not sufficient.
 - Give viewport thumbnail work a generation token. A scrollbar jump must stop stale phases and future batches; metadata chunk deduplication must return the existing promise so the new viewport can await it and then warm its thumbnails.
+- Keep base64 thumbnail retention bounded twice: `fileList` retains only the visible window plus a modest bidirectional buffer, while the shared byte-accounted LRU in `utils.ts` is capped at 96 MiB for fast back-scroll. Evict only `data:image/...` values; preserve protocol URLs, source-path fallbacks, placeholders, and the active item. Advance the retention window incrementally instead of scanning the full 100k list on every scroll update.
 - Thumbnail cards should observe their container only when responsive rotated geometry needs live dimensions. Fixed cards and unrotated cards must not each keep a `ResizeObserver` during normal grid scrolling.
-- Load plugin contributions at the content/view level, not from every virtualized thumbnail mount. Clear per-card timers on unmount.
+- Load plugin contributions once at the grid/content level and pass the shared contribution list to virtualized cards. Per-file menu assembly remains card-local because favorite, rating, media type, and Live Photo state differ. Clear per-card timers on unmount.
 - Lazy-mount per-file context menus for the hovered, active, or open card instead of instantiating one for every buffered virtual item. Position virtual items with contained transforms to reduce layout/paint work during large scrollbar jumps.
 
 ## Verify
 
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - `pnpm --dir src-vite build`
+- For thumbnail-retention changes, scroll through a representative 100k-file folder and compare heap/RSS before and after returning near the start. Confirm retained `data:image/...` fields stay near the visible window plus buffer and process memory plateaus instead of growing with every visited row.
 - Manual: opening/searching a 100k library logs `embed_matrix ... ann=disabled`, returns via `matrix=1`, and never schedules ANN by default. With `PICAIPIC_EMBED_ANN=1`, first search schedules a 2-thread build and later searches may use `matrix=2`.
 
 ## Next checkpoint

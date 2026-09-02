@@ -1,7 +1,7 @@
 # Cyberpunk idle glitch theme — design
 
 - **Date:** 2026-07-26  
-- **Status:** **Shipped** on `feat/black-hole-idle-theme` (PR #3); follow-up correctness/perf landed (`130b33a`)  
+- **Status:** **Shipped**; 2026-07-30 cross-machine/GPU hardening adds native maximize sync, GPU-limit clamping, and CSS photo fallback
 - **Branch context:** Parallel to black-hole idle theme  
 - **Owner product choices:** trigger = maximize + 6s idle (same as BH); photo-area only; daily UI = night-city ambient + neon glass; continuous glitch until activity; approach = parallel `PhotoGlitchLayer` (not unified FX layer)
 
@@ -12,13 +12,13 @@
 Add a fifth app theme **Cyberpunk** that:
 
 1. Everyday: pins dark UI with light magenta/cyan neon chrome accents (no full-window glitch while working).  
-2. Idle: after **main window maximized + ~6s idle**, freezes the **photo-area** thumbnail grid into a WebGL texture and runs a **continuous FragCoord-style glitch** until user activity / unmaximize / theme leave.  
+2. Idle: after **main window maximized + ~6s idle**, freezes the **photo-area** thumbnail grid into a WebGL texture and runs a **continuous FragCoord-style glitch** until user activity / unmaximize / theme leave. If that path cannot run, live cards receive a CSS glitch fallback.
 3. Does **not** break the black-hole path (`PhotoVortexLayer` remains independent).
 
 Non-goals for v1:
 
 - Full-window chrome glitch overlay  
-- CSS-only live-DOM glitch on virtualized cards  
+- CSS as the primary effect; live-DOM CSS is failure fallback only
 - Disk persistence / intensity presets beyond existing `dynamicThemeIntensity`  
 - New daisyUI theme pack beyond `data-theme=dark` + CSS accents  
 
@@ -30,9 +30,9 @@ Non-goals for v1:
 |------|----------|
 | 1 | Settings theme menu: **Default / Retro / CMYK / Black hole / Cyberpunk** |
 | 2 | Select **Cyberpunk** → `data-theme=dark`; dual-pin light/dark theme slots to cyberpunk id (same residual-slot hygiene as black hole) |
-| 3 | **Maximize** main window only (`uiStore.isMaximized` from Home TitleBar — Settings maximize must not set this) |
+| 3 | **Maximize** main window only (Home queries its native Tauri window on startup/resize; TitleBar also refreshes after system operations; Settings maximize must not set this) |
 | 4 | Idle gate (see **§2.1**): `useIdle(6000)` only tracks input silence; **full** `cpFxActive` is a Home `computed` that mirrors BH’s seven-way AND |
-| 5 | Photo area: capture visible thumbs → `PhotoGlitchLayer` continuous glitch; hide live grid after capture |
+| 5 | Photo area: capture visible thumbs → `PhotoGlitchLayer` continuous glitch; hide live grid only after successful capture. Failure keeps cards visible and enables CSS glitch |
 | 6 | Any activity / unmaximize / leave theme / reduced motion → clear layer, show grid |
 
 Chrome (TitleBar, left rail, status) stays interactive; glitch layer is `pointer-events-none` and photo-region only.
@@ -136,7 +136,7 @@ THEME_ID = {
 
 ## 4. PhotoGlitchLayer
 
-### 4.1 Lifecycle (mirror PhotoVortex, with one intentional divergence)
+### 4.1 Lifecycle (shared fail-closed capture policy with PhotoVortex)
 
 | Event | Action |
 |-------|--------|
@@ -145,25 +145,16 @@ THEME_ID = {
 | `active` true → false | cancel rAF, delete texture, `emit('cleared')` |
 | unmount | same as clear |
 
-**Capture:** copy the drawing path from `PhotoVortexLayer.captureSource` (decoded `<img>` rects → 2D canvas, DPR clamp ≤1.5, skip incomplete/cross-origin) **with one required change vs vortex:**
+**Capture:** both photo layers draw decoded visible `<img>` rects into a 2D canvas, clamp DPR by GPU texture limits, and abort when no thumbnail can be drawn:
 
 ```ts
-// PhotoVortex today (structure — do NOT copy the zero-draw policy as-is):
 if (drawn === 0) {
-  console.warn('PhotoVortexLayer: no thumbnails drawn into capture');
-  // no return here — fall through
-}
-return out; // always non-null canvas (solid dark if nothing drawn) → still upload + emit captured / hide grid
-
-// PhotoGlitchLayer MUST instead early-abort on empty capture:
-if (drawn === 0) {
-  console.warn('PhotoGlitchLayer: no thumbnails drawn into capture');
-  return null; // beginSession aborts: no upload, no emit('captured'), grid stays visible
+  return null; // no upload and no captured event; GridView enables CSS fallback
 }
 return out;
 ```
 
-Rationale: glitch without photo content is a frozen black plate that incorrectly hides the live grid (§8). Vortex’s “dark fallback is better than crash” (warn then still `return out`) does **not** apply here.
+Rationale: an empty texture is not a photo effect. Both layers keep the live grid visible and report failure so GridView can select the theme-specific CSS fallback.
 
 Optional shared helper later is fine; **not** required for v1. If shared, glitch path still needs the `drawn === 0 → null` policy (parameter or wrapper).
 
@@ -263,7 +254,7 @@ When `cyberpunkThemeOn && !reducedMotion` (static accents allowed under reduced 
 - TitleBar: `z-50`, no glitch  
 - Appearance control: locked / hint copy like BH (“color mode locked under Cyberpunk”)  
 
-No second analytical cosmos WebGL required for v1 (unlike BH). Optional subtle CSS grid/scan on photo **chrome border** only — not full photo-area CSS glitch.
+No second analytical cosmos WebGL is required (unlike BH). CSS live-card glitch is reserved for WebGL/capture/upload/context failure, not run in parallel with the primary shader.
 
 ---
 
@@ -297,8 +288,10 @@ No second analytical cosmos WebGL required for v1 (unlike BH). Optional subtle C
 
 | Case | Behavior |
 |------|----------|
-| WebGL unavailable / shader compile fail | no glitch layer (log once); theme chrome still works; **never** leave grid hidden without a successful capture |
-| Capture draws 0 images | **abort** capture; do **not** emit `captured` / do **not** hide grid |
+| WebGL unavailable / shader compile fail | keep live grid visible and activate CSS translation/color/RGB-edge glitch |
+| Capture draws 0 images | abort WebGL capture; do not emit `captured`; activate CSS fallback |
+| High-DPI buffer exceeds GPU limits | scale capture/render buffers within `MAX_TEXTURE_SIZE` / `MAX_VIEWPORT_DIMS` |
+| Texture upload error / WebGL context loss | clear WebGL session, keep live grid visible, activate CSS fallback |
 | Virtual scroll during freeze | grid hidden after capture — user cannot scroll photos until activity clears (same as BH) |
 | Switch BH ↔ CP while idle | leave theme clears old layer; new theme must re-satisfy idle window |
 | Reduced motion | no PhotoGlitchLayer; no pulse animations on chrome |
@@ -310,7 +303,7 @@ No second analytical cosmos WebGL required for v1 (unlike BH). Optional subtle C
 ## 9. Testing
 
 - Unit/smoke: theme clamp includes 4; isCyberpunkTheme true only for id 4  
-- Manual: CP theme chrome accents; max+6s glitch; activity clears; unmaximize clears; leave theme clears; Settings maximize does not trigger; reduced motion off; intensity 0 vs 1.5 visible difference  
+- Manual: desktop plus high-DPI/integrated-GPU laptop; CP chrome; max+6s WebGL or CSS fallback glitch; activity/unmaximize/theme leave clears; Settings maximize does not trigger; reduced motion and intensity 0 disable the photo effect
 - Regression: BH path still works unchanged  
 
 ---
@@ -348,7 +341,7 @@ Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useI
 | 🟡 | Prototype lacks `u_intensity` | §4.2 JS bind + GLSL multiply; §4.3 skip at 0 |
 | 🟢 | Prefer `v_uv` over raw `gl_FragCoord` | §4.2 |
 | 🟢 | No new `cyberpunkMode` flag | §3 dual-pin only |
-| 🟠 **R1** | §4.1 “copy captureSource” vs §8 zero-draw abort (vortex **warns then still** `return out`, not early-return) | §4.1: glitch **must** `return null` when `drawn===0`; vortex block shows fall-through |
+| 🟠 **R1** | Historical vortex/glitch zero-draw policy mismatch | 2026-07-30: both return null and activate their CSS fallback |
 | 🟡 **R2** | intensity 0 gate vs “byte-for-byte” cpFxActive | §2.1: intensity on GridView `:active` computed, not inside provide |
 | ⚪ **R3** | `Number(x) \|\| 1` maps 0→1 | §4.2: bind raw `Number(...)` only |
 | 🔴 **P0** | mediump overflow of classic `sin*43758` hash | Shipped: fract-hash + `mod(time)` in `PhotoGlitchLayer` |
@@ -358,4 +351,4 @@ Verified against `PhotoVortexLayer.vue` (WebGL1), `utils.ts` theme arrays, `useI
 | 🟡 **P2** | Ambient `seedField(true)` on every resize → rain jump | Shipped: `seedField(false)` (`1aa0a59`) |
 | ⚪ **P2** | Untracked capture rAF on rapid active toggle | Shipped: `captureRaf` cancel in endSession (`1aa0a59`) |
 
-**R1 / R2 / R3** and **P0–P2** are landed in code (`130b33a`, `1aa0a59`, and prior FX commits).
+**R1 / R2 / R3** and **P0–P2** are landed in code; cross-GPU buffer limits and CSS fallbacks landed in the 2026-07-30 hardening pass.

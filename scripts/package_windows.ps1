@@ -291,29 +291,17 @@ function Remove-ReleaseArtifacts {
     }
 }
 
-function Stop-RunningReleaseExe {
-    param([string]$ExePath)
-
-    $resolvedExePath = [System.IO.Path]::GetFullPath($ExePath)
-    $running = @(
-        Get-Process -Name "PicAiPic" -ErrorAction SilentlyContinue |
-            Where-Object {
-                try {
-                    $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -eq $resolvedExePath)
-                }
-                catch {
-                    $false
-                }
-            }
-    )
+function Stop-RunningPicAiPicProcesses {
+    $running = @(Get-Process -Name "PicAiPic" -ErrorAction SilentlyContinue)
 
     if ($running.Count -eq 0) {
         return
     }
 
-    Write-Step "Closing running release EXE"
+    Write-Step "Closing running PicAiPic processes"
     foreach ($process in $running) {
-        Write-Warn "Stopping PID $($process.Id): $($process.Path)"
+        $processPath = try { $process.Path } catch { "<path unavailable>" }
+        Write-Warn "Stopping PID $($process.Id): $processPath"
         try {
             if ($process.MainWindowHandle -ne 0) {
                 $null = $process.CloseMainWindow()
@@ -328,7 +316,7 @@ function Stop-RunningReleaseExe {
             Write-Ok "Stopped PID $($process.Id)"
         }
         catch {
-            throw "Failed to stop running release executable '$($process.Path)' (PID $($process.Id)): $($_.Exception.Message)"
+            throw "Failed to stop PicAiPic process '$processPath' (PID $($process.Id)): $($_.Exception.Message)"
         }
     }
 }
@@ -345,6 +333,7 @@ function New-LocalTauriConfig {
     # TAURI_SIGNING_PRIVATE_KEY env var; if unset, the build fails fast.
     $config = [ordered]@{
         build = [ordered]@{
+            # The Tauri CLI runs these commands from the repository root.
             beforeBuildCommand = "pnpm --dir src-vite build"
             beforeDevCommand = "pnpm --dir src-vite dev"
         }
@@ -401,6 +390,21 @@ function Show-Artifacts {
     }
 
     $rows | Format-Table -AutoSize
+}
+
+function Write-SameVersionMsiWarning {
+    param(
+        [string[]]$RequestedBundles,
+        [string]$TauriConfigPath
+    )
+
+    if (($RequestedBundles -notcontains "msi") -and ($RequestedBundles -notcontains "all")) {
+        return
+    }
+
+    $config = Get-Content -LiteralPath $TauriConfigPath -Raw | ConvertFrom-Json
+    Write-Warn "MSI packages are versioned as $($config.version). Windows Installer can reuse its cached package when the same version is installed again."
+    Write-Warn "For local UI/theme rebuilds, use the NSIS setup EXE. To validate MSI, bump the app version or uninstall the existing same-version MSI first."
 }
 
 $RootDir = Resolve-RepoRoot
@@ -500,7 +504,7 @@ else {
     Write-Ok "Frontend dependencies already installed."
 }
 
-Stop-RunningReleaseExe -ExePath (Join-Path $ReleaseDir "PicAiPic.exe")
+Stop-RunningPicAiPicProcesses
 
 # Always refresh icons from favicon1.ico so packaging never ships a stale orphan brand file.
 Invoke-RegenerateAppIcons -RootDir $RootDir
@@ -516,6 +520,7 @@ else {
 }
 
 New-LocalTauriConfig -OutputPath $LocalConfigPath
+Write-SameVersionMsiWarning -RequestedBundles $Bundle -TauriConfigPath (Join-Path $TauriDir "tauri.conf.json")
 
 $buildArgs = @()
 $buildArgs += $TauriRunner.PrefixArgs

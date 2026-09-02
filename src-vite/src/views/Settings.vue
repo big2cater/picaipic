@@ -591,6 +591,130 @@
 
         <!-- Shortcuts Tab -->
         <div v-else-if="config.settings.tabIndex === 4" class="flex flex-col space-y-2">
+          <!-- ComfyUI server (external, user-managed) -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.plugins.comfy_section') }}</span>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.plugins.comfy_server_url') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.plugins.comfy_server_hint') }}</div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1">
+                <input
+                  v-model="config.comfy.serverUrl"
+                  type="text"
+                  spellcheck="false"
+                  class="input input-sm input-bordered w-56 font-mono text-xs"
+                  placeholder="http://127.0.0.1:8188"
+                  @change="resetComfyStatus"
+                />
+                <button
+                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  :disabled="isTestingComfy"
+                  @click="testComfyConnection"
+                >
+                  {{ isTestingComfy ? $t('settings.plugins.comfy_testing') : $t('settings.plugins.comfy_test') }}
+                </button>
+                <button
+                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  :disabled="isFreeingComfy"
+                  :title="$t('settings.plugins.comfy_free_hint')"
+                  @click="freeComfyMemory"
+                >
+                  {{ isFreeingComfy ? $t('settings.plugins.comfy_freeing') : $t('settings.plugins.comfy_free') }}
+                </button>
+              </div>
+            </div>
+            <div
+              v-if="comfyStatus"
+              class="px-1 text-xs break-all"
+              :class="comfyStatus.ok ? 'text-success/80' : 'text-error/80'"
+            >
+              <template v-if="comfyStatus.ok">
+                {{ $t('settings.plugins.comfy_connected') }}<template v-if="comfyStatus.details"> ({{ comfyStatus.details }})</template>
+              </template>
+              <template v-else>{{ comfyStatus.message }}</template>
+            </div>
+
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.plugins.comfy_cooldown') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.plugins.comfy_cooldown_hint') }}</div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1">
+                <input
+                  v-model.number="config.comfy.cooldownSecs"
+                  type="number"
+                  min="0"
+                  max="60"
+                  class="input input-sm input-bordered w-20 font-mono text-xs"
+                />
+                <span class="text-xs text-base-content/50">s</span>
+              </div>
+            </div>
+
+            <!-- saved workflows -->
+            <div class="flex items-center justify-between gap-2 px-1 pt-1">
+              <span class="text-xs text-base-content/50">
+                {{ $t('settings.plugins.comfy_workflows') }} ({{ comfyWorkflows.length }})
+              </span>
+              <button
+                class="btn btn-xs btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                @click="showComfyImport = true"
+              >
+                {{ $t('settings.plugins.comfy_import') }}
+              </button>
+            </div>
+            <div v-if="comfyWorkflows.length === 0" class="px-1 text-xs text-base-content/30 leading-5">
+              {{ $t('settings.plugins.comfy_no_workflows') }}
+            </div>
+            <div v-else class="space-y-0.5">
+              <div
+                v-for="wf in comfyWorkflows"
+                :key="wf.id"
+                class="flex items-center justify-between gap-2 px-1 py-1 rounded-box hover:bg-base-100/10"
+              >
+                <div class="min-w-0 flex flex-col">
+                  <span class="text-sm truncate">{{ wf.name }}</span>
+                  <span class="text-xs text-base-content/30">
+                    {{ $t('settings.plugins.comfy_node_count', { count: Object.keys(wf.workflow || {}).length }) }}
+                  </span>
+                </div>
+                <TButton
+                  :icon="IconTrash"
+                  :buttonSize="'small'"
+                  :tooltip="$t('settings.plugins.comfy_delete_workflow')"
+                  @click="removeComfyWorkflow(wf.id)"
+                />
+              </div>
+            </div>
+
+            <ComfyWorkflowDialog
+              :show="showComfyImport"
+              @close="showComfyImport = false"
+              @save="saveComfyWorkflow"
+            />
+          </div>
+
+          <!-- Third-party AI plugin host (hidden on request; ComfyUI above stays) -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center justify-between gap-4">
+              <div class="min-w-0 flex flex-col gap-0.5">
+                <span class="font-bold uppercase text-[10px] tracking-widest text-base-content/30">{{ $t('settings.plugins.ai_plugins_section') }}</span>
+                <span class="text-xs text-base-content/30">{{ $t('settings.plugins.ai_plugins_hidden_hint') }}</span>
+              </div>
+              <input
+                v-model="config.aiPlugin.hidden"
+                type="checkbox"
+                class="toggle toggle-sm toggle-primary"
+                @change="toggleAiPluginHidden"
+              />
+            </div>
+          </div>
+
+          <template v-if="!config.aiPlugin.hidden">
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
             <div class="flex items-center justify-between gap-4">
               <div class="min-w-0 flex flex-col gap-0.5">
@@ -781,7 +905,7 @@
                 <TButton
                   :icon="IconDownload"
                   :buttonSize="'small'"
-                  :disabled="isLoadingAiPlugins"
+                  :disabled="isLoadingAiPlugins || isInstallingAiPlugin"
                   :tooltip="pluginText('installPackage')"
                   @click="chooseAiPluginPackage"
                 />
@@ -1603,6 +1727,7 @@
               </div>
             </div>
           </div>
+          </template>
         </div>
 
         <!-- Shortcuts Tab -->
@@ -1747,7 +1872,10 @@ import {
   revokePublisherKey,
   listRevokedKeys,
   setImportAiPrompts,
+  comfyTestConnection,
+  comfyFreeMemory,
 } from '@/common/api';
+import ComfyWorkflowDialog from '@/components/ComfyWorkflowDialog.vue';
 import { formatFileSize, isLinux, isMac, setTheme, isBlackHoleTheme, isCyberpunkTheme, THEME_ID, SCALE_VALUES } from '@/common/utils';
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
@@ -1775,6 +1903,92 @@ const localeMsg = computed(() => messages.value[config.settings.language] as any
 const toast = useToast();
 const pluginStore = usePluginStore();
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+// --- ComfyUI server ---------------------------------------------------------
+// Older persisted configs predate this section, and `v-model` needs a real path.
+if (!config.comfy) config.comfy = { serverUrl: 'http://127.0.0.1:8188' };
+// Configs persisted before the cooldown existed; v-model needs a number to bind to.
+if (typeof config.comfy.cooldownSecs !== 'number') config.comfy.cooldownSecs = 2;
+
+// --- AI plugin host UI ------------------------------------------------------
+// `v-model` on the hide toggle needs a real path even for older persisted configs.
+if (!config.aiPlugin) config.aiPlugin = { hidden: false };
+
+/// Hide/restore the third-party AI plugin feature. Hiding clears the store so no
+/// menu item or panel references a plugin; restoring reloads the plugin list.
+function toggleAiPluginHidden() {
+  if (config.aiPlugin?.hidden) {
+    pluginStore.$patch({ plugins: [], statuses: {}, loaded: false });
+  } else {
+    void pluginStore.loadPlugins(true);
+  }
+}
+
+// The server is user-managed, so the only thing we can verify from here is that
+// the address answers like a ComfyUI instance.
+const isTestingComfy = ref(false);
+const isFreeingComfy = ref(false);
+const comfyStatus = ref<{ ok: boolean; message?: string; details?: string } | null>(null);
+const showComfyImport = ref(false);
+const comfyWorkflows = computed(() => config.comfy?.workflows || []);
+
+function saveComfyWorkflow(payload: { name: string; workflow: any }) {
+  const list = [...(config.comfy?.workflows || [])];
+  const name = payload.name.trim();
+  // Re-importing a corrected file must replace the stale entry, not create a duplicate:
+  // the run dialog defaults to the first entry, so a second copy would keep running old data.
+  const existing = list.find((wf: any) => wf.name === name);
+  if (existing) {
+    existing.workflow = payload.workflow;
+  } else {
+    list.push({
+      id: `wf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      workflow: payload.workflow,
+    });
+  }
+  config.comfy.workflows = list;
+  showComfyImport.value = false;
+}
+
+function removeComfyWorkflow(id: string) {
+  config.comfy.workflows = (config.comfy?.workflows || []).filter((wf: any) => wf.id !== id);
+}
+
+function resetComfyStatus() {
+  comfyStatus.value = null;
+}
+
+async function testComfyConnection() {
+  isTestingComfy.value = true;
+  comfyStatus.value = null;
+  try {
+    const info = await comfyTestConnection(config.comfy?.serverUrl || '');
+    comfyStatus.value = {
+      ok: true,
+      details: [info?.version ? `v${info.version}` : '', info?.device || '']
+        .filter(Boolean)
+        .join(' · '),
+    };
+  } catch (error) {
+    comfyStatus.value = { ok: false, message: String(error) };
+  } finally {
+    isTestingComfy.value = false;
+  }
+}
+
+async function freeComfyMemory() {
+  if (isFreeingComfy.value) return;
+  isFreeingComfy.value = true;
+  try {
+    await comfyFreeMemory(config.comfy?.serverUrl || '');
+    toast.success(localeMsg.value.settings.plugins.comfy_free_done);
+  } catch (error: any) {
+    toast.error(error?.message || String(error));
+  } finally {
+    isFreeingComfy.value = false;
+  }
+}
+
 const settingsTabs = [
   'settings.general.title',
   'settings.view.title',
@@ -1843,6 +2057,7 @@ const aiPluginModelBindingLoading = ref<Record<string, boolean>>({});
 const aiPluginModelActionLoading = ref<Record<string, boolean>>({});
 const isLoadingAiPlugins = ref(false);
 const isRefreshingAiPlugins = ref(false);
+const isInstallingAiPlugin = ref(false);
 const isLoadingAiPluginHostEnvironment = ref(false);
 const isChangingAiPluginStore = ref(false);
 
@@ -5145,20 +5360,21 @@ async function chooseAiPluginDirectory() {
 }
 
 async function chooseAiPluginPackage() {
-  if (isLoadingAiPlugins.value) return;
-  const result = await openDialog({
-    title: pluginText('installPackage'),
-    multiple: false,
-    directory: false,
-    filters: [{ name: 'PicAiPic Plugin Package', extensions: ['zip'] }],
-  });
-
-  if (!result || Array.isArray(result)) return;
-
+  if (isLoadingAiPlugins.value || isInstallingAiPlugin.value) return;
+  isInstallingAiPlugin.value = true;
   try {
+    const result = await openDialog({
+      title: pluginText('installPackage'),
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'PicAiPic Plugin Package', extensions: ['zip'] }],
+    });
+    if (!result || Array.isArray(result)) return;
     await installAiPluginPackageWithTrust(result);
   } catch (error: any) {
     toast.error(error?.message || String(error));
+  } finally {
+    isInstallingAiPlugin.value = false;
   }
 }
 

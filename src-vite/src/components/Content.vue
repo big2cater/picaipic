@@ -699,6 +699,15 @@
     @cancel="closePluginActionDialog"
     @cancel-task="cancelPluginAction"
   />
+
+  <ComfyRunDialog
+    v-if="comfyRun.show"
+    :show="comfyRun.show"
+    :files="comfyRun.files"
+    :destination="comfyRun.destination"
+    @close="closeComfyRun"
+    @imported="onComfyImported"
+  />
 </template>
 
 <script setup lang="ts">
@@ -746,6 +755,7 @@ import DedupPane from '@/components/DedupPane.vue';
 import SelectionPanel from '@/components/SelectionPanel.vue';
 import FileConflictDialog from '@/components/FileConflictDialog.vue';
 import PluginActionDialog from '@/components/PluginActionDialog.vue';
+import ComfyRunDialog from '@/components/ComfyRunDialog.vue';
 import LivePhotoExportDialog from '@/components/LivePhotoExportDialog.vue';
 import CollageDialog from '@/components/CollageDialog.vue';
 import BatchProcessDialog from '@/components/BatchProcessDialog.vue';
@@ -1241,11 +1251,16 @@ async function onBatchDone(payload: any) {
     }
     let ok = 0;
     let fail = 0;
+    let firstImportedId: number | null = null;
     for (const path of outputPaths) {
       try {
         const imported = await importFile(path, destination.folderId, destination.folderPath);
-        if (imported) ok += 1;
-        else fail += 1;
+        if (imported) {
+          ok += 1;
+          if (firstImportedId === null) firstImportedId = Number(imported.id || 0);
+        } else {
+          fail += 1;
+        }
       } catch {
         fail += 1;
       }
@@ -1253,6 +1268,7 @@ async function onBatchDone(payload: any) {
     if (ok > 0) {
       toast.success(t('batch.import_success', { count: ok }));
       await refreshImportedFiles(destination.albumId);
+      await revealImportedFile(destination.albumId, firstImportedId);
     }
     if (fail > 0 && ok === 0) {
       toast.warning(t('batch.import_failed'));
@@ -1287,6 +1303,7 @@ async function onPrintLayoutDone(payload: { path: string; importToLibrary?: bool
     if (imported) {
       toast.success(t('print_layout.import_success'));
       await refreshImportedFiles(destination.albumId);
+      await revealImportedFile(destination.albumId, imported.id);
     } else {
       toast.warning(t('print_layout.import_failed'));
     }
@@ -1322,11 +1339,16 @@ async function onPhotoFrameDone(payload: any) {
     }
     let ok = 0;
     let fail = 0;
+    let firstImportedId: number | null = null;
     for (const path of outputPaths) {
       try {
         const imported = await importFile(path, destination.folderId, destination.folderPath);
-        if (imported) ok += 1;
-        else fail += 1;
+        if (imported) {
+          ok += 1;
+          if (firstImportedId === null) firstImportedId = Number(imported.id || 0);
+        } else {
+          fail += 1;
+        }
       } catch {
         fail += 1;
       }
@@ -1334,6 +1356,7 @@ async function onPhotoFrameDone(payload: any) {
     if (ok > 0) {
       toast.success(t('photo_frame.import_success', { count: ok }));
       await refreshImportedFiles(destination.albumId);
+      await revealImportedFile(destination.albumId, firstImportedId);
     }
     if (fail > 0 && ok === 0) {
       toast.warning(t('photo_frame.import_failed'));
@@ -1634,6 +1657,100 @@ const timelineData = ref<any[]>([]);  // timeline markers for scrollbar
 const toast = useToast();
 const pluginStore = usePluginStore();
 const aiPluginHostEnvironment = ref<AiPluginHostEnvironment | null>(null);
+
+const comfyWorkflows = computed(() => config.comfy?.workflows || []);
+const comfyRun = ref({ show: false, files: [] as any[], destination: null as any });
+
+async function openComfyRun() {
+  // Results are imported back into the currently open album, so refuse up front rather
+  // than letting the user fill in the dialog and fail at the very end.
+  try {
+    const destination = await resolveCurrentAlbumImportDestination();
+    if (!destination) {
+      toast.warning(t('comfy.need_album'));
+      return;
+    }
+    const items = getActionableSelectedItems();
+    if (items.length === 0) {
+      toast.warning(t('comfy.need_album'));
+      return;
+    }
+    comfyRun.value = { show: true, files: items, destination };
+  } catch (error: any) {
+    console.error('[comfy] failed to open run dialog:', error);
+    toast.error(String(error?.message || error));
+  }
+}
+
+function closeComfyRun() {
+  comfyRun.value = { show: false, files: [], destination: null };
+}
+
+/// Single-image entry point. The thumbnail menu targets one photo, which is not necessarily
+/// part of any multi-selection, so it cannot go through getActionableSelectedItems().
+///
+/// Every exit path reports something: this is invoked as `void openComfyRunForSingle()`, so a
+/// bare return (or a rejected await) would silently look like a dead menu item.
+async function openComfyRunForSingle() {
+  // Resolve the file *before* awaiting: the grid index can shift while the async album
+  // lookup is in flight, which would otherwise silently resolve to nothing.
+  const file = fileList.value[selectedItemIndex.value];
+  if (!file) {
+    toast.warning(t('comfy.no_file'));
+    return;
+  }
+  try {
+    const destination = await resolveCurrentAlbumImportDestination();
+    if (!destination) {
+      toast.warning(t('comfy.need_album'));
+      return;
+    }
+    comfyRun.value = { show: true, files: [file], destination };
+  } catch (error: any) {
+    console.error('[comfy] failed to open run dialog:', error);
+    toast.error(String(error?.message || error));
+  }
+}
+
+async function onComfyImported(payload: { albumId: number; fileIds: string[] }) {
+  await refreshImportedFiles(payload.albumId);
+  closeComfyRun();
+
+  // Bring the first freshly imported result into view and select it, so a run stays
+  // discoverable even in a large album where the default sort puts it far away.
+  await revealImportedFile(payload.albumId, payload.fileIds?.[0]);
+}
+
+/// Jump to and select the first newly imported file from a tool run (ComfyUI, batch,
+/// photo frame, print layout, plugins). No-op when the user has left the album or
+/// nothing was imported.
+async function revealImportedFile(
+  albumId: number,
+  fileId: number | string | null | undefined
+) {
+  if (config.main.sidebarIndex !== SIDEBAR.LIBRARY) return;
+  if (Number(libConfig.album.id || 0) !== Number(albumId || 0)) return;
+  const firstId = Number(fileId || 0);
+  if (firstId <= 0) return;
+
+  // updateContent() starts the list reload without awaiting it; the row lookup needs
+  // the refreshed count/placeholders, so wait for the reload to settle first.
+  await waitForContentSettled();
+  const index = await resolveFileIndexInCurrentQuery(firstId);
+  if (index >= 0) {
+    selectedItemIndex.value = index;
+    updateSelectedImage(index);
+  }
+}
+
+/// Poll until the content reload finishes (contentReady) or a bounded timeout passes.
+async function waitForContentSettled(timeoutMs = 2000) {
+  const started = Date.now();
+  while (!contentReady.value && Date.now() - started < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+}
+
 const pluginActionDialog = ref({
   show: false,
   busy: false,
@@ -1803,13 +1920,22 @@ async function pasteClipboardImage(target?: { albumId: number; folderPath?: stri
 
   isPastingClipboard.value = true;
   try {
-    const files = await importClipboard(destination.folderId, destination.folderPath);
+    const result = await importClipboard(destination.folderId, destination.folderPath);
+    const files = result?.files;
     if (!Array.isArray(files) || files.length === 0) {
       toast.warning(t('msgbox.drop_import.no_clipboard_image'));
       return;
     }
     await refreshImportedFiles(destination.albumId);
-    toast.success(t('msgbox.drop_import.success', { count: files.length }));
+    const failedCount = Number(result?.failedCount || 0);
+    if (failedCount > 0) {
+      toast.warning(t('msgbox.drop_import.partial', {
+        imported: files.length,
+        failed: failedCount,
+      }));
+    } else {
+      toast.success(t('msgbox.drop_import.success', { count: files.length }));
+    }
   } catch (error) {
     console.error('Failed to import clipboard image:', error);
     toast.warning(t('msgbox.drop_import.no_clipboard_image'));
@@ -2899,6 +3025,7 @@ async function runPluginAction(form: { inputs: Record<string, any>; parameters: 
         toast.success('Plugin result imported.');
         await refreshImportedFiles(destination.albumId);
         closePluginActionDialog(true);
+        await revealImportedFile(destination.albumId, imported.id);
         return;
       }
     }
@@ -2944,6 +3071,7 @@ function handleItemAction(payload: { action: any, index: number }) {
   }
 
   const actionMap = {
+    'comfy-run': () => void openComfyRunForSingle(),
     'open': () => openImageViewer(selectedItemIndex.value, true),
     'compare-with-next': () => void openCompareWithNext(selectedItemIndex.value),
     'print': () => void printImage(selectedItemIndex.value),
@@ -3574,7 +3702,21 @@ async function processNextAlbum(skipFilePath: string | null = null, skipRecovery
       libConfig.index.total = 0;
       libConfig.index.searchTotal = 0;
       libConfig.index.failed = 0;
-      await indexAlbum(albumId, skipFilePath || null);
+      try {
+        await indexAlbum(albumId, skipFilePath || null);
+      } catch (error) {
+        const queuedIds = (libConfig.index.albumQueue as any[]).map(id => Number(id));
+        const pausedIds = new Set(
+          (libConfig.index.pausedAlbumIds as any[]).map(id => Number(id)),
+        );
+        queuedIds.forEach(id => pausedIds.add(id));
+        libConfig.index.albumQueue = [];
+        libConfig.index.pausedAlbumIds = Array.from(pausedIds);
+        libConfig.index.failed = 1;
+        syncIndexStatus();
+        toast.warning(localeMsg.value.search.index.blocked_by_dedup);
+        console.error('Album indexing was blocked:', error);
+      }
     } else {
       // album not found (maybe deleted), remove from queue and process next
       libConfig.index.albumQueue.shift();
@@ -4054,6 +4196,7 @@ onMounted( async() => {
     const { albumId, folderId, folderPath } = destination;
 
     let imported = 0;
+    let failed = 0;
     const filePaths = [
       ...getExternalFileDropPaths(droppedUris),
       ...(nativeDragPayload?.filePaths || []),
@@ -4062,13 +4205,19 @@ onMounted( async() => {
       try {
         const file = await importFile(filePath, folderId, folderPath);
         if (file) imported++;
+        else failed++;
       } catch (err) {
+        failed++;
         console.error('Failed to import dropped file:', filePath, err);
       }
     }
     if (imported > 0) {
       await refreshImportedFiles(albumId);
-      toast.success(t('msgbox.drop_import.success', { count: imported }));
+      if (failed > 0) {
+        toast.warning(t('msgbox.drop_import.partial', { imported, failed }));
+      } else {
+        toast.success(t('msgbox.drop_import.success', { count: imported }));
+      }
       return;
     }
 
@@ -4076,21 +4225,34 @@ onMounted( async() => {
       const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
       const extRE = /\.(\w+)$/i;
       imported = 0;
+      failed = 0;
       for (const file of droppedFiles) {
-        if (!extRE.test(file.name) || file.size <= 0 || file.size > MAX_FILE_SIZE) continue;
+        if (!extRE.test(file.name) || file.size <= 0 || file.size > MAX_FILE_SIZE) {
+          failed++;
+          continue;
+        }
         try {
           const buf = await file.arrayBuffer();
-          if (buf.byteLength === 0) continue;
+          if (buf.byteLength === 0) {
+            failed++;
+            continue;
+          }
           const bytes = Array.from(new Uint8Array(buf));
           const result = await importFileBytes(bytes, file.name, folderId, folderPath);
           if (result) imported++;
+          else failed++;
         } catch (err) {
+          failed++;
           console.error('Failed to import file via bytes:', file.name, err);
         }
       }
       if (imported > 0) {
         await refreshImportedFiles(albumId);
-        toast.success(t('msgbox.drop_import.success', { count: imported }));
+        if (failed > 0) {
+          toast.warning(t('msgbox.drop_import.partial', { imported, failed }));
+        } else {
+          toast.success(t('msgbox.drop_import.success', { count: imported }));
+        }
         return;
       }
       // Fall through to URL handling — some browsers provide both
@@ -4152,8 +4314,10 @@ onMounted( async() => {
         break;
       case 'plugin-result-imported':
         const pluginResultAlbumId = Number((event.payload as any).albumId || 0);
+        const pluginResultFileId = (event.payload as any).fileId;
         if (pluginResultAlbumId > 0) {
           await refreshImportedFiles(pluginResultAlbumId);
+          await revealImportedFile(pluginResultAlbumId, pluginResultFileId);
         }
         break;
       default:
@@ -4861,6 +5025,42 @@ async function getSelectedItemsForClipboard(limit = 10) {
 // Track last visible range to avoid redundant fetches
 let lastVisibleRange = { start: -1, end: -1 };
 let visibleRangeSeqId = 0;
+let thumbnailRetainList: any[] | null = null;
+let thumbnailRetainRange = { start: 0, end: 0 };
+
+function evictOffscreenThumbnailDataUrls(startIndex: number, endIndex: number) {
+  const visibleCount = Math.max(1, endIndex - startIndex + 1);
+  const retainBuffer = Math.max(80, Math.min(visibleCount * 3, 360));
+  const retainStart = Math.max(0, startIndex - retainBuffer);
+  const retainEnd = Math.min(fileList.value.length, endIndex + retainBuffer + 1);
+
+  const clearRange = (start: number, end: number) => {
+    for (let index = Math.max(0, start); index < Math.min(fileList.value.length, end); index++) {
+      if (index >= retainStart && index < retainEnd) continue;
+      if (index === selectedItemIndex.value) continue;
+
+      const file = fileList.value[index];
+      if (typeof file?.thumbnail === 'string' && file.thumbnail.startsWith('data:image/')) {
+        file.thumbnail = undefined;
+      }
+    }
+  };
+
+  if (thumbnailRetainList !== fileList.value) {
+    clearRange(0, retainStart);
+    clearRange(retainEnd, fileList.value.length);
+    thumbnailRetainList = fileList.value;
+  } else {
+    if (retainStart > thumbnailRetainRange.start) {
+      clearRange(thumbnailRetainRange.start, retainStart);
+    }
+    if (retainEnd < thumbnailRetainRange.end) {
+      clearRange(retainEnd, thumbnailRetainRange.end);
+    }
+  }
+
+  thumbnailRetainRange = { start: retainStart, end: retainEnd };
+}
 
 function handleVisibleRangeUpdate({ startIndex, endIndex }: { startIndex: number, endIndex: number }) {
   // Skip if the range hasn't changed significantly
@@ -4869,6 +5069,7 @@ function handleVisibleRangeUpdate({ startIndex, endIndex }: { startIndex: number
   }
 
   lastVisibleRange = { start: startIndex, end: endIndex };
+  evictOffscreenThumbnailDataUrls(startIndex, endIndex);
 
   const buffer = Math.max(40, Math.min(visibleItemCount.value, 120));
   const seqId = ++visibleRangeSeqId;
@@ -6230,6 +6431,18 @@ const selectionMenuItems = computed(() => {
     }
   }
 
+  // ComfyUI: run a saved workflow against the selected image. Only offered for image
+  // selections, and only once at least one workflow has been imported.
+  if (kind === 'image' && comfyWorkflows.value.length > 0) {
+    result.push({ label: '-', action: null });
+    result.push({
+      label: localeMsg.value.comfy?.run_menu || 'Run ComfyUI workflow...',
+      icon: markRaw(IconPalette),
+      disabled,
+      action: () => void openComfyRun(),
+    });
+  }
+
   result.push(
     { label: '-', action: null },
     {
@@ -6902,7 +7115,7 @@ const onTrashFile = async () => {
   }
 }
 
-// Remove a file from disk first. Keep the DB row if the filesystem operation fails.
+// Keep the item visible until the backend confirms its coordinated disk/DB operation.
 async function deleteFileAlways(file: any, permanently = false) {
   const deletedFile = permanently
     ? await deleteFilePermanently(file.id, file.file_path)
@@ -7521,8 +7734,12 @@ const toggleDedupPanel = () => {
   });
 };
 
-async function resolveFileIndexForDedup(fileId: number): Promise<number> {
-  const loadedIndex = fileList.value.findIndex(file => file.id === fileId);
+/// Resolve the row index of `fileId` in the current query, loading the surrounding
+/// chunk first when the file is beyond the already-fetched window.
+async function resolveFileIndexInCurrentQuery(fileId: number): Promise<number> {
+  const loadedIndex = fileList.value.findIndex(
+    file => Number(file?.id) === Number(fileId)
+  );
   if (loadedIndex !== -1) return loadedIndex;
 
   const position = await getQueryFilePosition(currentQueryParams.value, fileId);
@@ -7533,6 +7750,10 @@ async function resolveFileIndexForDedup(fileId: number): Promise<number> {
   const buffer = 200;
   await fetchDataRange(position - buffer, position + buffer);
   return position;
+}
+
+async function resolveFileIndexForDedup(fileId: number): Promise<number> {
+  return resolveFileIndexInCurrentQuery(fileId);
 }
 
 const handleDedupSelectFile = (fileId: number) => {

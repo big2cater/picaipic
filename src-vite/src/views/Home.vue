@@ -5,7 +5,6 @@
       'w-screen h-screen flex flex-col overflow-hidden select-none text-base-content/70',
       // Transparent under BH/CP so ambient backdrop reads through chrome
       showFxShell ? 'bg-transparent' : 'bg-base-300',
-      showCyberpunkChrome ? 'cp-shell' : '',
     ]"
   >
     <transition name="fade">
@@ -88,8 +87,8 @@
           <!-- side bar -->
           <div 
             :class="[
-              'fixed top-14 min-w-16 bottom-10 z-20 flex flex-col items-center',
-              config.settings.showButtonText ? 'space-y-3' : 'space-y-1' 
+              'fixed top-14 min-w-16 bottom-10 z-20 flex flex-col items-center overflow-y-auto scrollbar-hide',
+              config.settings.showButtonText ? 'space-y-2' : 'space-y-1' 
             ]" 
             data-tauri-drag-region
           >
@@ -225,6 +224,7 @@ import { ref, computed, defineAsyncComponent, onBeforeUnmount, onMounted, watch,
 import { useI18n } from 'vue-i18n';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getName } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { config, libConfig } from '@/common/config';
@@ -303,6 +303,16 @@ const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const uiStore = useUIStore();
+const homeWindow = getCurrentWindow();
+let unlistenHomeResize: null | (() => void) = null;
+
+async function syncHomeMaximized() {
+  try {
+    uiStore.setMaximized(await homeWindow.isMaximized());
+  } catch (error) {
+    console.warn('Home isMaximized failed', error);
+  }
+}
 
 const { idle } = useIdle(6000);
 const reducedMotion = ref(false);
@@ -620,6 +630,14 @@ const libraryMenuItems = computed(() => {
 
 onMounted(async () => {
   window.addEventListener('keydown', handleHomeKeyDown);
+  await syncHomeMaximized();
+  try {
+    unlistenHomeResize = await homeWindow.onResized(() => {
+      void syncHomeMaximized();
+    });
+  } catch (error) {
+    console.warn('Home onResized failed', error);
+  }
   unlistenOpenPreferences = await listen('app-open-preferences', () => {
     void clickSettings();
   });
@@ -676,6 +694,8 @@ onBeforeUnmount(() => {
   applyFxShellBg(false);
   clearLeftPanelAnimationTimer();
   window.removeEventListener('keydown', handleHomeKeyDown);
+  unlistenHomeResize?.();
+  unlistenHomeResize = null;
   unlistenOpenPreferences?.();
   unlistenOpenPreferences = null;
   unlistenOpenAbout?.();

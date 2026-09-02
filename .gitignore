@@ -59,3 +59,10 @@ __pycache__/
 # ZCode client local state
 .zcode/
 tools/
+
+# Local dev leftovers (never commit)
+.pnpm-store/
+target-codex-*/
+favicon (8).ico
+picaipic-profile-screen.png
+scan-*.log

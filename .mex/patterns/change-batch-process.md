@@ -1,7 +1,7 @@
 ---
 name: change-batch-process
 description: Runbook for the built-in batch wizard and host batch_process_images pipeline.
-last_updated: 2026-07-22
+last_updated: 2026-07-30
 ---
 
 # Change batch processing / 批处理 (Phase C1–C2)
@@ -35,7 +35,7 @@ last_updated: 2026-07-22
 - Actions are ordered and free-composable (“一键动作” = saved action chain templates).
 - Progress via `batch-process-progress` events; cancel is cooperative between files.
 - **Host concurrency:** `batch_process_images` plans destinations serially (`resolve_batch_dest_path` + reserved set), then runs decode/process/write on a bounded `JoinSet` (`batch_worker_limit` ≈ 70% cores, clamp 2–8). Do not re-resolve dest inside workers (race on rename). Cancel: stop spawn + `abort_all` + drain joins.
-- **Atomic write + cancel cleanup (2026-07-22):** each file writes `{dest}.picaipic-batch.tmp` then renames to final dest. On cancel/error, only the temp sidecar is removed (`remove_batch_temp`) — never delete a pre-existing final dest (overwrite-safe). Progress `current` is clamped with `(completed + in_flight).min(total)`.
+- **Atomic write + crash cleanup (2026-07-30):** each worker uses `t_output_temp::TrackedOutputTemp` to persist a synced exact-path journal before writing a UUID-namespaced same-directory sidecar, then renames it to the final destination. Guard drop covers success/error/cancel/task abort; startup recovery covers process exit. Never replace this with an export-root wildcard sweep. Progress `current` is clamped with `(completed + in_flight).min(total)`.
 - Reuse Phase A photo/ratio presets for crop actions; custom ratios pass `ratio_w`/`ratio_h`.
 - C2: `border`/`expand` are pure geometry+fill; `watermark` needs a local image path; `text` loads a system TTF/TTC via `ab_glyph` (no bundled font asset).
 - **Optional library import (G2 MVP):** host returns `outputPaths` for successful writes. Wizard checkbox `batchProcess.importToLibrary` (default off). `Content.onBatchDone`: **saveAs** → sequential `importFile` into current album; **overwrite** → `updateFileInfo` only (never re-copy). No album → toast `batch.import_need_album`.
@@ -49,7 +49,8 @@ last_updated: 2026-07-22
 - `cargo check --manifest-path src-tauri/Cargo.toml`
 - Manual: multi-select → 批处理 → chain resize+border+text+watermark → save template → output folder → start → cancel mid-run
 - Manual: large batch (dozens+) should progress faster than pure serial; mid-run cancel still stops further work
-- Manual: cancel mid-run leaves no `*.picaipic-batch.tmp` and no half-written new outputs; overwrite does not wipe originals mid-encode
+- `cargo test --manifest-path src-tauri/Cargo.toml t_output_temp::tests`
+- Manual: cancel mid-run leaves no `.picaipic-batch-<uuid>.tmp` and no half-written new outputs; overwrite does not wipe originals mid-encode
 - Manual: saveAs + import checked → outputs appear in current album; overwrite + import → metadata refresh only, no duplicate
 
 ## Capture-time stamp (watermark / text)

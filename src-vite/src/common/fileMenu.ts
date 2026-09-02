@@ -56,6 +56,7 @@ export const useFileMenuItems = (
     const isVideo = f.file_type === 2;
     const isLivePhoto = Number(f.live_photo_type || 0) > 0;
     const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, DEFAULT_PLATFORM);
+    const comfyWorkflows = config.comfy?.workflows || [];
     const pluginMenuItems = (pluginMenus?.value || [])
       .map((menu) => ({
         label: menu.label,
@@ -243,6 +244,16 @@ export const useFileMenuItems = (
         ? [
             { label: "-", action: null },
             ...pluginMenuItems,
+          ]
+        : []),
+      ...(comfyWorkflows.length > 0 && isImage
+        ? [
+            { label: "-", action: null },
+            {
+              label: localeMsg.value.comfy?.run_menu || 'Run ComfyUI workflow...',
+              icon: markRaw(IconPalette),
+              action: createAction('comfy-run'),
+            },
           ]
         : []),
       { label: "-", action: null },

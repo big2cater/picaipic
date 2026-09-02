@@ -72,7 +72,7 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 
 - **Live Photo / Motion Photo**：Apple 图+视频配对、Google 内嵌 MP4、HEIC 容器视频；长按预览、导出/转换、确认后的关键帧替换与元数据修复。详见 [Live Photo 指南](../docs/guide/live-photo.md)。
 - **60+ 媒体格式**：通过 LibRaw、libheif、libjpeg-turbo、jxl-oxide、FFmpeg 与 Rust codec 支持图片、RAW 和视频。
-- **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效。
+- **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效、GPU 上限感知的 WebGL 渲染，以及集显/高 DPI Windows 设备上的可见 CSS 照片回退。详见[动态主题运行兼容说明](../docs/guide/fx-theme-runtime-compatibility.md)。
 - **仅发布 Windows 与 Linux**：Windows x64/ARM64、Linux x86_64/ARM64。
 
 ## 当前开发状态
@@ -86,6 +86,7 @@ PicAiPic 当前处于 `v1.1.0` 开发线。仓库可能已有私有多架构 dra
 - SA-LUT 等插件动作只在托管插件可达时显示；启动/停止/重启状态会跨窗口同步
 - 裁剪、拼图、批处理、冲印、追色、LUT/照片格调、相框、智能相册、集合和 Live/Motion Photo 等内置流程
 - Windows 安装包、Linux/共享 PNG、标题栏、欢迎/关于页和文档站统一使用新版应用图标
+- 动态主题跨电脑加固：主窗原生最大化同步、旧强度配置迁移、GPU 纹理/viewport 上限保护，以及黑洞/赛博朋克照片层的 CSS 失败回退
 - 发布范围收敛为 Windows/Linux；已删除 Android/iOS 资源和 macOS bundle/native bridge 文件
 
 下一阶段重点是 release 可执行文件回归、代表性冷导入/embedding profiling、插件签名密钥轮换/撤销设计，以及在默认 input staging 之上更强的网络/Linux 插件隔离。详见 [v1.1.0 发布说明](../docs/guide/release-notes/v1.1.0.md) 和 [开发进度看板](../docs/guide/picaipic-progress.md)。

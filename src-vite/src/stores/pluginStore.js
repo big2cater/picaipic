@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getAiPluginStatus, listAiPlugins } from '@/common/api';
+import { config } from '@/common/config';
 
 let pluginStatusListenerPromise = null;
 
@@ -39,6 +40,15 @@ export const usePluginStore = defineStore('pluginStore', {
 
   actions: {
     async loadPlugins(force = false) {
+      // When the user hides the AI plugin feature, do not even probe the host: the
+      // menu source is empty and the Settings panels are hidden, so nothing should
+      // spin up a plugin runtime on their behalf.
+      if (config.aiPlugin?.hidden) {
+        this.plugins = [];
+        this.statuses = {};
+        this.loaded = true;
+        return this.plugins;
+      }
       ensurePluginStatusListener(this);
       if (this.loading) return this.plugins;
       if (this.loaded && !force) return this.plugins;
@@ -94,6 +104,7 @@ export const usePluginStore = defineStore('pluginStore', {
     },
 
     getMenuItems(context, placement) {
+      if (config.aiPlugin?.hidden) return [];
       const runningPluginIds = this.runningPluginIds;
       return this.validPlugins
         .filter((plugin) => runningPluginIds.has(plugin.id))

@@ -170,6 +170,82 @@ mod transfer_tests {
     }
 
     #[test]
+    fn file_move_replace_rollback_restores_source_and_destination() {
+        let root = test_dir();
+        let source_dir = root.join("source");
+        let destination_dir = root.join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&destination_dir).unwrap();
+        let source = source_dir.join("photo.jpg");
+        let destination = destination_dir.join("photo.jpg");
+        fs::write(&source, b"moved file").unwrap();
+        fs::write(&destination, b"replaced file").unwrap();
+
+        let transfer = move_file_with_policy(
+            source.to_str().unwrap(),
+            destination_dir.to_str().unwrap(),
+            FileConflictPolicy::Replace,
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"moved file");
+
+        transfer.rollback_move(&source).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"moved file");
+        assert_eq!(fs::read(&destination).unwrap(), b"replaced file");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_permanent_delete_can_restore_original_file() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.jpg");
+        fs::write(&source, b"original file").unwrap();
+
+        let staged = stage_file_for_delete(source.to_str().unwrap()).unwrap();
+        assert!(!source.exists());
+        staged.rollback().unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"original file");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_permanent_delete_finalizes_file() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("photo.jpg");
+        fs::write(&source, b"delete me").unwrap();
+
+        let staged = stage_file_for_delete(source.to_str().unwrap()).unwrap();
+        staged.finalize_permanent().unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_permanent_delete_can_restore_folder_tree() {
+        let root = test_dir();
+        let source = root.join("album");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested").join("photo.jpg"), b"original file").unwrap();
+
+        let staged = stage_folder_for_delete(source.to_str().unwrap()).unwrap();
+        assert!(!source.exists());
+        staged.rollback().unwrap();
+        assert_eq!(
+            fs::read(source.join("nested").join("photo.jpg")).unwrap(),
+            b"original file"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn file_copy_to_same_folder_only_allows_keep_both() {
         let root = test_dir();
         fs::create_dir_all(&root).unwrap();
@@ -276,6 +352,123 @@ pub fn delete_folder_permanently(path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct StagedDelete {
+    original: PathBuf,
+    staged: PathBuf,
+    is_dir: bool,
+    /// Journal guard: restores the staged media if this delete never finalizes.
+    /// Only its `Drop` behaviour matters, so it is intentionally never read.
+    #[allow(dead_code)]
+    guard: crate::t_output_temp::TrackedOutputTemp,
+}
+
+impl StagedDelete {
+    pub fn rollback(self) -> Result<(), String> {
+        fs::rename(&self.staged, &self.original).map_err(|e| {
+            format!(
+                "Failed to restore staged delete '{}' from '{}': {}",
+                self.original.display(),
+                self.staged.display(),
+                e
+            )
+        })
+    }
+
+    pub fn finalize_permanent(self) -> Result<(), String> {
+        let staged = self.staged.to_string_lossy().into_owned();
+        let delete_result = if self.is_dir {
+            delete_folder_permanently(&staged)
+        } else {
+            delete_file_permanently(&staged)
+        };
+        if let Err(delete_error) = delete_result {
+            let original = self.original.display().to_string();
+            let rollback_error = self.rollback().err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "Failed to permanently delete '{}': {}; restore also failed: {}",
+                    original, delete_error, rollback_error
+                ),
+                None => format!(
+                    "Failed to permanently delete '{}'; original was restored: {}",
+                    original, delete_error
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn finalize_trash(self) -> Result<(), String> {
+        let original = self.original.clone();
+        self.rollback()?;
+        let original_path = original.to_string_lossy().into_owned();
+        match trash_path(&original_path) {
+            Ok(()) => Ok(()),
+            Err(error) if !path_exists(&original_path) => {
+                eprintln!(
+                    "Trash operation reported an error after removing '{}': {}",
+                    original.display(),
+                    error
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "Failed to move restored path '{}' to Trash: {}",
+                original.display(),
+                error
+            )),
+        }
+    }
+}
+
+fn stage_delete(path: &str, expect_dir: bool) -> Result<StagedDelete, String> {
+    let original = PathBuf::from(path);
+    let metadata = fs::symlink_metadata(&original).map_err(|e| {
+        format!(
+            "Failed to read metadata before staging delete: {} ({})",
+            original.display(),
+            e
+        )
+    })?;
+    if metadata.is_dir() != expect_dir {
+        let expected = if expect_dir { "folder" } else { "file" };
+        return Err(format!(
+            "Delete operation expected a {}: {}",
+            expected,
+            original.display()
+        ));
+    }
+
+    // Register the exact staged path before renaming. A crash between this rename
+    // and the DB delete used to leave an invisible `.lap-delete-*` orphan that no
+    // scan or cleanup pass could ever find again.
+    let guard = crate::t_output_temp::TrackedOutputTemp::create_staged_delete(&original)?;
+    let staged = guard.path().to_path_buf();
+    fs::rename(&original, &staged).map_err(|e| {
+        format!(
+            "Failed to stage delete '{}' to '{}': {}",
+            original.display(),
+            staged.display(),
+            e
+        )
+    })?;
+    Ok(StagedDelete {
+        original,
+        staged,
+        is_dir: expect_dir,
+        guard,
+    })
+}
+
+pub fn stage_file_for_delete(path: &str) -> Result<StagedDelete, String> {
+    stage_delete(path, false)
+}
+
+pub fn stage_folder_for_delete(path: &str) -> Result<StagedDelete, String> {
+    stage_delete(path, true)
 }
 
 // reverse geocoder
@@ -907,9 +1100,12 @@ pub fn rename_folder(folder_path: &str, new_folder_name: &str) -> Option<String>
         return None;
     }
 
-    // Construct the new folder path
-    let mut new_folder_path = PathBuf::from(path);
-    new_folder_path.set_file_name(new_folder_name);
+    // Construct the new folder path from the final component only, so a rename can
+    // never relocate the folder outside its parent directory.
+    let Some(new_folder_path) = sibling_path_with_name(path, new_folder_name) else {
+        eprintln!("Invalid new folder name: {}", new_folder_name);
+        return None;
+    };
 
     // Check if the new folder name already exists
     if new_folder_path.exists() {
@@ -1005,7 +1201,26 @@ fn resolve_transfer_destination(
     )
 }
 
-fn paths_refer_to_same_item(left: &Path, right: &Path) -> bool {
+pub(crate) fn resolve_file_transfer_destination(
+    file_path: &str,
+    dest_folder: &str,
+    policy: FileConflictPolicy,
+) -> Result<PathBuf, String> {
+    let source = Path::new(file_path);
+    if source.parent() == Some(Path::new(dest_folder)) {
+        return Err(format!(
+            "Source file is already in destination folder: {}",
+            dest_folder
+        ));
+    }
+    let destination = resolve_transfer_destination(source, dest_folder, policy)?;
+    if paths_refer_to_same_item(source, &destination) {
+        return Err("Source and destination are the same file".to_string());
+    }
+    Ok(destination)
+}
+
+pub(crate) fn paths_refer_to_same_item(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
@@ -1027,21 +1242,25 @@ impl TransferResult {
     }
 
     pub fn finalize(self) -> Result<String, String> {
+        // A superseded destination is user media, not a scratch artifact: move it to
+        // the system trash so a Replace stays recoverable, matching `delete_file`.
+        // A trash failure keeps the staged backup in place rather than destroying it.
         if let Some(backup) = self.backup {
-            let result = if backup.is_dir() {
-                fs::remove_dir_all(&backup)
-            } else {
-                fs::remove_file(&backup)
-            };
-            if let Err(error) = result {
+            let backup_path = backup.to_string_lossy().into_owned();
+            if let Err(error) = trash_path(&backup_path) {
                 eprintln!(
-                    "Transfer completed but backup cleanup failed for '{}': {}",
-                    backup.display(),
-                    error
+                    "Transfer completed but the superseded item could not be moved to Trash '{}': {}. It was kept at '{}'",
+                    backup_path,
+                    error,
+                    backup.display()
                 );
             }
         }
         Ok(self.path)
+    }
+
+    pub(crate) fn backup_path(&self) -> Option<&Path> {
+        self.backup.as_deref()
     }
 
     pub fn rollback_move(self, source: &Path) -> Result<(), String> {
@@ -1243,16 +1462,7 @@ pub fn move_file_with_policy(
     policy: FileConflictPolicy,
 ) -> Result<TransferResult, String> {
     let source = Path::new(file_path);
-    if source.parent() == Some(Path::new(dest_folder)) {
-        return Err(format!(
-            "Source file is already in destination folder: {}",
-            dest_folder
-        ));
-    }
-    let destination = resolve_transfer_destination(source, dest_folder, policy)?;
-    if paths_refer_to_same_item(source, &destination) {
-        return Err("Source and destination are the same file".to_string());
-    }
+    let destination = resolve_file_transfer_destination(file_path, dest_folder, policy)?;
 
     if policy != FileConflictPolicy::Replace || !destination.exists() {
         if fs::rename(source, &destination).is_ok() {
@@ -1289,6 +1499,82 @@ pub fn move_file_with_policy(
     Ok(TransferResult::new(&destination, backup))
 }
 
+pub(crate) fn move_file_with_recovery_paths(
+    file_path: &str,
+    destination: &Path,
+    policy: FileConflictPolicy,
+    staged: &Path,
+    backup: &Path,
+) -> Result<TransferResult, String> {
+    let source = Path::new(file_path);
+    if !source.is_file() {
+        return Err(format!("Source file does not exist: {}", file_path));
+    }
+    if paths_refer_to_same_item(source, destination) {
+        return Err("Source and destination are the same file".to_string());
+    }
+    if policy != FileConflictPolicy::Replace && destination.exists() {
+        return Err(format!(
+            "Move destination became occupied: {}",
+            destination.display()
+        ));
+    }
+    if staged.exists() || backup.exists() {
+        return Err("Transfer recovery paths already exist".to_string());
+    }
+
+    if !destination.exists() && fs::rename(source, destination).is_ok() {
+        return Ok(TransferResult::new(destination, None));
+    }
+
+    copy_file_to_path(source, staged)
+        .map_err(|error| format!("Failed to stage file move: {}", error))?;
+    // Read-write handle: FlushFileBuffers on Windows rejects a read-only handle
+    // ("access denied"), while Linux fsync tolerates one.
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(staged)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("Failed to sync staged file move: {}", error))?;
+
+    let previous = if destination.exists() {
+        if let Err(error) = fs::rename(destination, backup) {
+            let _ = fs::remove_file(staged);
+            return Err(format!("Failed to stage existing destination: {}", error));
+        }
+        Some(backup.to_path_buf())
+    } else {
+        None
+    };
+
+    if let Err(error) = fs::rename(staged, destination) {
+        if previous.is_some() {
+            let _ = fs::rename(backup, destination);
+        }
+        let _ = fs::remove_file(staged);
+        return Err(format!("Failed to finalize staged file move: {}", error));
+    }
+
+    if let Err(error) = fs::remove_file(source) {
+        let rollback_error = TransferResult::new(destination, previous)
+            .rollback_move(source)
+            .err();
+        return Err(match rollback_error {
+            Some(rollback_error) => format!(
+                "File source cleanup failed: {}; rollback also failed: {}",
+                error, rollback_error
+            ),
+            None => format!(
+                "File source cleanup failed; move was rolled back: {}",
+                error
+            ),
+        });
+    }
+
+    Ok(TransferResult::new(destination, previous))
+}
+
 pub fn copy_file_with_policy(
     file_path: &str,
     dest_folder: &str,
@@ -1315,9 +1601,22 @@ pub fn copy_file_with_policy(
 /// Import a file into a destination folder preserving the original file name.
 /// If the target already exists, append a numeric suffix like `(1)`.
 pub fn import_file(source_path: &str, dest_folder: &str) -> Option<String> {
+    import_file_as(source_path, dest_folder, None)
+}
+
+/// Like `import_file`, but names the copied file `target_name` (sanitized) instead of the
+/// source's own basename. `None` keeps the source basename.
+pub fn import_file_as(
+    source_path: &str,
+    dest_folder: &str,
+    target_name: Option<&str>,
+) -> Option<String> {
     let source = Path::new(source_path);
     let mut destination = PathBuf::from(dest_folder);
-    destination.push(source.file_name()?);
+    match target_name {
+        Some(name) => destination.push(sanitize_import_name(name)),
+        None => destination.push(source.file_name()?),
+    }
     let destination = get_unique_path(destination);
 
     match fs::copy(source, &destination) {
@@ -1330,6 +1629,56 @@ pub fn import_file(source_path: &str, dest_folder: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// Make a caller-supplied import name safe to use as a single filename: keep only the final
+/// path component, replace characters that are illegal in a filename (or path separators
+/// that could escape the destination folder), and reject empty / dot-only / Windows-reserved
+/// results. Empty input falls back to "imported".
+pub fn sanitize_import_name(name: &str) -> String {
+    let name = name.trim();
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(|c: char| c == '.' || c == ' ');
+
+    if cleaned.is_empty() {
+        return "imported".to_string();
+    }
+    if is_reserved_windows_name(cleaned) {
+        // "CON.png", "NUL.txt" and friends are rejected by the Windows filesystem even
+        // though they look like ordinary names.
+        return format!("_{cleaned}");
+    }
+    cleaned.to_string()
+}
+
+fn is_reserved_windows_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let in_range = |stem: &str, prefix: &str| {
+        stem.strip_prefix(prefix)
+            .and_then(|n| n.parse::<u8>().ok())
+            .map(|n| (1..=9).contains(&n))
+            .unwrap_or(false)
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || in_range(&stem, "COM")
+        || in_range(&stem, "LPT")
 }
 
 /// Map an image MIME type to the canonical file extension.
@@ -1465,6 +1814,19 @@ pub fn save_bytes_to_folder(bytes: &[u8], content_type: &str, dest_folder: &str)
     destination.to_str().map(|s| s.to_string())
 }
 
+/// Resolve `new_name` to a sibling of `base`, keeping only the final path component.
+///
+/// `PathBuf::push`/`set_file_name` replace the whole path for absolute or prefixed
+/// values, and `..` would escape the parent directory; both would let a rename move
+/// a library item somewhere the DB no longer describes.
+fn sibling_path_with_name(base: &Path, new_name: &str) -> Option<PathBuf> {
+    let name = Path::new(new_name).file_name()?.to_str()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(base.parent().unwrap_or_else(|| Path::new(".")).join(name))
+}
+
 /// rename a file
 pub fn rename_file(file_path: &str, new_file_name: &str) -> Option<String> {
     let path = Path::new(file_path);
@@ -1475,12 +1837,12 @@ pub fn rename_file(file_path: &str, new_file_name: &str) -> Option<String> {
         return None;
     }
 
-    // Construct the new file path
-    let mut new_file_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    new_file_path.push(new_file_name);
+    // Construct the new file path from the final component only, so a rename can
+    // never relocate the file outside its parent directory.
+    let Some(new_file_path) = sibling_path_with_name(path, new_file_name) else {
+        eprintln!("Invalid new file name: {}", new_file_name);
+        return None;
+    };
 
     // Check if the new file name already exists
     if new_file_path.exists() {
@@ -1885,9 +2247,101 @@ fn remove_missing_folder(folder: &AFolder) -> Result<(), String> {
 /// starts the previous one is cancelled (its generation is invalidated).
 static FOLDER_SYNC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Albums currently running a full `index_album_worker` scan. Folder mtime sync
-/// skips these albums so concurrent TOCTOU inserts cannot race with the scan.
-static ACTIVE_ALBUM_SCANS: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// Full album scans and dedup scans share this gate because both write the
+/// current library database while doing long-running media work.
+#[derive(Default)]
+struct ActiveMediaScans {
+    album_ids: HashSet<i64>,
+    dedup: bool,
+    face_indexing: bool,
+    imports: usize,
+    library_rebinding: bool,
+}
+
+impl ActiveMediaScans {
+    fn start_album(&mut self, album_id: i64) -> Result<(), String> {
+        if self.library_rebinding {
+            return Err("Library switch is in progress".to_string());
+        }
+        if self.dedup {
+            return Err("A deduplication scan is currently running".to_string());
+        }
+        if !self.album_ids.insert(album_id) {
+            return Err(format!("Album {} is already being scanned", album_id));
+        }
+        Ok(())
+    }
+
+    fn finish_album(&mut self, album_id: i64) {
+        self.album_ids.remove(&album_id);
+    }
+
+    fn start_dedup(&mut self) -> Result<(), String> {
+        if self.library_rebinding {
+            return Err("Library switch is in progress".to_string());
+        }
+        if self.dedup {
+            return Err("A deduplication scan is already running".to_string());
+        }
+        if !self.album_ids.is_empty() {
+            return Err("An album indexing scan is currently running".to_string());
+        }
+        self.dedup = true;
+        Ok(())
+    }
+
+    fn finish_dedup(&mut self) {
+        self.dedup = false;
+    }
+
+    fn start_face_indexing(&mut self) -> Result<(), String> {
+        if self.library_rebinding {
+            return Err("Library switch is in progress".to_string());
+        }
+        if self.face_indexing {
+            return Err("Face indexing is already running".to_string());
+        }
+        self.face_indexing = true;
+        Ok(())
+    }
+
+    fn finish_face_indexing(&mut self) {
+        self.face_indexing = false;
+    }
+
+    fn start_import(&mut self) -> Result<(), String> {
+        if self.library_rebinding {
+            return Err("Library switch is in progress".to_string());
+        }
+        self.imports += 1;
+        Ok(())
+    }
+
+    fn finish_import(&mut self) {
+        self.imports = self.imports.saturating_sub(1);
+    }
+
+    fn begin_library_rebind(&mut self) -> Result<(), String> {
+        if self.library_rebinding {
+            return Err("Library switch is already in progress".to_string());
+        }
+        if !self.album_ids.is_empty() || self.dedup || self.face_indexing || self.imports > 0 {
+            return Err(
+                "Cannot switch or remove a library while indexing, deduplication, face indexing, or importing is running"
+                    .to_string(),
+            );
+        }
+        self.library_rebinding = true;
+        Ok(())
+    }
+
+    fn finish_library_rebind(&mut self) {
+        self.library_rebinding = false;
+    }
+}
+
+static ACTIVE_MEDIA_SCANS: Lazy<Mutex<ActiveMediaScans>> =
+    Lazy::new(|| Mutex::new(ActiveMediaScans::default()));
 
 struct AlbumScanGuard {
     album_id: i64,
@@ -1895,29 +2349,186 @@ struct AlbumScanGuard {
 
 impl AlbumScanGuard {
     fn acquire(album_id: i64) -> Result<Self, String> {
-        let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap_or_else(|e| e.into_inner());
-        if !active.insert(album_id) {
-            return Err(format!("Album {} is already being scanned", album_id));
-        }
+        let mut active = ACTIVE_MEDIA_SCANS.lock().unwrap_or_else(|e| e.into_inner());
+        active.start_album(album_id)?;
         Ok(Self { album_id })
     }
 }
 
 impl Drop for AlbumScanGuard {
     fn drop(&mut self) {
-        ACTIVE_ALBUM_SCANS
+        ACTIVE_MEDIA_SCANS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.album_id);
+            .finish_album(self.album_id);
+    }
+}
+
+pub(crate) struct DedupScanGuard;
+
+impl DedupScanGuard {
+    pub(crate) fn acquire() -> Result<Self, String> {
+        let mut active = ACTIVE_MEDIA_SCANS.lock().unwrap_or_else(|e| e.into_inner());
+        active.start_dedup()?;
+        Ok(Self)
+    }
+}
+
+pub(crate) struct FaceIndexGuard;
+
+impl FaceIndexGuard {
+    pub(crate) fn acquire() -> Result<Self, String> {
+        let mut active = ACTIVE_MEDIA_SCANS.lock().unwrap_or_else(|e| e.into_inner());
+        active.start_face_indexing()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for FaceIndexGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEDIA_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish_face_indexing();
+    }
+}
+
+pub(crate) struct ImportGuard;
+
+impl ImportGuard {
+    pub(crate) fn acquire() -> Result<Self, String> {
+        let mut active = ACTIVE_MEDIA_SCANS.lock().unwrap_or_else(|e| e.into_inner());
+        active.start_import()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEDIA_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish_import();
+    }
+}
+
+pub(crate) struct LibraryRebindGuard;
+
+impl LibraryRebindGuard {
+    pub(crate) fn acquire() -> Result<Self, String> {
+        let mut active = ACTIVE_MEDIA_SCANS.lock().unwrap_or_else(|e| e.into_inner());
+        active.begin_library_rebind()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for LibraryRebindGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEDIA_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish_library_rebind();
+    }
+}
+
+impl Drop for DedupScanGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEDIA_SCANS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish_dedup();
     }
 }
 
 /// True when an `index_album_worker` holds the per-album scan guard.
 pub fn album_scan_active(album_id: i64) -> bool {
-    ACTIVE_ALBUM_SCANS
+    ACTIVE_MEDIA_SCANS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .album_ids
         .contains(&album_id)
+}
+
+pub fn dedup_scan_active() -> bool {
+    ACTIVE_MEDIA_SCANS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .dedup
+}
+
+#[cfg(test)]
+mod active_media_scan_tests {
+    use super::ActiveMediaScans;
+
+    #[test]
+    fn album_and_dedup_scans_are_mutually_exclusive() {
+        let mut active = ActiveMediaScans::default();
+        active.start_album(7).unwrap();
+        assert!(active.start_dedup().is_err());
+        active.finish_album(7);
+
+        active.start_dedup().unwrap();
+        assert!(active.start_album(7).is_err());
+        active.finish_dedup();
+        active.start_album(7).unwrap();
+    }
+
+    #[test]
+    fn library_rebind_excludes_writers_and_new_work() {
+        let mut active = ActiveMediaScans::default();
+        active.start_import().unwrap();
+        assert!(active.begin_library_rebind().is_err());
+        active.finish_import();
+        active.begin_library_rebind().unwrap();
+        assert!(active.start_album(7).is_err());
+        assert!(active.start_face_indexing().is_err());
+        assert!(active.start_import().is_err());
+        active.finish_library_rebind();
+        active.start_album(7).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sanitize_import_name_tests {
+    use super::sanitize_import_name;
+
+    #[test]
+    fn keeps_readable_unicode_names() {
+        assert_eq!(
+            sanitize_import_name("comfy_放大2x_3.png"),
+            "comfy_放大2x_3.png"
+        );
+        assert_eq!(sanitize_import_name("Upscale 2x"), "Upscale 2x");
+        assert_eq!(sanitize_import_name("  padded  "), "padded");
+    }
+
+    #[test]
+    fn strips_path_and_illegal_characters() {
+        // Forward slashes are separators on every platform, so only the final
+        // component survives; illegal filename characters are replaced.
+        assert_eq!(
+            sanitize_import_name("a/b/c:d*e?f\"g<h>i|j.png"),
+            "c_d_e_f_g_h_i_j.png"
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(sanitize_import_name("..\\..\\evil.png"), "evil.png");
+    }
+
+    #[test]
+    fn rejects_empty_and_dot_only_names() {
+        assert_eq!(sanitize_import_name(""), "imported");
+        assert_eq!(sanitize_import_name("..."), "imported");
+        assert_eq!(sanitize_import_name("   "), "imported");
+    }
+
+    #[test]
+    fn tames_windows_reserved_names() {
+        assert_eq!(sanitize_import_name("CON.png"), "_CON.png");
+        assert_eq!(sanitize_import_name("NUL"), "_NUL");
+        assert_eq!(sanitize_import_name("com1.txt"), "_com1.txt");
+        // A name merely containing the prefix is fine.
+        assert_eq!(sanitize_import_name("comfy.png"), "comfy.png");
+    }
 }
 
 fn sync_generation_valid(generation: u64) -> bool {
@@ -3922,16 +4533,10 @@ pub async fn index_album_worker(
     let total_files = image_count + video_count;
     let search_total = image_count;
 
-    // Resume only when totals match and previous indexed is a valid in-progress value.
-    // This avoids breaking normal re-scan behavior after a completed run.
-    let resume_from = if previous_total == total_files
-        && previous_indexed > 0
-        && previous_indexed < total_files
-    {
-        previous_indexed
-    } else {
-        0
-    };
+    // A previous progress count cannot prove that WalkDir will yield the same prefix after a
+    // crash. Revisit every supported file so the current scan time marks all survivors before
+    // mark-and-sweep runs; cached metadata keeps this substantially cheaper than a full rebuild.
+    let resume_from = 0;
 
     // 3. Emit start progress
     let tracker = Arc::new(Mutex::new(ProgressTracker::new(
@@ -3949,7 +4554,6 @@ pub async fn index_album_worker(
     // 4. Traverse and index
     let mut is_cancelled = false;
     let mut traversal_failed = false;
-    let mut traversed_count = 0u64;
     let mut folder_ids = HashMap::new();
     let file_cache_started = phase_profile_enabled.then(Instant::now);
     let mut file_states = match AFile::load_scan_file_state_cache_for_album(album_id) {
@@ -4004,12 +4608,6 @@ pub async fn index_album_worker(
         if entry.file_type().is_file() {
             let path_str = entry.path().to_string_lossy().to_string();
             if let Some(ftype) = get_file_type(&path_str) {
-                // Resume mode: skip already-indexed prefix files.
-                if traversed_count < resume_from {
-                    traversed_count += 1;
-                    continue;
-                }
-
                 // Persist current file pointer for post-crash diagnosis.
                 write_index_trace(album_id, &path_str);
 
@@ -4027,7 +4625,6 @@ pub async fn index_album_worker(
                         });
                         tracker.maybe_emit();
                     });
-                    traversed_count += 1;
                     continue;
                 }
 
@@ -4252,8 +4849,6 @@ pub async fn index_album_worker(
                         tracker.maybe_emit();
                     });
                 }
-
-                traversed_count += 1;
             }
         }
     }
@@ -4320,13 +4915,27 @@ pub async fn index_album_worker(
     let finalize_started = Instant::now();
     clear_index_trace();
 
+    // Skip sweeping a recovery run that intentionally omitted a problematic path. Its prior
+    // record remains available until a clean full scan can establish what is truly missing.
+    let sweep_allowed = scan_complete && skip_file_path.is_none();
     // Delete files that are in DB but not in file system (Mark-and-Sweep)
-    if scan_complete {
+    if sweep_allowed {
         println!("Cleaning up removed files from DB for album {}", album_id);
-        let deleted_count = AFile::delete_unseen_in_album(album_id, current_scan_time).unwrap_or(0);
-        if deleted_count > 0 {
-            println!("Deleted {} stale records from DB.", deleted_count);
+        match AFile::delete_unseen_in_album(album_id, current_scan_time) {
+            Ok(deleted_count) if deleted_count > 0 => {
+                println!("Deleted {} stale records from DB.", deleted_count);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "Failed to clean stale records after complete scan of album {}: {}",
+                album_id, error
+            ),
         }
+    } else if scan_complete {
+        eprintln!(
+            "Skipping mark-and-sweep for recovered scan of album {} because a file was omitted",
+            album_id
+        );
     }
 
     // Pair Live Photo / Motion Photo files after scan

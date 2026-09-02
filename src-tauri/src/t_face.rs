@@ -726,6 +726,25 @@ struct FaceIndexWorkerResult {
     write: Option<(i64, i32, Vec<(String, Vec<f32>)>)>,
 }
 
+fn flush_face_scan_batch(
+    conn: &rusqlite::Connection,
+    batch: &mut Vec<(i64, i32, Vec<(String, Vec<f32>)>)>,
+    total_faces: &mut usize,
+) -> Result<(), String> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let result = t_sqlite::Face::apply_scan_batch_with_conn(conn, batch);
+    batch.clear();
+    match result {
+        Ok(inserted) => {
+            *total_faces += inserted;
+            Ok(())
+        }
+        Err(error) => Err(format!("Failed to apply face scan batch: {}", error)),
+    }
+}
+
 pub fn run_face_indexing(
     app_handle: AppHandle,
     face_state: FaceState,
@@ -735,6 +754,9 @@ pub fn run_face_indexing(
     cluster_epsilon: Option<f32>,
     cluster_mode: Option<String>,
 ) -> Result<(), String> {
+    // Acquire before spawning so a library switch cannot slip between this command and the
+    // worker's first current-library database access.
+    let library_guard = crate::t_utils::FaceIndexGuard::acquire()?;
     let cancel_token = cancel_token_struct.0.clone();
     let status_token = status_token_struct.0.clone();
     let progress_token = progress_token_struct.0.clone();
@@ -764,6 +786,7 @@ pub fn run_face_indexing(
     }
 
     tauri::async_runtime::spawn(async move {
+        let _library_guard = library_guard;
         // 1. Initialization
         let reset_status = || {
             *t_common::lock_mutex(&status_token) = false;
@@ -996,17 +1019,7 @@ pub fn run_face_indexing(
 
         let mut write_batch: Vec<(i64, i32, Vec<(String, Vec<f32>)>)> =
             Vec::with_capacity(write_batch_size);
-        let flush_writes = |batch: &mut Vec<(i64, i32, Vec<(String, Vec<f32>)>)>,
-                            total_faces: &mut usize| {
-            if batch.is_empty() {
-                return;
-            }
-            match t_sqlite::Face::apply_scan_batch_with_conn(&db_conn, batch) {
-                Ok(n) => *total_faces += n,
-                Err(e) => eprintln!("Failed to apply face scan batch: {}", e),
-            }
-            batch.clear();
-        };
+        let mut write_error: Option<String> = None;
 
         loop {
             let result = match result_rx.recv() {
@@ -1019,10 +1032,19 @@ pub fn run_face_indexing(
             }
 
             current += 1;
-            if let Some(write) = result.write {
-                write_batch.push(write);
-                if write_batch.len() >= write_batch_size {
-                    flush_writes(&mut write_batch, &mut total_faces);
+            if write_error.is_none() {
+                if let Some(write) = result.write {
+                    write_batch.push(write);
+                    if write_batch.len() >= write_batch_size {
+                        if let Err(error) =
+                            flush_face_scan_batch(&db_conn, &mut write_batch, &mut total_faces)
+                        {
+                            eprintln!("{}", error);
+                            write_error = Some(error);
+                            *t_common::lock_mutex(&cancel_token) = true;
+                            cancelled = true;
+                        }
+                    }
                 }
             }
 
@@ -1055,16 +1077,38 @@ pub fn run_face_indexing(
         }
         while let Ok(result) = result_rx.try_recv() {
             current += 1;
-            if let Some(write) = result.write {
-                write_batch.push(write);
+            if write_error.is_none() {
+                if let Some(write) = result.write {
+                    write_batch.push(write);
+                }
             }
         }
-        flush_writes(&mut write_batch, &mut total_faces);
+        if write_error.is_none() {
+            if let Err(error) = flush_face_scan_batch(&db_conn, &mut write_batch, &mut total_faces)
+            {
+                eprintln!("{}", error);
+                write_error = Some(error);
+            }
+        }
 
         {
             let mut progress = t_common::lock_mutex(&progress_token);
             progress.current = current.min(total_files);
             progress.faces_found = total_faces;
+        }
+
+        if let Some(error) = write_error {
+            let _ = app_handle.emit(
+                "face_index_finished",
+                serde_json::json!({
+                    "total_faces": total_faces,
+                    "total_persons": 0,
+                    "cancelled": false,
+                    "error": error
+                }),
+            );
+            reset_status();
+            return;
         }
 
         if *t_common::lock_mutex(&cancel_token) {
@@ -1140,15 +1184,15 @@ pub fn run_face_indexing(
                 .err()
                 .map(|e| e.starts_with("cancelled"))
                 .unwrap_or(false);
-        let total_persons = match cluster_result {
-            Ok(count) => count,
+        let (total_persons, cluster_error) = match cluster_result {
+            Ok(count) => (count, None),
             Err(e) if e.starts_with("cancelled") => {
                 eprintln!("Clustering cancelled: {}", e);
-                0
+                (0, None)
             }
             Err(e) => {
                 eprintln!("Clustering failed: {}", e);
-                0
+                (0, Some(e))
             }
         };
 
@@ -1158,7 +1202,8 @@ pub fn run_face_indexing(
             serde_json::json!({
                 "total_faces": total_faces,
                 "total_persons": total_persons,
-                "cancelled": cancelled_during_cluster
+                "cancelled": cancelled_during_cluster,
+                "error": cluster_error
             }),
         );
         reset_status();

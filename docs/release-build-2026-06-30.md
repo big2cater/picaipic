@@ -1,5 +1,9 @@
 ﻿# Release Build - 2026-06-30
 
+> Historical snapshot for the former Lap 0.2.4 build. Current PicAiPic v1.1.0
+> Windows packaging uses `scripts/package_windows.ps1` / `build-exe.bat`; see
+> `docs/guide/fx-theme-runtime-compatibility.md` and `.mex/patterns/release-build.md`.
+
 ## Command
 
 Built from:

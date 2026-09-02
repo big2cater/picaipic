@@ -26,6 +26,31 @@ export const useConfigStore = defineStore('configStore', {
       mode: 'info',               // right panel mode ('info' | 'dedup')
     },
 
+    // ComfyUI server integration. The server is user-managed (desktop build, 一键包,
+    // or a remote box); we only talk HTTP to whatever address they point us at.
+    comfy: {
+      serverUrl: 'http://127.0.0.1:8188',
+      // Saved API-format workflows: [{ id, name, note, workflow }]
+      workflows: [],
+      // Pause between images during a batch run, so ComfyUI can release VRAM and reload
+      // models before the next one starts. Back-to-back runs are what make the second
+      // image run out of memory. 0 disables the wait.
+      cooldownSecs: 2,
+    },
+
+    dedup: {
+      // Related Photos grouping strictness: 0=strict, 1=normal, 2=loose.
+      // Independent of the AI-search similarity threshold ("Find Similar Photos"),
+      // because the panel groups by perceptual-hash distance, not by embedding score.
+      similarGrouping: 1,
+    },
+
+    // Third-party AI plugin host UI. When hidden, plugin menus and the Settings
+    // management panels disappear (ComfyUI settings are separate and stay visible).
+    aiPlugin: {
+      hidden: false,
+    },
+
     infoPanel: {
       showPreview: true,         // show preview thumbnail
       previewMode: 'thumbnail',  // preview section mode ('thumbnail' | 'histogram')
