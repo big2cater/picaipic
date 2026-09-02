@@ -108,6 +108,4 @@ It does **not** re-thumbnail or re-embed the whole album. Use a normal album sca
 
 ## For developers
 
-- Runbook: `.mex/patterns/change-live-photo.md`
-- Progress notes: `docs/guide/picaipic-progress.md`, `docs/guide/目前的开发情况.md`
 - Schema: library DB `PRAGMA user_version` ≥ 6; columns `content_id`, `paired_file_id`, `live_photo_type`
