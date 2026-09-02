@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="PicAiPic Logo" width="120" style="border-radius: 20px">
   <h1>PicAiPic - 私人本地照片管理器</h1>
-  <h3>适用于 Windows 和 Linux 的本地优先桌面照片管理工具。</h3>
+  <h3>本地优先桌面照片管理器，Windows 为完整验证平台；Linux 构建为实验性、尚未完全验证。</h3>
   <p>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/v/release/big2cater/picaipic" alt="GitHub release"></a>
     <a href="https://github.com/big2cater/picaipic/releases"><img src="https://img.shields.io/github/downloads/big2cater/picaipic/total" alt="GitHub all releases"></a>
@@ -24,7 +24,7 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 | 平台 | 安装包 | 备注 |
 | :-- | :-- | :-- |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | 未签名 — 如果 SmartScreen 阻止下载，请点击**仍要保留** |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | 适用于 Debian 系发行版（Ubuntu、Debian、Linux Mint 等） |
+| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | 实验性构建，适用于 Debian 系发行版（Ubuntu、Debian、Linux Mint 等）——**尚未完全验证** |
 
 ## 界面预览
 
@@ -72,7 +72,7 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 - **Live Photo / Motion Photo**：Apple 图+视频配对、Google 内嵌 MP4、HEIC 容器视频；长按预览、导出/转换、确认后的关键帧替换与元数据修复。详见 [Live Photo 指南](../docs/guide/live-photo.md)。
 - **60+ 媒体格式**：通过 LibRaw、libheif、libjpeg-turbo、jxl-oxide、FFmpeg 与 Rust codec 支持图片、RAW 和视频。
 - **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效、GPU 上限感知的 WebGL 渲染，以及集显/高 DPI Windows 设备上的可见 CSS 照片回退。
-- **仅发布 Windows 与 Linux**：Windows x64/ARM64、Linux x86_64/ARM64。
+- **Windows 为完整验证的平台**（x64/ARM64 包）。Linux 包（x86_64/ARM64）已构建，但属于**实验性，尚未完全验证**。
 
 ## 当前开发状态
 
