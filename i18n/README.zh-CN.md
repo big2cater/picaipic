@@ -15,6 +15,7 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 它直接使用现有文件夹，索引、缩略图、元数据、语义搜索、人脸处理与编辑均在本机完成，不要求云账号或上传媒体。
 
 - 演示视频: [https://youtu.be/RbKqNKhbVUs](https://youtu.be/RbKqNKhbVUs)
+- 作者主页: [https://big2cater.github.io/](https://big2cater.github.io/)
 - 隐私策略: [PRIVACY.md](../PRIVACY.md)
 
 ## 下载 PicAiPic

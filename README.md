@@ -15,6 +15,7 @@ English | [简体中文](i18n/README.zh-CN.md)
 PicAiPic is a local-first photo manager for browsing family albums, finding old photos quickly, and managing large personal media libraries offline.
 It works directly with your existing folders and keeps indexing, thumbnails, metadata, semantic search, face processing, and editing on your own computer. No cloud account or media upload is required.
 
+- Author's homepage: [https://big2cater.github.io/](https://big2cater.github.io/)
 - Privacy: [PRIVACY.md](PRIVACY.md)
 
 ## Download PicAiPic
