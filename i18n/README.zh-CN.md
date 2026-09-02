@@ -14,7 +14,6 @@
 PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览家庭相册、快速找回旧照片，并离线管理庞大的个人多媒体库。
 它直接使用现有文件夹，索引、缩略图、元数据、语义搜索、人脸处理与编辑均在本机完成，不要求云账号或上传媒体。
 
-- 官方网站: [https://big2cater.github.io/picaipic/](https://big2cater.github.io/picaipic/)
 - 演示视频: [https://youtu.be/RbKqNKhbVUs](https://youtu.be/RbKqNKhbVUs)
 - 隐私策略: [PRIVACY.md](../PRIVACY.md)
 
@@ -54,12 +53,12 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 - **智能相册**：all/any 组合规则、日期、尺寸、人物、相机/镜头与排序。
 - **集合与去重**：不移动原文件的手动集合，以及精确哈希/视觉相似去重。
 
-### 本地 AI 与插件
+### 本地 AI 与外部工具
 
 - **本机语义搜索**：中英文文本搜索、找相似图、智能标签与 512 维本地图像向量。
 - **人脸检测与聚类**：本地 ONNX 模型与大规模近邻支持。
-- **独立 AI 插件**：签名包、发布者信任、权限、bearer token、运行时/模型绑定、输入 staging、进度取消与受控结果导入。
-- **生命周期联动**：SA-LUT 等插件动作只在托管运行时可达时出现。
+- **ComfyUI 集成**：导入已保存的工作流（API 格式导出，或一键转换的 UI 格式图），对你自己的 ComfyUI 服务器（桌面版或远程机器）运行——选中照片上传、提交、轮询，完成后把结果图下载回图库，以工作流派生的可读文件名导入；支持串行批量、可中断取消和可配置的 VRAM 冷却，第一张结果会自动滚动到视野中。
+- **可选第三方 AI 插件**（可在设置中完全隐藏）：签名包、发布者信任、权限、bearer token、运行时/模型绑定、输入 staging、进度取消与受控结果导入。
 
 ### 编辑与创作
 
@@ -72,7 +71,7 @@ PicAiPic 是一款本地优先的照片管理器，旨在帮助您轻松浏览�
 
 - **Live Photo / Motion Photo**：Apple 图+视频配对、Google 内嵌 MP4、HEIC 容器视频；长按预览、导出/转换、确认后的关键帧替换与元数据修复。详见 [Live Photo 指南](../docs/guide/live-photo.md)。
 - **60+ 媒体格式**：通过 LibRaw、libheif、libjpeg-turbo、jxl-oxide、FFmpeg 与 Rust codec 支持图片、RAW 和视频。
-- **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效、GPU 上限感知的 WebGL 渲染，以及集显/高 DPI Windows 设备上的可见 CSS 照片回退。详见[动态主题运行兼容说明](../docs/guide/fx-theme-runtime-compatibility.md)。
+- **五套主题**：默认、复古、CMYK、黑洞、赛博朋克；动态主题带有受控的最大化窗口空闲特效、GPU 上限感知的 WebGL 渲染，以及集显/高 DPI Windows 设备上的可见 CSS 照片回退。
 - **仅发布 Windows 与 Linux**：Windows x64/ARM64、Linux x86_64/ARM64。
 
 ## 当前开发状态
@@ -82,14 +81,14 @@ PicAiPic 当前处于 `v1.1.0` 开发线。仓库可能已有私有多架构 dra
 - 大图库滚动优化：取消过期视口任务、缩略图/metadata 请求去重、卡片菜单懒挂载、虚拟列表使用稳定的 GPU 定位
 - 暖重扫优化：扫描内 folder/file-state cache 与有界时间戳事务；10,343 个未变化文件从 10.164 秒降至 8.786 秒
 - 本地 CLIP batch embedding、受限预处理预取、启动矩阵减内存，以及 11 万向量默认精确搜索实机验证
-- AI 插件包签名、发布者信任、bearer token、权限/安装流程、运行时冲突门禁与输入文件 staging
-- SA-LUT 等插件动作只在托管插件可达时显示；启动/停止/重启状态会跨窗口同步
+- AI 插件包签名、发布者信任、bearer token、权限/安装流程、运行时冲突门禁与输入文件 staging；整个插件功能可在设置中用开关完全隐藏
+- ComfyUI 集成：工作流导入（API/UI 格式识别）、对用户自管服务器串行运行/批量/取消、可读结果文件名与首个结果自动定位
 - 裁剪、拼图、批处理、冲印、追色、LUT/照片格调、相框、智能相册、集合和 Live/Motion Photo 等内置流程
 - Windows 安装包、Linux/共享 PNG、标题栏、欢迎/关于页和文档站统一使用新版应用图标
 - 动态主题跨电脑加固：主窗原生最大化同步、旧强度配置迁移、GPU 纹理/viewport 上限保护，以及黑洞/赛博朋克照片层的 CSS 失败回退
 - 发布范围收敛为 Windows/Linux；已删除 Android/iOS 资源和 macOS bundle/native bridge 文件
 
-下一阶段重点是 release 可执行文件回归、代表性冷导入/embedding profiling、插件签名密钥轮换/撤销设计，以及在默认 input staging 之上更强的网络/Linux 插件隔离。详见 [v1.1.0 发布说明](../docs/guide/release-notes/v1.1.0.md) 和 [开发进度看板](../docs/guide/picaipic-progress.md)。
+下一阶段重点是 release 可执行文件回归、代表性冷导入/embedding profiling 与插件签名密钥轮换/撤销设计。详见 [v1.1.0 发布说明](../docs/guide/release-notes/v1.1.0.md)。
 
 ## 卸载 PicAiPic
 
