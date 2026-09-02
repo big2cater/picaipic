@@ -6,14 +6,14 @@ hero:
   text: "Local-first, AI-powered Photo manager."
   tagline: "Built for family albums, photographers, and large local libraries."
   image:
-    src: /screenshots/lap-home-0.1.10_1.png
+    src: /screenshots/picaipic-v1.1-smart-tags.png
     alt: PicAiPic local photo library manager screenshot
   actions:
     - theme: brand
       text: Download
       link: https://github.com/big2cater/picaipic/releases/latest
     - theme: alt
-      text: What's New in v1.1.0
+      text: Release Notes
       link: /guide/release-notes/v1.1.0
     - theme: alt
       text: View on GitHub
@@ -32,6 +32,12 @@ features:
   - title: Local AI Search
     details: Find photos with text search, similar-image search, face clustering, and smart tags processed on-device.
     icon: 🧠
+  - title: ComfyUI Ready
+    details: Run your own ComfyUI workflows on selected photos — import saved workflows, batch-process, and import results back with readable names.
+    icon: 🎨
+  - title: Built-in Creative Tools
+    details: Crop presets, collage, batch processing, print layouts, photo frames, color match, and LUT photo styles — all offline.
+    icon: 🖌️
   - title: Built for Large Libraries
     details: Smooth browsing and organization across thousands of photos and videos in real-world collections.
     icon: ⚡
@@ -408,7 +414,7 @@ onBeforeUnmount(() => {
   .VPHero .image-container::before {
     top: 9%;
     left: -7%;
-    background-image: url('/screenshots/lap-home-0.1.10_2.png');
+    background-image: url('/screenshots/02 lap-ai-search.jpg');
     transform:
       rotateX(calc(10deg + var(--hero-tilt-y) * -2deg))
       rotateY(calc(22deg + var(--hero-tilt-x) * 4deg))
@@ -422,7 +428,7 @@ onBeforeUnmount(() => {
   .VPHero .image-container::after {
     right: -5%;
     bottom: 6%;
-    background-image: url('/screenshots/lap-home3.png');
+    background-image: url('/screenshots/03 lap-calendar.jpg');
     transform:
       rotateX(calc(2deg + var(--hero-tilt-y) * 2deg))
       rotateY(calc(-18deg + var(--hero-tilt-x) * 4deg))
